@@ -1,0 +1,13 @@
+name = "Zstandard"
+uuid = "1affa58d-55fd-4c2a-ac15-0c0ae7390835"
+version = "0.1.0"
+authors = ["Mark Kittisopikul <markkitt@gmail.com>"]
+
+[deps]
+CodecZstd = "6b39b394-51ab-5f42-8807-6242bab2b4c2"
+Test = "8dfed614-e22c-5e08-85e1-65c5234f0b40"
+XXHashNative = "e5d8e439-e7fa-4681-9c12-1c64bda517be"
+
+[compat]
+CodecZstd = "0.8.7"
+Test = "1.11.0"
