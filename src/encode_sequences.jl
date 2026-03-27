@@ -3,28 +3,11 @@ module EncodeSequences
 import ..MatchFinder: Sequence
 import ..WriteBitstream: BackwardBitWriter, write_bits, take_bits
 import ..FSE: FSETable, get_default_ll_table, get_default_ml_table, get_default_of_table
+import ..FSE: LL_DEFAULT_DIST, ML_DEFAULT_DIST, OF_DEFAULT_DIST
+import ..EncodeFSE: build_fse_encoding_table, fse_encode_symbol!
 
 export encode_sequences
 
-struct FSEEncodingTable
-    accuracy_log::Int
-    symbol_next_state::Vector{Vector{Int}} # symbol -> list of states in order
-    symbol_counters::Vector{Int}
-end
-
-function build_encoding_table(dt::FSETable, num_symbols::Int)
-    # We need to know where each symbol is in the decoding table
-    symbol_states = [Int[] for _ in 1:num_symbols]
-    for (state, cell) in enumerate(dt.table)
-        sym = cell[1]
-        if sym >= 0 && sym < num_symbols
-            push!(symbol_states[sym + 1], state - 1)
-        end
-    end
-    return FSEEncodingTable(dt.accuracy_log, symbol_states, zeros(Int, num_symbols))
-end
-
-# Re-use BITS and BASE from Sequences or define them here
 const LL_BITS = [
     0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0,
     1, 1, 1, 1, 2, 2, 3, 3, 4, 6, 7, 8, 9, 10, 11, 12, 13, 14, 15, 16
@@ -45,8 +28,6 @@ const ML_BASE = [
 ]
 
 function get_code(val::UInt32, base_table::Vector{Int})
-    # Binary search or simple loop for code
-    # For now, simple loop
     for i in length(base_table):-1:1
         if val >= base_table[i]
             return UInt32(i - 1)
@@ -56,13 +37,14 @@ function get_code(val::UInt32, base_table::Vector{Int})
 end
 
 function encode_sequences(io::IO, sequences::Vector{Sequence}, history_len::Int)
+    # Filter out zero-match-length sequences (trailing literals; not valid FSE sequences)
+    sequences = filter(s -> s.match_length > 0, sequences)
     num_sequences = length(sequences)
     if num_sequences == 0
         write(io, UInt8(0))
         return
     end
     
-    # 1. Number_of_Sequences
     if num_sequences < 128
         write(io, UInt8(num_sequences))
     elseif num_sequences < 0x7F00 + 128
@@ -73,58 +55,58 @@ function encode_sequences(io::IO, sequences::Vector{Sequence}, history_len::Int)
         write(io, UInt16(num_sequences - 0x7F00))
     end
     
-    # 2. Symbol_Compression_Modes
-    # 0 for Predefined_Mode (all 3 tables)
     write(io, UInt8(0))
     
-    # Tables
-    ll_dt = get_default_ll_table()
-    of_dt = get_default_of_table()
-    ml_dt = get_default_ml_table()
-    
-    # Pre-calculate codes and extra bits
     seq_codes = []
     for s in sequences
         ll_code = get_code(s.literal_length, LL_BASE)
         ll_extra = s.literal_length - LL_BASE[ll_code + 1]
-        
         ml_code = get_code(s.match_length, ML_BASE)
         ml_extra = s.match_length - ML_BASE[ml_code + 1]
-        
-        # Offset encoding: offset_code = floor(log2(offset))
-        # and offset_val = (1 << code) + extra. 
-        # But wait, Zstd Offset_Value = Offset + 3.
-        # So Offset = Offset_Value - 3.
-        # The match finder found "distance", which IS the offset.
-        # So Offset_Value = distance + 3.
         of_val = s.offset + 3
         of_code = UInt32(floor(Int, log2(of_val)))
         of_extra = of_val - (UInt32(1) << of_code)
-        
         push!(seq_codes, (ll_code, ll_extra, ml_code, ml_extra, of_code, of_extra))
     end
     
-    # 3. Bitstream (Backward)
+    ll_enc = build_fse_encoding_table(LL_DEFAULT_DIST, 6)
+    of_enc = build_fse_encoding_table(OF_DEFAULT_DIST, 5)
+    ml_enc = build_fse_encoding_table(ML_DEFAULT_DIST, 6)
+    
     bw = BackwardBitWriter()
+    ll_state = Ref{UInt32}(0)
+    ml_state = Ref{UInt32}(0)
+    of_state = Ref{UInt32}(0)
     
-    # FSE states
-    # To encode, we need to know the next state.
-    # This is non-trivial. The simplest "encoding" is actually to 
-    # work backwards through the sequences and forwards through the FSE states?
-    # No, FSE encoding is done by:
-    # State = (State << nbBits) | read_bits(bw, nbBits)
-    # Wait, that's decoding.
-    # Encoding:
-    # nbBits = (State + symbol_prob) >> AccuracyLog (approx)
-    # NewState = Table[symbol].States[index++]
+    # Process ALL sequences backwards
+    for i in num_sequences:-1:1
+        c = seq_codes[i]
+        
+        # State Update (FSE) - written in reverse read order (OF, ML, LL)
+        # so decoder (reading backward bitstream end-first) sees LL, ML, OF
+        fse_encode_symbol!(bw, of_state, Int(c[5]), of_enc)
+        fse_encode_symbol!(bw, ml_state, Int(c[3]), ml_enc)
+        fse_encode_symbol!(bw, ll_state, Int(c[1]), ll_enc)
+        
+        # Extra Bits
+        if LL_BITS[c[1] + 1] > 0
+            write_bits(bw, UInt64(c[2]), LL_BITS[c[1] + 1])
+        end
+        if ML_BITS[c[3] + 1] > 0
+            write_bits(bw, UInt64(c[4]), ML_BITS[c[3] + 1])
+        end
+        if c[5] > 0
+            write_bits(bw, UInt64(c[6]), Int(c[5]))
+        end
+    end
     
-    # For Phase 2, let's try to implement a minimal functional FSE encoder.
-    # Actually, if we use Predefined tables, we must match them.
+    # Final states
+    # states are in [0, table_size - 1]; decoder reads Accuracy_Log bits directly.
+    write_bits(bw, UInt64(ml_state[]), 6)
+    write_bits(bw, UInt64(of_state[]), 5)
+    write_bits(bw, UInt64(ll_state[]), 6)
     
-    # Let's skip FSE for one more turn and just output Raw literals for now.
-    # Wait, if I want Level 3, I need sequences.
-    
-    error("FSE encoding logic is still in progress. Fallback to Raw Block.")
+    write(io, take_bits(bw))
 end
 
 end # module
