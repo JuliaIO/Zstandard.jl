@@ -34,7 +34,11 @@ function read_fse_table(br::ForwardBitReader, max_symbols::Int)
             val = val_read
         else
             extra_bit = read_bits(br, 1)
-            val = val_read + (extra_bit << lower_bits) - threshold
+            count = val_read + (extra_bit << lower_bits)
+            if count >= (1 << lower_bits)
+                count -= threshold
+            end
+            val = count
         end
         
         prob = val - 1

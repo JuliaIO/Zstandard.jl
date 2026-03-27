@@ -1,8 +1,8 @@
 module EncodeFSE
 
-import ..WriteBitstream: BackwardBitWriter, write_bits
+import ..WriteBitstream: BackwardBitWriter, ForwardBitWriter, write_bits, flush_bits
 
-export FSEEncodingTable, build_fse_encoding_table, fse_encode_symbol!
+export FSEEncodingTable, build_fse_encoding_table, fse_encode_symbol!, write_fse_table
 
 struct FSEEncodingTable
     accuracy_log::Int
@@ -62,6 +62,64 @@ function fse_encode_symbol!(bw::BackwardBitWriter, state::Ref{UInt32}, sym::Int,
     nbBitsOut = (X_plus + table.deltaNbBits[sym_idx]) >> 16
     if nbBitsOut > 0; write_bits(bw, UInt64(state[] & ((UInt32(1) << nbBitsOut) - 1)), Int(nbBitsOut)) end
     state[] = UInt32(table.state_table[(X_plus >> nbBitsOut) + table.deltaFindState[sym_idx] + 1])
+end
+
+# Inverse of FSE.read_fse_table. Writes a byte-aligned FSE table description to fw.
+# probabilities must not contain trailing zeros; all interior zeros must be encodable.
+function write_fse_table(fw::ForwardBitWriter, probabilities::Vector{Int}, accuracy_log::Int)
+    write_bits(fw, UInt32(accuracy_log - 5), 4)
+    remaining = 1 << accuracy_log
+    i = 1
+    while remaining > 0 && i <= length(probabilities)
+        prob = probabilities[i]
+        max_value = remaining + 1
+
+        bits_to_read = 1
+        while (1 << bits_to_read) <= max_value; bits_to_read += 1 end
+        if max_value == 1; bits_to_read = 1 end
+        lower_bits = bits_to_read - 1
+        threshold = (1 << bits_to_read) - max_value - 1
+
+        val = prob + 1  # prob=-1 → val=0; prob=k → val=k+1
+
+        if lower_bits == 0
+            write_bits(fw, UInt32(val), 1)
+        elseif val < threshold
+            write_bits(fw, UInt32(val), lower_bits)
+        elseif val < (1 << lower_bits)
+            # Long code, extra_bit=0: val_read = val
+            write_bits(fw, UInt32(val), lower_bits)
+            write_bits(fw, UInt32(0), 1)
+        else
+            # Long code, extra_bit=1: val_read = val - (1<<lower_bits) + threshold
+            val_read = val - (1 << lower_bits) + threshold
+            write_bits(fw, UInt32(val_read), lower_bits)
+            write_bits(fw, UInt32(1), 1)
+        end
+
+        remaining -= (prob == -1) ? 1 : prob
+
+        if prob == 0
+            # Count additional consecutive zeros to encode as run-length
+            j = i + 1
+            extra_zeros = 0
+            while j <= length(probabilities) && probabilities[j] == 0
+                extra_zeros += 1; j += 1
+            end
+            # Write 2-bit chunks (repeat_flag); value 3 means "continue reading"
+            written = 0
+            while true
+                chunk = min(extra_zeros - written, 3)
+                write_bits(fw, UInt32(chunk), 2)
+                written += chunk
+                chunk < 3 && break
+            end
+            i = j
+        else
+            i += 1
+        end
+    end
+    flush_bits(fw)  # byte-align
 end
 
 end # module
