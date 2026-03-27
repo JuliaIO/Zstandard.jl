@@ -50,9 +50,10 @@ end
 
 function fse_encode_symbol!(bw::BackwardBitWriter, state::Ref{UInt32}, sym::Int, table::FSEEncodingTable)
     sym_idx = sym + 1
-    if state[] == 0
+    if state[] == typemax(UInt32)
+        # Initialization: set initial state for the last sequence, write no bits.
+        # Valid states are in [0, table_size-1], so typemax(UInt32) is a safe sentinel.
         freq = table.symbol_probs[sym_idx] == -1 ? 1 : table.symbol_probs[sym_idx]
-        # state[] must be in [0, table_size-1]
         state[] = UInt32(table.state_table[table.deltaFindState[sym_idx] + freq + 1])
         return
     end

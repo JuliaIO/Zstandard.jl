@@ -53,6 +53,7 @@ include("matchfinder.jl")
 using .MatchFinder: find_sequences
 
 include("write_bitstream.jl")
+include("encode_fse.jl")
 include("encode_huffman.jl")
 include("encode_sequences.jl")
 

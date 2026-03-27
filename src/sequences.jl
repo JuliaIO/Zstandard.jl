@@ -2,6 +2,7 @@ module Sequences
 
 import ..Bitstream: ForwardBitReader, BackwardBitReader, read_bits, align_to_byte
 import ..FSE: FSETable, get_default_ll_table, get_default_ml_table, get_default_of_table, read_fse_table, build_fse_table
+import ..FSE: LL_DEFAULT_DIST, ML_DEFAULT_DIST, OF_DEFAULT_DIST
 
 export decode_sequences
 
@@ -40,10 +41,10 @@ function decode_sequences(sequences_data::Vector{UInt8}, literals::Vector{UInt8}
     
     num_sequences = 0
     if byte0 < 128
-        num_sequences = byte0
+        num_sequences = Int(byte0)
     elseif byte0 < 255
         byte1 = read(io, UInt8)
-        num_sequences = (Int(byte0 - 128) << 8) + byte1
+        num_sequences = (Int(byte0 - 128) << 8) + Int(byte1)
     else
         byte1 = read(io, UInt8)
         byte2 = read(io, UInt8)
@@ -61,9 +62,7 @@ function decode_sequences(sequences_data::Vector{UInt8}, literals::Vector{UInt8}
     if ll_mode == 0 # Predefined
         ctx.ll_table = get_default_ll_table()
     elseif ll_mode == 1 # RLE
-        # RFC: "followed by a single byte ... corresponding to the fixed symbol"
         rle_val = read(io, UInt8)
-        # Create a table with 1 symbol and accuracy_log 0
         ctx.ll_table = FSETable(0, [(Int(rle_val), 0, 0)])
     elseif ll_mode == 2 # FSE Compressed
         probs, acc = read_fse_table(fbr, 36)
@@ -107,12 +106,6 @@ function decode_sequences(sequences_data::Vector{UInt8}, literals::Vector{UInt8}
     pos = position(io)
     remaining_data = sequences_data[pos+1:end]
     
-    if isempty(remaining_data)
-        # This can happen if all modes are RLE and num_sequences > 0
-        # Actually we still need to initialize states?
-        # If accuracy_log is 0, no bits are read.
-    end
-    
     bbr = BackwardBitReader(remaining_data)
     
     ll_table = ctx.ll_table
@@ -124,7 +117,9 @@ function decode_sequences(sequences_data::Vector{UInt8}, literals::Vector{UInt8}
     of_state = (of_table.accuracy_log > 0) ? Int(read_bits(bbr, of_table.accuracy_log)) : 0
     ml_state = (ml_table.accuracy_log > 0) ? Int(read_bits(bbr, ml_table.accuracy_log)) : 0
     
-    output = copy(history)
+    # history is the data from previous blocks in the frame
+    # output will start with newly decoded data
+    output = UInt8[]
     lit_pos = 1
     
     for i in 1:num_sequences
@@ -138,12 +133,14 @@ function decode_sequences(sequences_data::Vector{UInt8}, literals::Vector{UInt8}
         ml_val = ML_BASE[ml_code + 1] + Int(read_bits(bbr, ML_BITS[ml_code + 1]))
         ll_val = LL_BASE[ll_code + 1] + Int(read_bits(bbr, LL_BITS[ll_code + 1]))
         
+        # Copy literals
         if ll_val > 0
             append!(output, literals[lit_pos:lit_pos+ll_val-1])
             lit_pos += ll_val
         end
         
-        offset = offset_val
+        # Determine actual offset
+        offset = 0
         if offset_val > 3
             offset = offset_val - 3
             ctx.rep_offsets[3] = ctx.rep_offsets[2]
@@ -174,9 +171,22 @@ function decode_sequences(sequences_data::Vector{UInt8}, literals::Vector{UInt8}
             end
         end
         
-        match_start = length(output) - offset + 1
+        # Copy match from history OR output
+        # Match can span across history and current output
         for m in 1:ml_val
-            push!(output, output[match_start + m - 1])
+            # The offset is distance from the end of CURRENT output
+            # history: [H1, H2, ..., HM]
+            # output: [O1, O2, ..., OK]
+            # Total data: [H1, ..., HM, O1, ..., OK]
+            # Current pos in total data: HM + K
+            # Match pos in total data: (HM + K) - offset + 1
+            
+            target_idx = (length(history) + length(output)) - offset + 1
+            if target_idx <= length(history)
+                push!(output, history[target_idx])
+            else
+                push!(output, output[target_idx - length(history)])
+            end
         end
         
         if i < num_sequences
@@ -190,7 +200,7 @@ function decode_sequences(sequences_data::Vector{UInt8}, literals::Vector{UInt8}
         append!(output, literals[lit_pos:end])
     end
     
-    return output[length(history)+1:end]
+    return output
 end
 
 end # module

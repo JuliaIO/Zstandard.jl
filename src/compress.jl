@@ -4,6 +4,7 @@ import ..Zstandard: MAGIC_NUMBER
 import ..Frames: FrameHeader
 import ..MatchFinder: find_sequences, Sequence
 import ..EncodeSequences: encode_sequences
+import ..EncodeHuffman: build_huffman_encoder, encode_huffman_literals
 using XXHashNative
 
 export compress
@@ -19,6 +20,8 @@ function write_frame_header(io::IO, data_len::Int)
     elseif fcs_flag == 3; write(io, UInt64(data_len)) end
 end
 
+const MAX_BLOCK_SIZE = 128 * 1024
+
 function compress(data::AbstractVector{UInt8}; level::Int=3)
     io = IOBuffer()
     write_frame_header(io, length(data))
@@ -26,14 +29,38 @@ function compress(data::AbstractVector{UInt8}; level::Int=3)
     hash_log = 14
     search_depth = (eff_level == 1) ? 4 : (eff_level == 2) ? 16 : 64
     step = (eff_level < 0) ? (1 - eff_level) : 1
-    sequences = find_sequences(data, hash_log=hash_log, search_depth=search_depth, step=step)
-    if isempty(sequences) || (length(sequences) == 1 && sequences[1].match_length == 0)
-        write_raw_blocks_content(io, data)
-    elseif length(data) > 128 * 1024
-        write_raw_blocks_content(io, data)
+
+    if isempty(data)
+        write_block_header(io, true, 0, 0)
     else
-        write_compressed_block_content(io, data, sequences)
+        pos = 1
+        while pos <= length(data)
+            chunk_end = min(pos + MAX_BLOCK_SIZE - 1, length(data))
+            is_last = (chunk_end == length(data))
+            chunk = view(data, pos:chunk_end)
+
+            sequences = find_sequences(chunk, hash_log=hash_log, search_depth=search_depth, step=step)
+            has_seqs = !isempty(sequences) && !(length(sequences) == 1 && sequences[1].match_length == 0)
+
+            if has_seqs
+                block_io = IOBuffer()
+                write_compressed_block_body(block_io, chunk, sequences)
+                block_bytes = take!(block_io)
+                if length(block_bytes) < length(chunk)
+                    write_block_header(io, is_last, 2, length(block_bytes))
+                    write(io, block_bytes)
+                else
+                    write_block_header(io, is_last, 0, length(chunk))
+                    write(io, chunk)
+                end
+            else
+                write_block_header(io, is_last, 0, length(chunk))
+                write(io, chunk)
+            end
+            pos = chunk_end + 1
+        end
     end
+
     state = XXH64State()
     update!(state, data)
     write(io, UInt32(digest!(state) & 0xFFFFFFFF))
@@ -43,7 +70,6 @@ end
 compress(data::AbstractString; level::Int=3) = compress(codeunits(data), level=level)
 
 function write_raw_blocks_content(io::IO, data::AbstractVector{UInt8})
-    MAX_BLOCK_SIZE = 128 * 1024
     if isempty(data)
         write_block_header(io, true, 0, 0)
     else
@@ -57,13 +83,17 @@ function write_raw_blocks_content(io::IO, data::AbstractVector{UInt8})
     end
 end
 
-function write_compressed_block_content(io::IO, data::AbstractVector{UInt8}, sequences::Vector{Sequence})
+function write_compressed_block_body(io::IO, data::AbstractVector{UInt8}, sequences::Vector{Sequence})
     literals = gather_literals(data, sequences)
+    write_literals_section(io, literals)
+    encode_sequences(io, sequences, length(data))
+end
+
+function write_compressed_block_content(io::IO, is_last::Bool, data::AbstractVector{UInt8}, sequences::Vector{Sequence})
     block_io = IOBuffer()
-    write_raw_literals_section(block_io, literals)
-    encode_sequences(block_io, sequences, length(data))
+    write_compressed_block_body(block_io, data, sequences)
     block_data = take!(block_io)
-    write_block_header(io, true, 2, length(block_data))
+    write_block_header(io, is_last, 2, length(block_data))
     write(io, block_data)
 end
 
@@ -80,6 +110,45 @@ function gather_literals(data::AbstractVector{UInt8}, sequences::Vector{Sequence
         pos += ll + Int(seq.match_length)
     end
     return literals
+end
+
+function write_literals_section(io::IO, literals::AbstractVector{UInt8})
+    if isempty(literals)
+        write_raw_literals_section(io, literals)
+        return
+    end
+    if all(==(literals[1]), literals)
+        write_rle_literals_section(io, literals)
+        return
+    end
+    enc = build_huffman_encoder(literals)
+    if enc !== nothing
+        huff_io = IOBuffer()
+        ok = encode_huffman_literals(huff_io, literals, enc)
+        if ok
+            huff_bytes = take!(huff_io)
+            if length(huff_bytes) < length(literals)
+                write(io, huff_bytes)
+                return
+            end
+        end
+    end
+    write_raw_literals_section(io, literals)
+end
+
+function write_rle_literals_section(io::IO, literals::AbstractVector{UInt8})
+    ll = length(literals)
+    if ll < 32
+        write(io, UInt8(0x01 | (0x00 << 2) | (ll << 3)))
+    elseif ll < 4096
+        write(io, UInt8(0x01 | (0x01 << 2) | ((ll & 0x0F) << 4)))
+        write(io, UInt8(ll >> 4))
+    else
+        write(io, UInt8(0x01 | (0x03 << 2) | ((ll & 0x0F) << 4)))
+        write(io, UInt8((ll >> 4) & 0xFF))
+        write(io, UInt8(ll >> 12))
+    end
+    write(io, literals[1])
 end
 
 function write_raw_literals_section(io::IO, literals::AbstractVector{UInt8})

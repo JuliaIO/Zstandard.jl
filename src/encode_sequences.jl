@@ -74,9 +74,9 @@ function encode_sequences(io::IO, sequences::Vector{Sequence}, history_len::Int)
     ml_enc = build_fse_encoding_table(ML_DEFAULT_DIST, 6)
     
     bw = BackwardBitWriter()
-    ll_state = Ref{UInt32}(0)
-    ml_state = Ref{UInt32}(0)
-    of_state = Ref{UInt32}(0)
+    ll_state = Ref{UInt32}(typemax(UInt32))
+    ml_state = Ref{UInt32}(typemax(UInt32))
+    of_state = Ref{UInt32}(typemax(UInt32))
     
     # Process ALL sequences backwards
     for i in num_sequences:-1:1

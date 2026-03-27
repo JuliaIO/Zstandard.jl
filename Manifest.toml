@@ -2,7 +2,7 @@
 
 julia_version = "1.12.5"
 manifest_format = "2.0"
-project_hash = "f2b6513e9ce21d4a34c09b78bb9ba4babec89f86"
+project_hash = "4345a92d49b13cfa0485f56fc9131e32c8eb1ed4"
 
 [[deps.Artifacts]]
 uuid = "56f22d72-fd6d-98f1-02f0-08ddc0907c33"
@@ -146,7 +146,7 @@ uuid = "e5d8e439-e7fa-4681-9c12-1c64bda517be"
 version = "1.0.1"
 
 [[deps.Zstandard]]
-deps = ["CodecZstd", "Test"]
+deps = ["Test", "XXHashNative"]
 path = "."
 uuid = "1affa58d-55fd-4c2a-ac15-0c0ae7390835"
 version = "0.1.0"

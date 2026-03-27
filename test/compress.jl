@@ -40,3 +40,48 @@ using CodecZstd
     comp_fast = compress(data4, level=-1)
     @test decompress(comp_fast) == data4
 end
+
+@testset "RLE Literals" begin
+    # All same byte → RLE literals section
+    data_rle = fill(0x42, 200)
+    comp_rle = compress(data_rle)
+    @test decompress(comp_rle) == data_rle
+    @test transcode(ZstdDecompressor, comp_rle) == data_rle
+
+    # Large RLE (>4096 bytes to exercise 3-byte header)
+    data_rle_large = fill(0xAB, 5000)
+    comp_rle_large = compress(data_rle_large)
+    @test decompress(comp_rle_large) == data_rle_large
+    @test transcode(ZstdDecompressor, comp_rle_large) == data_rle_large
+end
+
+@testset "Huffman Literal Compression" begin
+    # ASCII text with skewed distribution — Huffman should help
+    data_text = Vector{UInt8}(repeat("the quick brown fox jumps over the lazy dog ", 50))
+    comp_text = compress(data_text)
+    @test decompress(comp_text) == data_text
+    @test transcode(ZstdDecompressor, comp_text) == data_text
+    # Compression ratio should be better than raw
+    @test length(comp_text) < length(data_text)
+
+    # Large ASCII text (>1KB literals triggers 4-stream Huffman)
+    data_large_text = Vector{UInt8}(repeat("hello world this is a test of huffman compression ", 100))
+    comp_large_text = compress(data_large_text)
+    @test decompress(comp_large_text) == data_large_text
+    @test transcode(ZstdDecompressor, comp_large_text) == data_large_text
+end
+
+@testset "Large Data Compression (>128KB)" begin
+    # Repetitive large data — should compress across multiple blocks
+    data_rep = repeat(b"abcdefgh", 20 * 1024)  # 160 KB
+    comp_rep = compress(data_rep)
+    @test decompress(comp_rep) == data_rep
+    @test transcode(ZstdDecompressor, comp_rep) == data_rep
+    @test length(comp_rep) < length(data_rep)
+
+    # Random large data — raw blocks fallback
+    data_rand = rand(UInt8, 300 * 1024)
+    comp_rand = compress(data_rand)
+    @test decompress(comp_rand) == data_rand
+    @test transcode(ZstdDecompressor, comp_rand) == data_rand
+end

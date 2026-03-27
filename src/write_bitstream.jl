@@ -33,11 +33,10 @@ function flush_bits(bw::ForwardBitWriter)
     end
 end
 
-# Backward bit writing is more complex. 
-# Zstd Huffman and Sequences use a backward bitstream.
-# The simplest way to implement it is to write into a buffer and then reverse?
-# No, Zstd says "the last byte contains a sentinel bit".
-# Let's use a buffer and fill it from the end.
+# Correct Zstd Backward Bitstream Writer
+# Bits of a value are read from MSB to LSB.
+# In the bitstream, they appear from the end towards the beginning.
+# The first bit read (MSB) is the one closest to the end (sentinel).
 
 mutable struct BackwardBitWriter
     buffer::Vector{UInt8}
@@ -46,30 +45,30 @@ mutable struct BackwardBitWriter
 end
 
 function BackwardBitWriter()
-    # We'll grow the buffer as needed, but write backwards? 
-    # Actually, let's just collect all bits and bytes and then reverse at the end.
-    # OR, use a fixed size buffer and fill from the end.
     return BackwardBitWriter(UInt8[], 0, 0)
 end
 
 function write_bits(bw::BackwardBitWriter, val::UInt64, n::Int)
-    # Bits are added such that the FIRST bit added is the MSB of the code in the final stream?
-    # No, for Zstd: "The bitstream is read from the end... the first bit read is the MSB".
-    # This means the LAST bit written (in forward time) is the FIRST bit read (in backward time).
-    # So the bits of a code should be added to the container.
+    if n == 0; return; end
     
-    # Let's push bits into the container.
-    # When we have >= 8 bits, we push a byte to the buffer.
-    # n=3, val=0b101. We want 1 to be the first bit read.
-    # If we read backward, the first bit read is the one closest to the sentinel.
+    # We add bits to the LSB side of our container.
+    # We want bits of 'val' to be added such that MSB is "closest to the end".
+    # Since we fill bytes and push them to buffer, "closest to the end" means
+    # highest bit index in the last byte.
+    
+    # Let's add bits from LSB to MSB.
+    # When we push a byte, the bits we added EARLIER are at LOWER indices.
+    # The bits we add LATER are at HIGHER indices.
+    # This matches the decoder: it reads from sentinel (highest index) towards LSB.
+    # So the bit written LAST should be the one read FIRST.
+    # The bit read FIRST is the MSB of the value.
+    # So the MSB should be written LAST.
     
     for i in 0:n-1
-        # Push bits of val from LSB to MSB? 
-        # If val=0b101 (n=3), bits are 1, 0, 1.
-        # If we push them in this order, and read them back, we get 1, 0, 1.
         bit = (val >> i) & 0x01
-        bw.bit_container = (bw.bit_container << 1) | bit
+        bw.bit_container |= (UInt64(bit) << bw.container_bits)
         bw.container_bits += 1
+        
         if bw.container_bits == 8
             push!(bw.buffer, UInt8(bw.bit_container))
             bw.bit_container = 0
@@ -79,23 +78,13 @@ function write_bits(bw::BackwardBitWriter, val::UInt64, n::Int)
 end
 
 function take_bits(bw::BackwardBitWriter)
-    # Finalize
-    # Add sentinel bit
-    bw.bit_container = (bw.bit_container << 1) | 1
+    # Add sentinel bit (1) at the next available bit position.
+    bw.bit_container |= (UInt64(1) << bw.container_bits)
     bw.container_bits += 1
-    # Pad to byte
-    while bw.container_bits < 8
-        bw.bit_container <<= 1
-        bw.container_bits += 1
-    end
+    
+    # Pad remaining bits of the byte with 0 (already 0)
     push!(bw.buffer, UInt8(bw.bit_container))
     
-    # The buffer now contains bytes in the order they were filled.
-    # But since it's a backward bitstream, the first byte written 
-    # is actually the last byte in the stream?
-    # Let's check: bits are read from the end. 
-    # The last byte has the sentinel. 
-    # So our sentinel byte should be the LAST byte.
     return bw.buffer
 end
 
