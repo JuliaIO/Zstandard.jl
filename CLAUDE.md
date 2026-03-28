@@ -21,5 +21,11 @@ using Pkg; Pkg.test()
 
 Or with output teed to a file:
 ```bash
-julia --project=. -e 'using Pkg; Pkg.test()' 2>&1 | tee /tmp/test_output.txt
+julia --project=. -e 'using Pkg; Pkg.test()' 2>&1 | tee temp/test_output.txt
 ```
+
+Add a grep after the tee if needed. Rather than rerunning the same tests to reexamine the output, grep `temp/test_output.txt` as needed.
+
+## Temporary Scripts and Output
+
+Use the `temp/` directory for temporary scripts or output rather than `/tmp` to keep file usage within this directory or subdirectories.
