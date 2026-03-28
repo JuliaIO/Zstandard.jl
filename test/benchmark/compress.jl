@@ -35,13 +35,15 @@ function bench_compress(; filter::Union{Nothing,Vector{String}}=nothing, seconds
 end
 
 # Parse CLI args: pass dataset name substrings to filter, --quick for shorter runs
-filter_args = String[]
-seconds = 3
-for arg in ARGS
-    if arg == "--quick"
-        seconds = 1
-    else
-        push!(filter_args, arg)
+let
+    filter_args = String[]
+    seconds = 3
+    for arg in ARGS
+        if arg == "--quick"
+            seconds = 1
+        else
+            push!(filter_args, arg)
+        end
     end
+    bench_compress(filter=isempty(filter_args) ? nothing : filter_args, seconds=seconds)
 end
-bench_compress(filter=isempty(filter_args) ? nothing : filter_args, seconds=seconds)
