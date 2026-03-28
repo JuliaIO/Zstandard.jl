@@ -2,7 +2,7 @@
 
 ## 2026-03-28 — Long match support, Int32 tables, overlapping matches
 
-Commit: (pending)
+Commit: 2d9af10
 
 ### Compression (MB/s, median, --quick)
 
@@ -38,7 +38,7 @@ Commit: (pending)
 
 ## 2026-03-28 — Early exit, sparse hashing, table reuse, typed Huffman tree
 
-Commit: (pending)
+Commit: d77d8fb
 
 ### Compression (MB/s, median, --quick)
 
