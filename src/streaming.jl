@@ -87,23 +87,19 @@ function Base.read(s::ZstdDecompressorStream, ::Type{UInt8})
 end
 
 function Base.read(s::ZstdDecompressorStream)
-    chunks = Vector{UInt8}[]
-    total = 0
+    # Pre-allocate if frame content size is known
+    out = UInt8[]
     while !eof(s)
         fill_out_buffer!(s)
         d = s.d
+        if d.fh !== nothing && d.fh.frame_content_size > 0 && isempty(out)
+            sizehint!(out, Int(d.fh.frame_content_size))
+        end
         avail = length(d.out_buffer) - d.out_pos + 1
         if avail > 0
-            push!(chunks, d.out_buffer[d.out_pos:d.out_pos+avail-1])  # copy needed; buffer is reused
+            append!(out, view(d.out_buffer, d.out_pos:d.out_pos+avail-1))
             d.out_pos += avail
-            total += avail
         end
-    end
-    out = Vector{UInt8}(undef, total)
-    pos = 1
-    for chunk in chunks
-        copyto!(out, pos, chunk, 1, length(chunk))
-        pos += length(chunk)
     end
     return out
 end
@@ -204,7 +200,9 @@ function fill_out_buffer!(s::ZstdDecompressorStream)
         
         # Manage history size: keep only window_size history
         if length(d.history) > d.fh.window_size * 2
-            d.history = d.history[end-d.fh.window_size+1:end]
+            ws = d.fh.window_size
+            copyto!(d.history, 1, d.history, length(d.history) - ws + 1, ws)
+            resize!(d.history, ws)
         end
         
         if bh.last_block

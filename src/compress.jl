@@ -22,6 +22,20 @@ end
 
 const MAX_BLOCK_SIZE = 128 * 1024
 
+# Cached MatchContext to avoid per-call allocation (~192KB).
+# Not thread-safe; pass explicit `ctx` for concurrent use.
+const _DEFAULT_CTX = Ref{Union{Nothing,MatchContext}}(nothing)
+
+function _get_default_ctx(hash_log::Int)
+    ctx = _DEFAULT_CTX[]
+    if ctx !== nothing && ctx.hash_log == hash_log
+        return ctx
+    end
+    ctx = MatchContext(hash_log=hash_log, max_block_size=MAX_BLOCK_SIZE)
+    _DEFAULT_CTX[] = ctx
+    return ctx
+end
+
 function compress(data::AbstractVector{UInt8}; level::Int=3, ctx::Union{Nothing,MatchContext}=nothing)
     io = IOBuffer(sizehint=length(data))
     write_frame_header(io, length(data))
@@ -38,7 +52,7 @@ function compress(data::AbstractVector{UInt8}; level::Int=3, ctx::Union{Nothing,
         mctx = if ctx !== nothing && ctx.hash_log == hash_log
             ctx
         else
-            MatchContext(hash_log=hash_log, max_block_size=MAX_BLOCK_SIZE)
+            _get_default_ctx(hash_log)
         end
         while pos <= length(data)
             chunk_end = min(pos + MAX_BLOCK_SIZE - 1, length(data))
