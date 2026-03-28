@@ -22,7 +22,7 @@ end
 
 const MAX_BLOCK_SIZE = 128 * 1024
 
-function compress(data::AbstractVector{UInt8}; level::Int=3)
+function compress(data::AbstractVector{UInt8}; level::Int=3, ctx::Union{Nothing,MatchContext}=nothing)
     io = IOBuffer(sizehint=length(data))
     write_frame_header(io, length(data))
     eff_level = (level == 0) ? 3 : level
@@ -35,7 +35,11 @@ function compress(data::AbstractVector{UInt8}; level::Int=3)
     else
         pos = 1
         rep_offsets = [1, 4, 8]  # Persist across blocks within a frame
-        mctx = MatchContext(hash_log=hash_log, max_block_size=MAX_BLOCK_SIZE)
+        mctx = if ctx !== nothing && ctx.hash_log == hash_log
+            ctx
+        else
+            MatchContext(hash_log=hash_log, max_block_size=MAX_BLOCK_SIZE)
+        end
         while pos <= length(data)
             chunk_end = min(pos + MAX_BLOCK_SIZE - 1, length(data))
             is_last = (chunk_end == length(data))

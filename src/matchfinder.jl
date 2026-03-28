@@ -25,18 +25,18 @@ Pre-allocated tables for the match finder, reusable across blocks.
 Create once and pass to `find_sequences` to avoid per-call allocation.
 """
 mutable struct MatchContext
-    hash_table::Vector{Int}
-    chain_table::Vector{Int}
+    hash_table::Vector{Int32}
+    chain_table::Vector{Int32}
     hash_log::Int
 end
 
 function MatchContext(; hash_log::Int=14, max_block_size::Int=128*1024)
     hash_size = 1 << hash_log
-    MatchContext(zeros(Int, hash_size), Vector{Int}(undef, max_block_size), hash_log)
+    MatchContext(Vector{Int32}(undef, hash_size), Vector{Int32}(undef, max_block_size), hash_log)
 end
 
 function reset!(ctx::MatchContext, n::Int)
-    fill!(ctx.hash_table, 0)  # 16K entries = ~128KB, fast memset
+    fill!(ctx.hash_table, Int32(0))  # 16K entries = 64KB, fast memset
     if length(ctx.chain_table) < n
         resize!(ctx.chain_table, n)
     end
@@ -99,8 +99,8 @@ function _find_sequences_safe(data::AbstractVector{UInt8}; hash_log::Int, search
         chain_table = ctx.chain_table
     else
         hash_size = 1 << hash_log
-        hash_table = zeros(Int, hash_size)
-        chain_table = Vector{Int}(undef, n)
+        hash_table = zeros(Int32, hash_size)
+        chain_table = Vector{Int32}(undef, n)
     end
 
     pos = 1
@@ -110,7 +110,7 @@ function _find_sequences_safe(data::AbstractVector{UInt8}; hash_log::Int, search
     while pos <= n - 8
         h = (hash4_safe(data, pos) >> (32 - hash_log)) + 1
 
-        @inbounds match_pos = hash_table[h]
+        @inbounds match_pos = Int(hash_table[h])
         @inbounds hash_table[h] = pos
         @inbounds chain_table[pos] = match_pos
 
@@ -119,17 +119,17 @@ function _find_sequences_safe(data::AbstractVector{UInt8}; hash_log::Int, search
 
         depth = 0
         curr = match_pos
-        while curr > 0 && depth < search_depth
-            limit = min(n - pos + 1, pos - curr, 255)
+        while curr > 0 && curr < pos && depth < search_depth
+            limit = n - pos + 1
             ml = count_match_safe(data, pos, curr, limit)
 
             if ml >= min_match && ml > best_ml
                 best_ml = ml
                 best_offset = pos - curr
-                ml >= 128 && break
+                ml >= 255 && break  # Early exit for very long matches
             end
 
-            @inbounds curr = chain_table[curr]
+            @inbounds curr = Int(chain_table[curr])
             depth += 1
         end
 
@@ -174,8 +174,8 @@ function _find_sequences_unsafe(data::AbstractVector{UInt8}; hash_log::Int, sear
         chain_table = ctx.chain_table
     else
         hash_size = 1 << hash_log
-        hash_table = zeros(Int, hash_size)
-        chain_table = Vector{Int}(undef, n)
+        hash_table = zeros(Int32, hash_size)
+        chain_table = Vector{Int32}(undef, n)
     end
 
     pos = 1
@@ -188,27 +188,26 @@ function _find_sequences_unsafe(data::AbstractVector{UInt8}; hash_log::Int, sear
     while pos <= n - 8
         h = (hash4_unsafe(ptr, pos) >> (32 - hash_log)) + 1
 
-        @inbounds match_pos = hash_table[h]
+        @inbounds match_pos = Int(hash_table[h])
         @inbounds hash_table[h] = pos
         @inbounds chain_table[pos] = match_pos
 
         best_ml = 0
         best_offset = 0
 
-        # Reduce search depth when in a long incompressible stretch
         depth = 0
         curr = match_pos
-        while curr > 0 && depth < search_depth
-            limit = min(n - pos + 1, pos - curr, 255)
+        while curr > 0 && curr < pos && depth < search_depth
+            limit = n - pos + 1
             ml = count_match_unsafe(ptr, pos, curr, limit)
 
             if ml >= min_match && ml > best_ml
                 best_ml = ml
                 best_offset = pos - curr
-                ml >= 128 && break
+                ml >= 255 && break  # Early exit for very long matches
             end
 
-            @inbounds curr = chain_table[curr]
+            @inbounds curr = Int(chain_table[curr])
             depth += 1
         end
 

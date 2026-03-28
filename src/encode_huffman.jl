@@ -254,12 +254,16 @@ function encode_huffman_literals(io::IO, literals::AbstractVector{UInt8}, encode
         s3 = encode_huffman_bitstream(view(literals, 2*chunk_size+1:3*chunk_size), encoder)
         s4 = encode_huffman_bitstream(view(literals, 3*chunk_size+1:regen_size), encoder)
 
-        jump = UInt8[]
+        total_stream_len = 6 + length(s1) + length(s2) + length(s3) + length(s4)
+        stream_bytes = Vector{UInt8}(undef, total_stream_len)
+        off = 1
         for sz in (length(s1), length(s2), length(s3))
-            push!(jump, UInt8(sz & 0xFF), UInt8((sz >> 8) & 0xFF))
+            stream_bytes[off] = UInt8(sz & 0xFF); stream_bytes[off+1] = UInt8((sz >> 8) & 0xFF); off += 2
         end
-        stream_bytes = vcat(jump, s1, s2, s3, s4)
-        compressed_size = length(tree_bytes) + length(stream_bytes)
+        for s in (s1, s2, s3, s4)
+            copyto!(stream_bytes, off, s, 1, length(s)); off += length(s)
+        end
+        compressed_size = length(tree_bytes) + total_stream_len
 
         size_format = max(regen_size, compressed_size) <= 16383 ? 2 : 3
         write_compressed_literals_header(io, regen_size, compressed_size, size_format)

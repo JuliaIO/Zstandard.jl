@@ -42,8 +42,10 @@ mutable struct BackwardBitWriter
     container_bits::Int
 end
 
-function BackwardBitWriter()
-    return BackwardBitWriter(UInt8[], 0, 0)
+function BackwardBitWriter(; sizehint::Int=0)
+    buf = UInt8[]
+    sizehint > 0 && sizehint!(buf, sizehint)
+    return BackwardBitWriter(buf, 0, 0)
 end
 
 @inline function write_bits(bw::BackwardBitWriter, val::UInt64, n::Int)

@@ -1,5 +1,41 @@
 # Benchmark Results Log
 
+## 2026-03-28 — Long match support, Int32 tables, overlapping matches
+
+Commit: (pending)
+
+### Compression (MB/s, median, --quick)
+
+| Dataset | Zstd.jl | libzstd | Slowdown | Ratio (jl/lib) |
+|---------|---------|---------|----------|----------------|
+| text 5KB | 91.4 | 109.5 | 1.2x | 67.6/73.5 |
+| text 50KB | 197.4 | 883.1 | 4.5x | 776.5/825.0 |
+| repetitive 160KB | 219.2 | 1620.5 | 7.4x | 3150.8/4551.1 |
+| repetitive 1MB | 226.7 | 1607.0 | 7.1x | 4424.4/8738.1 |
+| random 1MB | 295.0 | 735.9 | 2.5x | 1.0/1.0 |
+
+### Decompression (MB/s, median, --quick)
+
+| Dataset | Zstd.jl | libzstd | Slowdown | Ratio |
+|---------|---------|---------|----------|-------|
+| text 5KB | 175.7 | 846.6 | 4.8x | 67.6:1 |
+| text 50KB | 242.6 | 1181.8 | 4.9x | 776.5:1 |
+| repetitive 160KB | 253.7 | 1329.3 | 5.2x | 3150.8:1 |
+| repetitive 1MB | 257.7 | 1226.1 | 4.8x | 4424.4:1 |
+| random 1MB | 342.6 | 1252.1 | 3.7x | 1.0:1 |
+
+### Notes
+- Removed 255-byte match length cap — now supports overlapping matches up to 131074 bytes
+- Int32 tables in MatchContext (halved allocation from ~1.1MB to ~0.55MB)
+- Added `curr < pos` guard to prevent self-match from stale chain entries
+- Compression ratio now within 1.1-2x of libzstd (was 2-49x)
+- text 5KB compression within 1.2x throughput of libzstd
+- random 1MB compression within 2.5x of libzstd
+- Repetitive data: 167:1 → 3151:1 ratio (was 27x gap to libzstd, now 1.4x)
+- Optional `ctx` parameter on `compress()` for MatchContext reuse across calls
+
+---
+
 ## 2026-03-28 — Early exit, sparse hashing, table reuse, typed Huffman tree
 
 Commit: (pending)
