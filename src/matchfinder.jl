@@ -105,6 +105,7 @@ function _find_sequences_safe(data::AbstractVector{UInt8}; hash_log::Int, search
 
     pos = 1
     anchor = 1
+    accel = 1
 
     while pos <= n - 8
         h = (hash4_safe(data, pos) >> (32 - hash_log)) + 1
@@ -148,8 +149,10 @@ function _find_sequences_safe(data::AbstractVector{UInt8}; hash_log::Int, search
 
             pos += best_ml
             anchor = pos
+            accel = 1
         else
-            pos += step
+            pos += max(step, accel >> 8)
+            accel += 1
         end
     end
 
@@ -177,6 +180,7 @@ function _find_sequences_unsafe(data::AbstractVector{UInt8}; hash_log::Int, sear
 
     pos = 1
     anchor = 1
+    accel = 1  # Acceleration: increases on consecutive misses, resets on hit
 
     GC.@preserve data begin
     ptr = pointer(data)
@@ -191,6 +195,7 @@ function _find_sequences_unsafe(data::AbstractVector{UInt8}; hash_log::Int, sear
         best_ml = 0
         best_offset = 0
 
+        # Reduce search depth when in a long incompressible stretch
         depth = 0
         curr = match_pos
         while curr > 0 && depth < search_depth
@@ -200,7 +205,6 @@ function _find_sequences_unsafe(data::AbstractVector{UInt8}; hash_log::Int, sear
             if ml >= min_match && ml > best_ml
                 best_ml = ml
                 best_offset = pos - curr
-                # Early exit: "good enough" match — stop searching
                 ml >= 128 && break
             end
 
@@ -212,8 +216,6 @@ function _find_sequences_unsafe(data::AbstractVector{UInt8}; hash_log::Int, sear
             lit_len = pos - anchor
             push!(sequences, Sequence(UInt32(lit_len), UInt32(best_ml), UInt32(best_offset)))
 
-            # Hash positions within the match. For long matches, only hash
-            # every other position to reduce overhead.
             step_hash = best_ml > 16 ? 2 : 1
             for i in 1:step_hash:best_ml
                 p = pos + i
@@ -226,8 +228,10 @@ function _find_sequences_unsafe(data::AbstractVector{UInt8}; hash_log::Int, sear
 
             pos += best_ml
             anchor = pos
+            accel = 1  # Reset acceleration after a match
         else
-            pos += step
+            pos += max(step, accel >> 8)  # Accelerate: skip more after repeated misses
+            accel += 1
         end
     end
 
