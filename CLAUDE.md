@@ -29,3 +29,7 @@ Add a grep after the tee if needed. Rather than rerunning the same tests to reex
 ## Temporary Scripts and Output
 
 Use the `temp/` directory for temporary scripts or output rather than `/tmp` to keep file usage within this directory or subdirectories.
+
+# Session Name
+
+The current session name for work here is "expand-zstandard-compression"
