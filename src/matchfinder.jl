@@ -2,85 +2,198 @@ module MatchFinder
 
 export Sequence, find_sequences
 
+"""
+    SAFE_MODE[]
+
+Set to `true` to use bounds-checked array access instead of `unsafe_load` in the
+match finder. Useful for debugging. Toggle with:
+
+    Zstandard.MatchFinder.SAFE_MODE[] = true
+"""
+const SAFE_MODE = Ref(false)
+
 struct Sequence
     literal_length::UInt32
     match_length::UInt32
     offset::UInt32 # This is the RAW offset (distance)
 end
 
-function hash4(data::AbstractVector{UInt8}, pos::Int)
-    # Simple 4-byte hash
-    h = UInt32(data[pos]) | (UInt32(data[pos+1]) << 8) | (UInt32(data[pos+2]) << 16) | (UInt32(data[pos+3]) << 24)
-    # Knuth's multiplicative hash
-    return (h * 0x9E3779B1)
+@inline function hash4_safe(data::AbstractVector{UInt8}, pos::Int)
+    @inbounds h = UInt32(data[pos]) | (UInt32(data[pos+1]) << 8) | (UInt32(data[pos+2]) << 16) | (UInt32(data[pos+3]) << 24)
+    return h * 0x9E3779B1
+end
+
+@inline function hash4_unsafe(ptr::Ptr{UInt8}, pos::Int)
+    h = unsafe_load(Ptr{UInt32}(ptr + pos - 1))
+    return h * 0x9E3779B1
+end
+
+@inline function count_match_safe(data::AbstractVector{UInt8}, pos::Int, curr::Int, limit::Int)
+    ml = 0
+    @inbounds while ml < limit && data[pos + ml] == data[curr + ml]
+        ml += 1
+    end
+    return ml
+end
+
+@inline function count_match_unsafe(ptr::Ptr{UInt8}, pos::Int, curr::Int, limit::Int)
+    ml = 0
+    # Compare 8 bytes at a time
+    while ml + 8 <= limit
+        v1 = unsafe_load(Ptr{UInt64}(ptr + pos + ml - 1))
+        v2 = unsafe_load(Ptr{UInt64}(ptr + curr + ml - 1))
+        diff = xor(v1, v2)
+        if diff != 0
+            return ml + trailing_zeros(diff) >> 3
+        end
+        ml += 8
+    end
+    # Remaining bytes
+    while ml < limit && unsafe_load(ptr, pos + ml) == unsafe_load(ptr, curr + ml)
+        ml += 1
+    end
+    return ml
 end
 
 function find_sequences(data::AbstractVector{UInt8}; hash_log::Int=14, search_depth::Int=64, min_match::Int=3, step::Int=1)
+    Base.require_one_based_indexing(data)
+    if SAFE_MODE[]
+        return _find_sequences_safe(data; hash_log, search_depth, min_match, step)
+    else
+        return _find_sequences_unsafe(data; hash_log, search_depth, min_match, step)
+    end
+end
+
+function _find_sequences_safe(data::AbstractVector{UInt8}; hash_log::Int, search_depth::Int, min_match::Int, step::Int)
     n = length(data)
     sequences = Sequence[]
-    
+
     hash_size = 1 << hash_log
     hash_table = fill(0, hash_size)
     chain_table = fill(0, n)
-    
+
     pos = 1
     anchor = 1
-    
+
     while pos <= n - 8
-        h = (hash4(data, pos) >> (32 - hash_log)) + 1
-        
-        match_pos = hash_table[h]
-        hash_table[h] = pos
-        chain_table[pos] = match_pos
-        
+        h = (hash4_safe(data, pos) >> (32 - hash_log)) + 1
+
+        @inbounds match_pos = hash_table[h]
+        @inbounds hash_table[h] = pos
+        @inbounds chain_table[pos] = match_pos
+
         best_ml = 0
         best_offset = 0
-        
+
         depth = 0
         curr = match_pos
         while curr > 0 && depth < search_depth
-            ml = 0
-            while pos + ml <= n && curr + ml < pos && data[pos + ml] == data[curr + ml]
-                ml += 1
-                if ml >= 255
-                    break
-                end
-            end
-            
+            limit = min(n - pos + 1, pos - curr, 255)
+            ml = count_match_safe(data, pos, curr, limit)
+
             if ml >= min_match && ml > best_ml
                 best_ml = ml
                 best_offset = pos - curr
             end
-            
-            curr = chain_table[curr]
+
+            @inbounds curr = chain_table[curr]
             depth += 1
         end
-        
+
         if best_ml >= min_match
             lit_len = pos - anchor
             push!(sequences, Sequence(UInt32(lit_len), UInt32(best_ml), UInt32(best_offset)))
-            
+
             for i in 1:best_ml
                 p = pos + i
                 if p <= n - 4
-                    h_p = (hash4(data, p) >> (32 - hash_log)) + 1
-                    chain_table[p] = hash_table[h_p]
-                    hash_table[h_p] = p
+                    h_p = (hash4_safe(data, p) >> (32 - hash_log)) + 1
+                    @inbounds chain_table[p] = hash_table[h_p]
+                    @inbounds hash_table[h_p] = p
                 end
             end
-            
+
             pos += best_ml
             anchor = pos
         else
             pos += step
         end
     end
-    
+
     last_lit_len = n - anchor + 1
     if last_lit_len > 0
         push!(sequences, Sequence(UInt32(last_lit_len), 0, 0))
     end
-    
+
+    return sequences
+end
+
+function _find_sequences_unsafe(data::AbstractVector{UInt8}; hash_log::Int, search_depth::Int, min_match::Int, step::Int)
+    n = length(data)
+    sequences = Sequence[]
+
+    hash_size = 1 << hash_log
+    hash_table = fill(0, hash_size)
+    chain_table = fill(0, n)
+
+    pos = 1
+    anchor = 1
+
+    GC.@preserve data begin
+    ptr = pointer(data)
+
+    while pos <= n - 8
+        h = (hash4_unsafe(ptr, pos) >> (32 - hash_log)) + 1
+
+        @inbounds match_pos = hash_table[h]
+        @inbounds hash_table[h] = pos
+        @inbounds chain_table[pos] = match_pos
+
+        best_ml = 0
+        best_offset = 0
+
+        depth = 0
+        curr = match_pos
+        while curr > 0 && depth < search_depth
+            limit = min(n - pos + 1, pos - curr, 255)
+            ml = count_match_unsafe(ptr, pos, curr, limit)
+
+            if ml >= min_match && ml > best_ml
+                best_ml = ml
+                best_offset = pos - curr
+            end
+
+            @inbounds curr = chain_table[curr]
+            depth += 1
+        end
+
+        if best_ml >= min_match
+            lit_len = pos - anchor
+            push!(sequences, Sequence(UInt32(lit_len), UInt32(best_ml), UInt32(best_offset)))
+
+            for i in 1:best_ml
+                p = pos + i
+                if p <= n - 4
+                    h_p = (hash4_unsafe(ptr, p) >> (32 - hash_log)) + 1
+                    @inbounds chain_table[p] = hash_table[h_p]
+                    @inbounds hash_table[h_p] = p
+                end
+            end
+
+            pos += best_ml
+            anchor = pos
+        else
+            pos += step
+        end
+    end
+
+    end # GC.@preserve
+
+    last_lit_len = n - anchor + 1
+    if last_lit_len > 0
+        push!(sequences, Sequence(UInt32(last_lit_len), 0, 0))
+    end
+
     return sequences
 end
 

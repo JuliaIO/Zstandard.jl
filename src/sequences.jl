@@ -117,22 +117,23 @@ function decode_sequences(sequences_data::Vector{UInt8}, literals::Vector{UInt8}
     of_state = (of_table.accuracy_log > 0) ? Int(read_bits(bbr, of_table.accuracy_log)) : 0
     ml_state = (ml_table.accuracy_log > 0) ? Int(read_bits(bbr, ml_table.accuracy_log)) : 0
     
-    # Pre-estimate output size: literals + rough match estimate
+    # Estimate output size: use window_size as upper bound if available, else generous estimate
     hist_len = length(history)
-    output = Vector{UInt8}(undef, length(literals) * 2 + 1024)
+    est_size = max(ctx.window_size, length(literals) * 4 + 4096)
+    output = Vector{UInt8}(undef, est_size)
     out_pos = 0
     lit_pos = 1
 
     for i in 1:num_sequences
-        of_code = of_table.table[of_state + 1][1]
-        ml_code = ml_table.table[ml_state + 1][1]
-        ll_code = ll_table.table[ll_state + 1][1]
+        @inbounds of_code = of_table.table[of_state + 1][1]
+        @inbounds ml_code = ml_table.table[ml_state + 1][1]
+        @inbounds ll_code = ll_table.table[ll_state + 1][1]
 
         of_bits = Int(of_code)
         offset_val = (Int(1) << of_bits) + Int(read_bits(bbr, of_bits))
 
-        ml_val = ML_BASE[ml_code + 1] + Int(read_bits(bbr, ML_BITS[ml_code + 1]))
-        ll_val = LL_BASE[ll_code + 1] + Int(read_bits(bbr, LL_BITS[ll_code + 1]))
+        @inbounds ml_val = ML_BASE[ml_code + 1] + Int(read_bits(bbr, ML_BITS[ml_code + 1]))
+        @inbounds ll_val = LL_BASE[ll_code + 1] + Int(read_bits(bbr, LL_BITS[ll_code + 1]))
 
         # Ensure capacity for literals + match
         needed = out_pos + ll_val + ml_val
@@ -187,7 +188,7 @@ function decode_sequences(sequences_data::Vector{UInt8}, literals::Vector{UInt8}
             out_pos += ml_val
         else
             # Byte-by-byte: either from history, or overlapping copy
-            for m in 1:ml_val
+            @inbounds for m in 1:ml_val
                 target_idx = (hist_len + out_pos) - offset + 1
                 out_pos += 1
                 if target_idx <= hist_len
@@ -199,9 +200,9 @@ function decode_sequences(sequences_data::Vector{UInt8}, literals::Vector{UInt8}
         end
 
         if i < num_sequences
-            ll_state = (ll_table.accuracy_log > 0) ? (Int(read_bits(bbr, ll_table.table[ll_state + 1][2])) + ll_table.table[ll_state + 1][3]) : 0
-            ml_state = (ml_table.accuracy_log > 0) ? (Int(read_bits(bbr, ml_table.table[ml_state + 1][2])) + ml_table.table[ml_state + 1][3]) : 0
-            of_state = (of_table.accuracy_log > 0) ? (Int(read_bits(bbr, of_table.table[of_state + 1][2])) + of_table.table[of_state + 1][3]) : 0
+            @inbounds ll_state = (ll_table.accuracy_log > 0) ? (Int(read_bits(bbr, ll_table.table[ll_state + 1][2])) + ll_table.table[ll_state + 1][3]) : 0
+            @inbounds ml_state = (ml_table.accuracy_log > 0) ? (Int(read_bits(bbr, ml_table.table[ml_state + 1][2])) + ml_table.table[ml_state + 1][3]) : 0
+            @inbounds of_state = (of_table.accuracy_log > 0) ? (Int(read_bits(bbr, of_table.table[of_state + 1][2])) + of_table.table[of_state + 1][3]) : 0
         end
     end
 

@@ -109,14 +109,14 @@ function refill!(br::BackwardBitReader)
     end
 end
 
-function read_bits(br::BackwardBitReader, n::Int)
+@inline function read_bits(br::BackwardBitReader, n::Int)
     if n == 0; return UInt64(0); end
     val = peek_bits(br, n)
     consume_bits(br, n)
     return val
 end
 
-function peek_bits(br::BackwardBitReader, n::Int)
+@inline function peek_bits(br::BackwardBitReader, n::Int)
     while br.container_bits < n && br.pos >= firstindex(br.data)
         refill!(br)
     end
@@ -124,7 +124,7 @@ function peek_bits(br::BackwardBitReader, n::Int)
     return br.bit_container >>> (64 - n)
 end
 
-function consume_bits(br::BackwardBitReader, n::Int)
+@inline function consume_bits(br::BackwardBitReader, n::Int)
     br.bit_container <<= n
     br.container_bits -= n
 end

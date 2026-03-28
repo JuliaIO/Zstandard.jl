@@ -14,12 +14,9 @@ function decode_huffman_stream(data::AbstractVector{UInt8}, table::HuffmanTable,
     Base.require_one_based_indexing(data)
     bbr = BackwardBitReader(data)
     output = Vector{UInt8}(undef, decompressed_size)
-    for i in 1:decompressed_size
+    @inbounds for i in 1:decompressed_size
         val = peek_bits(bbr, table.max_bits)
         bits, sym = table.table[val + 1]
-        if bits == 0
-            error("Invalid Huffman code at symbol index $i, peeked $(repr(val))")
-        end
         output[i] = UInt8(sym)
         consume_bits(bbr, bits)
     end
