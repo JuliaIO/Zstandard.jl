@@ -1,18 +1,35 @@
 using Zstandard, CodecZstd, BenchmarkTools, Printf
 
-const ALL_DATASETS = [
-    ("text 5KB",         Vector{UInt8}(repeat("hello world this is a test of huffman compression ", 100))),
-    ("text 50KB",        Vector{UInt8}(repeat("the quick brown fox jumps over the lazy dog ", 1200))),
-    ("repetitive 160KB", repeat(b"abcdefgh", 20 * 1024)),
-    ("repetitive 1MB",   repeat(b"abcdefghijklmnop", 64 * 1024)),
-    ("random 1MB",       rand(UInt8, 1024 * 1024)),
-]
+function make_datasets()
+    return [
+        ("text 5KB",         Vector{UInt8}(repeat("hello world this is a test of huffman compression ", 100))),
+        ("text 50KB",        Vector{UInt8}(repeat("the quick brown fox jumps over the lazy dog ", 1200))),
+        ("repetitive 160KB", repeat(b"abcdefgh", 20 * 1024)),
+        ("repetitive 1MB",   repeat(b"abcdefghijklmnop", 64 * 1024)),
+        ("random 1MB",       rand(UInt8, 1024 * 1024)),
+    ]
+end
+
+function parse_args(args)
+    filter_args = String[]
+    seconds = 3
+    for arg in args
+        if arg == "--quick"
+            seconds = 1
+        else
+            push!(filter_args, arg)
+        end
+    end
+    filter = isempty(filter_args) ? nothing : filter_args
+    return (; filter, seconds)
+end
 
 function bench_compress(; filter::Union{Nothing,Vector{String}}=nothing, seconds=3)
+    all_datasets = make_datasets()
     datasets = if filter !== nothing
-        [(n, d) for (n, d) in ALL_DATASETS if any(f -> occursin(f, n), filter)]
+        [(n, d) for (n, d) in all_datasets if any(f -> occursin(f, n), filter)]
     else
-        ALL_DATASETS
+        all_datasets
     end
 
     println("Compression throughput (MB/s, median):")
@@ -34,16 +51,9 @@ function bench_compress(; filter::Union{Nothing,Vector{String}}=nothing, seconds
     println("-"^68)
 end
 
-# Parse CLI args: pass dataset name substrings to filter, --quick for shorter runs
-let
-    filter_args = String[]
-    seconds = 3
-    for arg in ARGS
-        if arg == "--quick"
-            seconds = 1
-        else
-            push!(filter_args, arg)
-        end
-    end
-    bench_compress(filter=isempty(filter_args) ? nothing : filter_args, seconds=seconds)
+function main()
+    opts = parse_args(ARGS)
+    bench_compress(; opts...)
 end
+
+main()
