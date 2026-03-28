@@ -125,6 +125,7 @@ function _find_sequences_safe(data::AbstractVector{UInt8}; hash_log::Int, search
             if ml >= min_match && ml > best_ml
                 best_ml = ml
                 best_offset = pos - curr
+                ml >= 128 && break
             end
 
             @inbounds curr = chain_table[curr]
@@ -135,7 +136,8 @@ function _find_sequences_safe(data::AbstractVector{UInt8}; hash_log::Int, search
             lit_len = pos - anchor
             push!(sequences, Sequence(UInt32(lit_len), UInt32(best_ml), UInt32(best_offset)))
 
-            for i in 1:best_ml
+            step_hash = best_ml > 16 ? 2 : 1
+            for i in 1:step_hash:best_ml
                 p = pos + i
                 if p <= n - 4
                     h_p = (hash4_safe(data, p) >> (32 - hash_log)) + 1
@@ -198,6 +200,8 @@ function _find_sequences_unsafe(data::AbstractVector{UInt8}; hash_log::Int, sear
             if ml >= min_match && ml > best_ml
                 best_ml = ml
                 best_offset = pos - curr
+                # Early exit: "good enough" match — stop searching
+                ml >= 128 && break
             end
 
             @inbounds curr = chain_table[curr]
@@ -208,7 +212,10 @@ function _find_sequences_unsafe(data::AbstractVector{UInt8}; hash_log::Int, sear
             lit_len = pos - anchor
             push!(sequences, Sequence(UInt32(lit_len), UInt32(best_ml), UInt32(best_offset)))
 
-            for i in 1:best_ml
+            # Hash positions within the match. For long matches, only hash
+            # every other position to reduce overhead.
+            step_hash = best_ml > 16 ? 2 : 1
+            for i in 1:step_hash:best_ml
                 p = pos + i
                 if p <= n - 4
                     h_p = (hash4_unsafe(ptr, p) >> (32 - hash_log)) + 1
