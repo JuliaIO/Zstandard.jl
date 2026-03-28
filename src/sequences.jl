@@ -104,7 +104,7 @@ function decode_sequences(sequences_data::Vector{UInt8}, literals::Vector{UInt8}
     end
     
     pos = position(io)
-    remaining_data = sequences_data[pos+1:end]
+    remaining_data = @view sequences_data[pos+1:end]
     
     bbr = BackwardBitReader(remaining_data)
     
@@ -179,15 +179,22 @@ function decode_sequences(sequences_data::Vector{UInt8}, literals::Vector{UInt8}
             end
         end
 
-        # Copy match from history OR output
-        # Byte-by-byte is required when offset < ml_val (overlapping copy)
-        for m in 1:ml_val
-            target_idx = (hist_len + out_pos) - offset + 1
-            out_pos += 1
-            if target_idx <= hist_len
-                output[out_pos] = history[target_idx]
-            else
-                output[out_pos] = output[target_idx - hist_len]
+        # Copy match from history and/or output
+        match_start = (hist_len + out_pos) - offset + 1
+        if match_start > hist_len && offset >= ml_val
+            # Entirely within output, non-overlapping — bulk copy
+            copyto!(output, out_pos + 1, output, match_start - hist_len, ml_val)
+            out_pos += ml_val
+        else
+            # Byte-by-byte: either from history, or overlapping copy
+            for m in 1:ml_val
+                target_idx = (hist_len + out_pos) - offset + 1
+                out_pos += 1
+                if target_idx <= hist_len
+                    output[out_pos] = history[target_idx]
+                else
+                    output[out_pos] = output[target_idx - hist_len]
+                end
             end
         end
 

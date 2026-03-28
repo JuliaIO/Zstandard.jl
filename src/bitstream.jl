@@ -39,23 +39,27 @@ function align_to_byte(br::ForwardBitReader)
     br.bits_left = 0
 end
 
-mutable struct BackwardBitReader
-    data::Vector{UInt8}
+mutable struct BackwardBitReader{V<:AbstractVector{UInt8}}
+    data::V
     pos::Int # Current byte index (1-indexed)
     bit_pos::Int # Bit position in current byte (0-7, 0 is LSB)
     total_bits::Int # Total bits in the stream
-    
+
     # We maintain bits in a container such that we can easily peek N bits.
     # The next bit to be read is at the LSB of bit_container.
     bit_container::UInt64
     container_bits::Int
 end
 
-function BackwardBitReader(data::Vector{UInt8})
+BackwardBitReader(data::V, pos, bit_pos, total_bits, bit_container, container_bits) where {V<:AbstractVector{UInt8}} =
+    BackwardBitReader{V}(data, pos, bit_pos, total_bits, bit_container, container_bits)
+
+function BackwardBitReader(data::AbstractVector{UInt8})
+    Base.require_one_based_indexing(data)
     if isempty(data)
         return BackwardBitReader(data, 0, 0, 0, 0, 0)
     end
-    pos = length(data)
+    pos = lastindex(data)
     last_byte = data[pos]
     if last_byte == 0
         error("Invalid bitstream: last byte is 0")
@@ -68,7 +72,7 @@ function BackwardBitReader(data::Vector{UInt8})
     
     # The sentinel bit is NOT part of the data.
     # Bits are read from bit_idx-1 down to 0, then from data[pos-1] (7 down to 0), etc.
-    br = BackwardBitReader(data, pos, bit_idx - 1, (pos - 1) * 8 + bit_idx, 0, 0)
+    br = BackwardBitReader(data, pos, bit_idx - 1, (pos - firstindex(data)) * 8 + bit_idx, 0, 0)
     if br.bit_pos < 0
         br.pos -= 1
         br.bit_pos = 7
@@ -79,15 +83,15 @@ function BackwardBitReader(data::Vector{UInt8})
 end
 
 function refill!(br::BackwardBitReader)
-    # Load bits in bulk from current position.
-    # Bits are stored in "stream order": first-read bit at index 0.
-    # Within each byte, we read from bit_pos down to 0.
+    # Container convention: next-to-read bits are at the TOP (MSB side).
+    # bit_container has container_bits valid bits in the high positions.
+    # Bits are loaded in natural zstd backward order: MSB of each byte first.
 
     # First: finish the partial byte at current position
-    while br.container_bits <= 56 && br.pos > 0 && br.bit_pos < 7
-        bit = (br.data[br.pos] >> br.bit_pos) & 0x01
-        br.bit_container |= (UInt64(bit) << br.container_bits)
+    while br.container_bits <= 56 && br.pos >= firstindex(br.data) && br.bit_pos < 7
+        bit = UInt64((br.data[br.pos] >> br.bit_pos) & 0x01)
         br.container_bits += 1
+        br.bit_container |= bit << (64 - br.container_bits)
         br.bit_pos -= 1
         if br.bit_pos < 0
             br.pos -= 1
@@ -96,15 +100,10 @@ function refill!(br::BackwardBitReader)
     end
 
     # Now bit_pos == 7 (aligned to byte start), load full bytes in bulk
-    while br.container_bits <= 56 && br.pos > 0
-        # Load byte with bits reversed (bit 7 first, bit 0 last)
-        byte = br.data[br.pos]
-        reversed = UInt64(0)
-        reversed |= (UInt64((byte >> 7) & 1)) | (UInt64((byte >> 6) & 1) << 1) |
-                    (UInt64((byte >> 5) & 1) << 2) | (UInt64((byte >> 4) & 1) << 3) |
-                    (UInt64((byte >> 3) & 1) << 4) | (UInt64((byte >> 2) & 1) << 5) |
-                    (UInt64((byte >> 1) & 1) << 6) | (UInt64(byte & 1) << 7)
-        br.bit_container |= reversed << br.container_bits
+    while br.container_bits <= 56 && br.pos >= firstindex(br.data)
+        # Load byte naturally: bit 7 is first-read, goes into highest available position
+        byte = UInt64(br.data[br.pos])
+        br.bit_container |= byte << (56 - br.container_bits)
         br.container_bits += 8
         br.pos -= 1
     end
@@ -118,28 +117,21 @@ function read_bits(br::BackwardBitReader, n::Int)
 end
 
 function peek_bits(br::BackwardBitReader, n::Int)
-    while br.container_bits < n && br.pos > 0
+    while br.container_bits < n && br.pos >= firstindex(br.data)
         refill!(br)
     end
-    # Container stores bits in stream order: bit at index 0 was read first (MSB of result).
-    # Reverse the n lowest bits to get the value.
-    raw = br.bit_container & ((UInt64(1) << n) - 1)
-    val = UInt64(0)
-    r = raw
-    for i in 0:n-1
-        val = (val << 1) | (r & 1)
-        r >>= 1
-    end
-    return val
+    # Top n bits of container hold the value in natural order — just shift down
+    return br.bit_container >>> (64 - n)
 end
 
 function consume_bits(br::BackwardBitReader, n::Int)
-    br.bit_container >>= n
+    br.bit_container <<= n
     br.container_bits -= n
 end
 
 function bits_left(br::BackwardBitReader)
-    return br.container_bits + (br.pos > 0 ? (br.pos - 1) * 8 + br.bit_pos + 1 : 0)
+    base = firstindex(br.data)
+    return br.container_bits + (br.pos >= base ? (br.pos - base) * 8 + br.bit_pos + 1 : 0)
 end
 
 end # module

@@ -10,7 +10,8 @@ struct HuffmanTable
     table::Vector{Tuple{Int, Int}} # (bits, symbol)
 end
 
-function decode_huffman_stream(data::Vector{UInt8}, table::HuffmanTable, decompressed_size::Int)
+function decode_huffman_stream(data::AbstractVector{UInt8}, table::HuffmanTable, decompressed_size::Int)
+    Base.require_one_based_indexing(data)
     bbr = BackwardBitReader(data)
     output = Vector{UInt8}(undef, decompressed_size)
     for i in 1:decompressed_size
@@ -39,23 +40,29 @@ function decode_huffman_streams(data::Vector{UInt8}, table::HuffmanTable, regene
         error("Invalid jump table sizes")
     end
     
-    s1_data = data[7:7+s1_size-1]
-    s2_data = data[7+s1_size:7+s1_size+s2_size-1]
-    s3_data = data[7+s1_size+s2_size:7+s1_size+s2_size+s3_size-1]
-    s4_data = data[7+s1_size+s2_size+s3_size:end]
-    
+    off1 = 7
+    off2 = off1 + s1_size
+    off3 = off2 + s2_size
+    off4 = off3 + s3_size
+    s1_data = @view data[off1:off1+s1_size-1]
+    s2_data = @view data[off2:off2+s2_size-1]
+    s3_data = @view data[off3:off3+s3_size-1]
+    s4_data = @view data[off4:end]
+
     chunk_size = (regenerated_size + 3) ÷ 4
-    s1_out_size = chunk_size
-    s2_out_size = chunk_size
-    s3_out_size = chunk_size
     s4_out_size = regenerated_size - 3 * chunk_size
-    
-    out1 = decode_huffman_stream(s1_data, table, s1_out_size)
-    out2 = decode_huffman_stream(s2_data, table, s2_out_size)
-    out3 = decode_huffman_stream(s3_data, table, s3_out_size)
+
+    out1 = decode_huffman_stream(s1_data, table, chunk_size)
+    out2 = decode_huffman_stream(s2_data, table, chunk_size)
+    out3 = decode_huffman_stream(s3_data, table, chunk_size)
     out4 = decode_huffman_stream(s4_data, table, s4_out_size)
-    
-    return [out1; out2; out3; out4]
+
+    output = Vector{UInt8}(undef, regenerated_size)
+    copyto!(output, 1, out1, 1, chunk_size)
+    copyto!(output, chunk_size + 1, out2, 1, chunk_size)
+    copyto!(output, 2 * chunk_size + 1, out3, 1, chunk_size)
+    copyto!(output, 3 * chunk_size + 1, out4, 1, s4_out_size)
+    return output
 end
 
 function decode_huffman_tree(io::IO)

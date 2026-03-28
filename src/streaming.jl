@@ -94,7 +94,7 @@ function Base.read(s::ZstdDecompressorStream)
         d = s.d
         avail = length(d.out_buffer) - d.out_pos + 1
         if avail > 0
-            push!(chunks, d.out_buffer[d.out_pos:d.out_pos+avail-1])
+            push!(chunks, d.out_buffer[d.out_pos:d.out_pos+avail-1])  # copy needed; buffer is reused
             d.out_pos += avail
             total += avail
         end
@@ -111,7 +111,8 @@ end
 function Base.read(s::ZstdDecompressorStream, nb::Integer)
     b = Vector{UInt8}(undef, nb)
     n = readbytes!(s, b, nb)
-    return b[1:n]
+    resize!(b, n)
+    return b
 end
 
 function Base.readbytes!(s::ZstdDecompressorStream, b::AbstractVector{UInt8}, nb=length(b))
