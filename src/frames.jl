@@ -32,6 +32,7 @@ function read_frame_header(io::IO)
         mantissa = wd & 0x07
         window_size = (1 << exponent) + ((mantissa * (1 << exponent)) ÷ 8)
     end
+    # For single-segment frames, window_size is set after reading FCS below
     
     dict_id = 0
     if dictionary_id_flag == 1
@@ -55,6 +56,11 @@ function read_frame_header(io::IO)
         frame_content_size = read(io, UInt64)
     end
     
+    # Per RFC 8878: for single-segment frames, Window_Size = Frame_Content_Size
+    if single_segment_flag == 1 && frame_content_size > 0
+        window_size = frame_content_size
+    end
+
     return FrameHeader(
         frame_content_size_flag,
         single_segment_flag,

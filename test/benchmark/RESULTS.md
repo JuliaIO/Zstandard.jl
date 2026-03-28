@@ -1,5 +1,39 @@
 # Benchmark Results Log
 
+## 2026-03-28 — Window_size fix, optional checksum, optimized frame header
+
+Commit: (pending)
+
+### Compression (MB/s, median, --quick)
+
+| Dataset | Zstd.jl | libzstd | Slowdown | Ratio (jl/lib) |
+|---------|---------|---------|----------|----------------|
+| text 5KB | 141.4 | 111.5 | 0.8x | 72.5/73.5 |
+| text 50KB | 373.8 | 894.2 | 2.4x | 838.1/825.0 |
+| repetitive 160KB | 446.1 | 1611.3 | 3.6x | 4311.6/4551.1 |
+| repetitive 1MB | 448.4 | 1707.8 | 3.8x | 8388.6/8738.1 |
+| random 1MB | 918.2 | 752.7 | 0.8x | 1.0/1.0 |
+
+### Decompression (MB/s, median, --quick)
+
+| Dataset | Zstd.jl | libzstd | Slowdown | Ratio |
+|---------|---------|---------|----------|-------|
+| text 5KB | 314.2 | 488.3 | 1.6x | 72.5:1 |
+| text 50KB | 551.0 | 956.5 | 1.7x | 838.1:1 |
+| repetitive 160KB | 496.5 | 923.7 | 1.9x | 4311.6:1 |
+| repetitive 1MB | 449.9 | 1063.0 | 2.4x | 8388.6:1 |
+| random 1MB | 808.6 | 2473.6 | 3.1x | 1.0:1 |
+
+### Notes
+- Fixed single-segment frame window_size=0 bug (cross-block decompression was broken)
+- Checksum now optional (`checksum=false` default, matching libzstd)
+- Frame header uses window descriptor for data > 255 bytes (saves 3 bytes)
+- All compression ratios within 6% of libzstd (was up to 2x gap)
+- text 5KB and random 1MB compression faster than libzstd (0.8x)
+- Decompression all within 3.1x (text cases under 2x)
+
+---
+
 ## 2026-03-28 — Cached MatchContext, optimized XXHash and decompression output
 
 Commit: 118c338

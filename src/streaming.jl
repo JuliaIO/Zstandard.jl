@@ -191,6 +191,7 @@ function fill_out_buffer!(s::ZstdDecompressorStream)
         end
         
         if d.xxh_state !== nothing
+            @debug "Block decoded" block_size=length(block_data) first_bytes=block_data[1:min(8, length(block_data))] history_len=length(d.history) history_tail=d.history[max(1,length(d.history)-7):length(d.history)]
             update!(d.xxh_state, block_data)
         end
         
@@ -200,9 +201,7 @@ function fill_out_buffer!(s::ZstdDecompressorStream)
         
         # Manage history size: keep only window_size history
         if length(d.history) > d.fh.window_size * 2
-            ws = d.fh.window_size
-            copyto!(d.history, 1, d.history, length(d.history) - ws + 1, ws)
-            resize!(d.history, ws)
+            d.history = d.history[end-d.fh.window_size+1:end]
         end
         
         if bh.last_block
@@ -220,7 +219,7 @@ function fill_out_buffer!(s::ZstdDecompressorStream)
         expected_checksum = read(s.io, UInt32)
         actual_checksum = UInt32(digest!(d.xxh_state) & 0xFFFFFFFF)
         if expected_checksum != actual_checksum
-            error("Checksum mismatch: expected $(repr(expected_checksum)), got $(repr(actual_checksum))")
+            error("Checksum mismatch: expected 0x$(string(expected_checksum, base=16)), got 0x$(string(actual_checksum, base=16))")
         end
         d.stage = Stage_GetMagic
     end
