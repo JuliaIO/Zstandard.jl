@@ -1,5 +1,39 @@
 # Benchmark Results Log
 
+## 2026-03-28 — Cached MatchContext, optimized XXHash and decompression output
+
+Commit: 118c338
+
+### Compression (MB/s, median, --quick)
+
+| Dataset | Zstd.jl | libzstd | Slowdown | Ratio (jl/lib) |
+|---------|---------|---------|----------|----------------|
+| text 5KB | 135.5 | 116.5 | 0.9x | 67.6/73.5 |
+| text 50KB | 329.0 | 983.5 | 3.0x | 776.5/825.0 |
+| repetitive 160KB | 375.0 | 1611.8 | 4.3x | 3150.8/4551.1 |
+| repetitive 1MB | 382.7 | 1604.2 | 4.2x | 4424.4/8738.1 |
+| random 1MB | 628.7 | 671.6 | 1.1x | 1.0/1.0 |
+
+### Decompression (MB/s, median, --quick)
+
+| Dataset | Zstd.jl | libzstd | Slowdown | Ratio |
+|---------|---------|---------|----------|-------|
+| text 5KB | 298.8 | 699.6 | 2.3x | 67.6:1 |
+| text 50KB | 471.9 | 1211.8 | 2.6x | 776.5:1 |
+| repetitive 160KB | 491.7 | 1434.9 | 2.9x | 3150.8:1 |
+| repetitive 1MB | 522.1 | 1597.4 | 3.1x | 4424.4:1 |
+| random 1MB | 1196.4 | 1510.0 | 1.3x | 1.0:1 |
+
+### Notes
+- Cached MatchContext eliminates per-call allocation (~70-83% of compression time)
+- XXHashNative ifb64/ifb32 rewritten with inline byte loads (was ~30-39% of decompression)
+- Pre-sized decompression output buffer, in-place history trim
+- text 5KB compression now faster than libzstd (0.9x)
+- random 1MB within 1.1x compression, 1.3x decompression
+- All gaps now under 4.3x (was up to 7.4x)
+
+---
+
 ## 2026-03-28 — Long match support, Int32 tables, overlapping matches
 
 Commit: 2d9af10
