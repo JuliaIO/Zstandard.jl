@@ -3,3 +3,5 @@ zeros.zst
 formatted.dict
 docs/build/
 *.swp
+Manifest.toml
+test/Manifest.toml
