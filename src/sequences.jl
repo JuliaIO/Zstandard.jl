@@ -117,28 +117,36 @@ function decode_sequences(sequences_data::Vector{UInt8}, literals::Vector{UInt8}
     of_state = (of_table.accuracy_log > 0) ? Int(read_bits(bbr, of_table.accuracy_log)) : 0
     ml_state = (ml_table.accuracy_log > 0) ? Int(read_bits(bbr, ml_table.accuracy_log)) : 0
     
-    # history is the data from previous blocks in the frame
-    # output will start with newly decoded data
-    output = UInt8[]
+    # Pre-estimate output size: literals + rough match estimate
+    hist_len = length(history)
+    output = Vector{UInt8}(undef, length(literals) * 2 + 1024)
+    out_pos = 0
     lit_pos = 1
-    
+
     for i in 1:num_sequences
         of_code = of_table.table[of_state + 1][1]
         ml_code = ml_table.table[ml_state + 1][1]
         ll_code = ll_table.table[ll_state + 1][1]
-        
+
         of_bits = Int(of_code)
         offset_val = (Int(1) << of_bits) + Int(read_bits(bbr, of_bits))
-        
+
         ml_val = ML_BASE[ml_code + 1] + Int(read_bits(bbr, ML_BITS[ml_code + 1]))
         ll_val = LL_BASE[ll_code + 1] + Int(read_bits(bbr, LL_BITS[ll_code + 1]))
-        
+
+        # Ensure capacity for literals + match
+        needed = out_pos + ll_val + ml_val
+        if needed > length(output)
+            resize!(output, max(needed, length(output) * 2))
+        end
+
         # Copy literals
         if ll_val > 0
-            append!(output, literals[lit_pos:lit_pos+ll_val-1])
+            copyto!(output, out_pos + 1, literals, lit_pos, ll_val)
+            out_pos += ll_val
             lit_pos += ll_val
         end
-        
+
         # Determine actual offset
         offset = 0
         if offset_val > 3
@@ -151,7 +159,7 @@ function decode_sequences(sequences_data::Vector{UInt8}, literals::Vector{UInt8}
             if ll_val == 0
                 rep_idx += 1
             end
-            
+
             if rep_idx == 1
                 offset = ctx.rep_offsets[1]
             elseif rep_idx == 2
@@ -170,36 +178,38 @@ function decode_sequences(sequences_data::Vector{UInt8}, literals::Vector{UInt8}
                 ctx.rep_offsets[1] = offset
             end
         end
-        
+
         # Copy match from history OR output
-        # Match can span across history and current output
+        # Byte-by-byte is required when offset < ml_val (overlapping copy)
         for m in 1:ml_val
-            # The offset is distance from the end of CURRENT output
-            # history: [H1, H2, ..., HM]
-            # output: [O1, O2, ..., OK]
-            # Total data: [H1, ..., HM, O1, ..., OK]
-            # Current pos in total data: HM + K
-            # Match pos in total data: (HM + K) - offset + 1
-            
-            target_idx = (length(history) + length(output)) - offset + 1
-            if target_idx <= length(history)
-                push!(output, history[target_idx])
+            target_idx = (hist_len + out_pos) - offset + 1
+            out_pos += 1
+            if target_idx <= hist_len
+                output[out_pos] = history[target_idx]
             else
-                push!(output, output[target_idx - length(history)])
+                output[out_pos] = output[target_idx - hist_len]
             end
         end
-        
+
         if i < num_sequences
             ll_state = (ll_table.accuracy_log > 0) ? (Int(read_bits(bbr, ll_table.table[ll_state + 1][2])) + ll_table.table[ll_state + 1][3]) : 0
             ml_state = (ml_table.accuracy_log > 0) ? (Int(read_bits(bbr, ml_table.table[ml_state + 1][2])) + ml_table.table[ml_state + 1][3]) : 0
             of_state = (of_table.accuracy_log > 0) ? (Int(read_bits(bbr, of_table.table[of_state + 1][2])) + of_table.table[of_state + 1][3]) : 0
         end
     end
-    
-    if lit_pos <= length(literals)
-        append!(output, literals[lit_pos:end])
+
+    # Remaining literals
+    remaining_lits = length(literals) - lit_pos + 1
+    if remaining_lits > 0
+        needed = out_pos + remaining_lits
+        if needed > length(output)
+            resize!(output, needed)
+        end
+        copyto!(output, out_pos + 1, literals, lit_pos, remaining_lits)
+        out_pos += remaining_lits
     end
-    
+
+    resize!(output, out_pos)
     return output
 end
 

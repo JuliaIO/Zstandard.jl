@@ -87,22 +87,25 @@ function Base.read(s::ZstdDecompressorStream, ::Type{UInt8})
 end
 
 function Base.read(s::ZstdDecompressorStream)
-    out = IOBuffer()
-    while true
-        if eof(s)
-            break
-        end
-        try
-            write(out, read(s, UInt8))
-        catch e
-            if e isa EOFError
-                break
-            else
-                rethrow(e)
-            end
+    chunks = Vector{UInt8}[]
+    total = 0
+    while !eof(s)
+        fill_out_buffer!(s)
+        d = s.d
+        avail = length(d.out_buffer) - d.out_pos + 1
+        if avail > 0
+            push!(chunks, d.out_buffer[d.out_pos:d.out_pos+avail-1])
+            d.out_pos += avail
+            total += avail
         end
     end
-    return take!(out)
+    out = Vector{UInt8}(undef, total)
+    pos = 1
+    for chunk in chunks
+        copyto!(out, pos, chunk, 1, length(chunk))
+        pos += length(chunk)
+    end
+    return out
 end
 
 function Base.read(s::ZstdDecompressorStream, nb::Integer)
@@ -125,9 +128,7 @@ function Base.readbytes!(s::ZstdDecompressorStream, b::AbstractVector{UInt8}, nb
         end
         
         take = min(nb - out_idx + 1, length(s.d.out_buffer) - s.d.out_pos + 1)
-        for i in 1:take
-            b[out_idx + i - 1] = s.d.out_buffer[s.d.out_pos + i - 1]
-        end
+        copyto!(b, out_idx, s.d.out_buffer, s.d.out_pos, take)
         s.d.out_pos += take
         out_idx += take
     end

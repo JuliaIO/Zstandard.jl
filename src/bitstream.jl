@@ -79,31 +79,34 @@ function BackwardBitReader(data::Vector{UInt8})
 end
 
 function refill!(br::BackwardBitReader)
-    # We want to fill bit_container from the LSB side? 
-    # No, if we want to read N bits and have the first bit be MSB, 
-    # then the first bit read should go to position N-1.
-    
-    # Actually, let's keep it simple: 
-    # Read bits from the stream and push them into the LSB of the container.
-    # When we want to read N bits, the first bit read is the MSB of the result.
-    
-    while br.container_bits <= 56 && br.pos > 0
-        # Read the bit at br.pos, br.bit_pos
+    # Load bits in bulk from current position.
+    # Bits are stored in "stream order": first-read bit at index 0.
+    # Within each byte, we read from bit_pos down to 0.
+
+    # First: finish the partial byte at current position
+    while br.container_bits <= 56 && br.pos > 0 && br.bit_pos < 7
         bit = (br.data[br.pos] >> br.bit_pos) & 0x01
-        
-        # This bit was read "first" in time, so it should be the most significant in the final N-bit value.
-        # This is hard to do if we don't know N yet.
-        
-        # Let's instead maintain the container such that the bits are in "stream order".
-        # The first bit read from the stream is at index 0, the second at index 1...
         br.bit_container |= (UInt64(bit) << br.container_bits)
         br.container_bits += 1
-        
         br.bit_pos -= 1
         if br.bit_pos < 0
             br.pos -= 1
             br.bit_pos = 7
         end
+    end
+
+    # Now bit_pos == 7 (aligned to byte start), load full bytes in bulk
+    while br.container_bits <= 56 && br.pos > 0
+        # Load byte with bits reversed (bit 7 first, bit 0 last)
+        byte = br.data[br.pos]
+        reversed = UInt64(0)
+        reversed |= (UInt64((byte >> 7) & 1)) | (UInt64((byte >> 6) & 1) << 1) |
+                    (UInt64((byte >> 5) & 1) << 2) | (UInt64((byte >> 4) & 1) << 3) |
+                    (UInt64((byte >> 3) & 1) << 4) | (UInt64((byte >> 2) & 1) << 5) |
+                    (UInt64((byte >> 1) & 1) << 6) | (UInt64(byte & 1) << 7)
+        br.bit_container |= reversed << br.container_bits
+        br.container_bits += 8
+        br.pos -= 1
     end
 end
 
@@ -118,18 +121,14 @@ function peek_bits(br::BackwardBitReader, n::Int)
     while br.container_bits < n && br.pos > 0
         refill!(br)
     end
-    
-    # We have bits at 0, 1, 2, ... n-1 in the container.
-    # The bit at index 0 is the FIRST bit read from the stream.
-    # According to Zstd, the FIRST bit read is the MSB of the value.
-    
+    # Container stores bits in stream order: bit at index 0 was read first (MSB of result).
+    # Reverse the n lowest bits to get the value.
+    raw = br.bit_container & ((UInt64(1) << n) - 1)
     val = UInt64(0)
-    # n=3: bit0 -> MSB, bit1 -> middle, bit2 -> LSB
+    r = raw
     for i in 0:n-1
-        bit = (br.bit_container >> i) & 0x01
-        # If i=0, bit is the first bit, goes to position n-1
-        # If i=n-1, bit is the nth bit, goes to position 0
-        val |= (bit << (n - 1 - i))
+        val = (val << 1) | (r & 1)
+        r >>= 1
     end
     return val
 end
