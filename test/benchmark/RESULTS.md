@@ -2,7 +2,7 @@
 
 ## 2026-03-28 — Window_size fix, optional checksum, optimized frame header
 
-Commit: (pending)
+Commit: 2e60e66
 
 ### Compression (MB/s, median, --quick)
 
