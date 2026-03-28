@@ -81,15 +81,11 @@ function build_fse_distribution(codes::Vector{Int}, max_sym::Int, accuracy_log::
 end
 
 function get_code(val::UInt32, base_table::Vector{Int})
-    for i in length(base_table):-1:1
-        if val >= base_table[i]
-            return UInt32(i - 1)
-        end
-    end
-    return UInt32(0)
+    idx = searchsortedlast(base_table, Int(val))
+    return UInt32(max(idx - 1, 0))
 end
 
-function encode_sequences(io::IO, sequences::Vector{Sequence}, history_len::Int)
+function encode_sequences(io::IO, sequences::Vector{Sequence}, history_len::Int; rep_offsets::Vector{Int}=[1, 4, 8])
     # Filter out zero-match-length sequences (trailing literals; not valid FSE sequences)
     sequences = filter(s -> s.match_length > 0, sequences)
     num_sequences = length(sequences)
@@ -108,16 +104,72 @@ function encode_sequences(io::IO, sequences::Vector{Sequence}, history_len::Int)
         write(io, UInt16(num_sequences - 0x7F00))
     end
     
-    seq_codes = []
-    for s in sequences
+    seq_codes = Vector{NTuple{6, UInt32}}(undef, length(sequences))
+    for (idx, s) in enumerate(sequences)
         ll_code = get_code(s.literal_length, LL_BASE)
         ll_extra = s.literal_length - LL_BASE[ll_code + 1]
         ml_code = get_code(s.match_length, ML_BASE)
         ml_extra = s.match_length - ML_BASE[ml_code + 1]
-        of_val = s.offset + 3
-        of_code = UInt32(floor(Int, log2(of_val)))
+
+        # Repeat offset matching (RFC 8878 §3.1.1.3.2)
+        raw_offset = Int(s.offset)
+        ll = Int(s.literal_length)
+        offset_value = 0
+        if ll > 0
+            if raw_offset == rep_offsets[1]
+                offset_value = 1
+            elseif raw_offset == rep_offsets[2]
+                offset_value = 2
+            elseif raw_offset == rep_offsets[3]
+                offset_value = 3
+            end
+        else  # ll == 0
+            if raw_offset == rep_offsets[2]
+                offset_value = 1
+            elseif raw_offset == rep_offsets[3]
+                offset_value = 2
+            elseif rep_offsets[1] > 1 && raw_offset == rep_offsets[1] - 1
+                offset_value = 3
+            end
+        end
+        if offset_value == 0
+            offset_value = raw_offset + 3  # literal offset
+        end
+
+        of_val = UInt32(offset_value)
+        of_code = UInt32(8 * sizeof(of_val) - leading_zeros(of_val) - 1)
         of_extra = of_val - (UInt32(1) << of_code)
-        push!(seq_codes, (ll_code, ll_extra, ml_code, ml_extra, of_code, of_extra))
+
+        # Update rep_offsets (mirrors decoder: src/sequences.jl:144-172)
+        if offset_value > 3
+            rep_offsets[3] = rep_offsets[2]
+            rep_offsets[2] = rep_offsets[1]
+            rep_offsets[1] = raw_offset
+        else
+            rep_idx = offset_value
+            if ll == 0
+                rep_idx += 1
+            end
+            if rep_idx == 1
+                # no change
+            elseif rep_idx == 2
+                offset = rep_offsets[2]
+                rep_offsets[2] = rep_offsets[1]
+                rep_offsets[1] = offset
+            elseif rep_idx == 3
+                offset = rep_offsets[3]
+                rep_offsets[3] = rep_offsets[2]
+                rep_offsets[2] = rep_offsets[1]
+                rep_offsets[1] = offset
+            elseif rep_idx == 4
+                offset = rep_offsets[1] - 1
+                rep_offsets[3] = rep_offsets[2]
+                rep_offsets[2] = rep_offsets[1]
+                rep_offsets[1] = offset
+            end
+        end
+
+        seq_codes[idx] = (ll_code, UInt32(ll_extra), ml_code, UInt32(ml_extra), of_code, UInt32(of_extra))
     end
 
     # Determine compression mode for each table:
@@ -140,18 +192,21 @@ function encode_sequences(io::IO, sequences::Vector{Sequence}, history_len::Int)
     ml_mode = ml_probs !== nothing ? 2 : length(ml_unique) == 1 ? 1 : 0
     write(io, UInt8((ll_mode << 6) | (of_mode << 4) | (ml_mode << 2)))
 
-    # Write table descriptions: RLE = 1 byte (the symbol), FSE = forward bitstream
-    ll_mode == 1 && write(io, UInt8(ll_unique[1]))
-    of_mode == 1 && write(io, UInt8(of_unique[1]))
-    ml_mode == 1 && write(io, UInt8(ml_unique[1]))
-
-    if ll_mode == 2 || of_mode == 2 || ml_mode == 2
-        fw_io = IOBuffer()
-        fw = ForwardBitWriter(fw_io)
-        ll_mode == 2 && write_fse_table(fw, ll_probs, 6)
-        of_mode == 2 && write_fse_table(fw, of_probs, 5)
-        ml_mode == 2 && write_fse_table(fw, ml_probs, 6)
-        write(io, take!(fw_io))
+    # Write table descriptions in LL, OF, ML order (each mode writes its own format)
+    for (mode, probs, al, rle_sym) in [
+        (ll_mode, ll_probs, 6, ll_unique),
+        (of_mode, of_probs, 5, of_unique),
+        (ml_mode, ml_probs, 6, ml_unique),
+    ]
+        if mode == 1
+            write(io, UInt8(rle_sym[1]))
+        elseif mode == 2
+            fw_io = IOBuffer()
+            fw = ForwardBitWriter(fw_io)
+            write_fse_table(fw, probs, al)
+            write(io, take!(fw_io))
+        end
+        # mode == 0 (predefined): nothing to write
     end
 
     ll_al = ll_mode == 2 ? 6 : ll_mode == 0 ? 6 : 0

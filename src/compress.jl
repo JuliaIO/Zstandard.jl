@@ -34,6 +34,7 @@ function compress(data::AbstractVector{UInt8}; level::Int=3)
         write_block_header(io, true, 0, 0)
     else
         pos = 1
+        rep_offsets = [1, 4, 8]  # Persist across blocks within a frame
         while pos <= length(data)
             chunk_end = min(pos + MAX_BLOCK_SIZE - 1, length(data))
             is_last = (chunk_end == length(data))
@@ -43,13 +44,16 @@ function compress(data::AbstractVector{UInt8}; level::Int=3)
             has_seqs = !isempty(sequences) && !(length(sequences) == 1 && sequences[1].match_length == 0)
 
             if has_seqs
+                saved_rep = copy(rep_offsets)
                 block_io = IOBuffer()
-                write_compressed_block_body(block_io, chunk, sequences)
+                write_compressed_block_body(block_io, chunk, sequences, rep_offsets=rep_offsets)
                 block_bytes = take!(block_io)
                 if length(block_bytes) < length(chunk)
                     write_block_header(io, is_last, 2, length(block_bytes))
                     write(io, block_bytes)
                 else
+                    # Compressed was larger; fall back to raw and restore rep_offsets
+                    rep_offsets .= saved_rep
                     write_block_header(io, is_last, 0, length(chunk))
                     write(io, chunk)
                 end
@@ -83,10 +87,10 @@ function write_raw_blocks_content(io::IO, data::AbstractVector{UInt8})
     end
 end
 
-function write_compressed_block_body(io::IO, data::AbstractVector{UInt8}, sequences::Vector{Sequence})
+function write_compressed_block_body(io::IO, data::AbstractVector{UInt8}, sequences::Vector{Sequence}; rep_offsets::Vector{Int}=[1, 4, 8])
     literals = gather_literals(data, sequences)
     write_literals_section(io, literals)
-    encode_sequences(io, sequences, length(data))
+    encode_sequences(io, sequences, length(data), rep_offsets=rep_offsets)
 end
 
 function write_compressed_block_content(io::IO, is_last::Bool, data::AbstractVector{UInt8}, sequences::Vector{Sequence})
@@ -103,10 +107,15 @@ function write_block_header(io::IO, last::Bool, type::Int, size::Int)
 end
 
 function gather_literals(data::AbstractVector{UInt8}, sequences::Vector{Sequence})
-    literals = UInt8[]; pos = 1
+    total_ll = sum(Int(s.literal_length) for s in sequences)
+    literals = Vector{UInt8}(undef, total_ll)
+    pos = 1; out = 1
     for seq in sequences
         ll = Int(seq.literal_length)
-        if ll > 0; append!(literals, data[pos:pos+ll-1]) end
+        if ll > 0
+            copyto!(literals, out, data, pos, ll)
+            out += ll
+        end
         pos += ll + Int(seq.match_length)
     end
     return literals

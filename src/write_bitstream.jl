@@ -13,10 +13,16 @@ function ForwardBitWriter(io::IO)
 end
 
 function write_bits(bw::ForwardBitWriter, val::UInt32, n::Int)
-    for i in 0:n-1
-        bit = (val >> i) & 0x01
-        bw.current_byte |= (UInt8(bit) << bw.bits_in_container)
-        bw.bits_in_container += 1
+    n == 0 && return
+    remaining = UInt32(val & ((UInt32(1) << n) - 1))
+    bits_left = n
+    while bits_left > 0
+        avail = 8 - bw.bits_in_container
+        take = min(bits_left, avail)
+        bw.current_byte |= UInt8((remaining & ((UInt32(1) << take) - 1)) << bw.bits_in_container)
+        bw.bits_in_container += take
+        remaining >>= take
+        bits_left -= take
         if bw.bits_in_container == 8
             write(bw.io, bw.current_byte)
             bw.current_byte = 0x00
@@ -49,31 +55,15 @@ function BackwardBitWriter()
 end
 
 function write_bits(bw::BackwardBitWriter, val::UInt64, n::Int)
-    if n == 0; return; end
-    
-    # We add bits to the LSB side of our container.
-    # We want bits of 'val' to be added such that MSB is "closest to the end".
-    # Since we fill bytes and push them to buffer, "closest to the end" means
-    # highest bit index in the last byte.
-    
-    # Let's add bits from LSB to MSB.
-    # When we push a byte, the bits we added EARLIER are at LOWER indices.
-    # The bits we add LATER are at HIGHER indices.
-    # This matches the decoder: it reads from sentinel (highest index) towards LSB.
-    # So the bit written LAST should be the one read FIRST.
-    # The bit read FIRST is the MSB of the value.
-    # So the MSB should be written LAST.
-    
-    for i in 0:n-1
-        bit = (val >> i) & 0x01
-        bw.bit_container |= (UInt64(bit) << bw.container_bits)
-        bw.container_bits += 1
-        
-        if bw.container_bits == 8
-            push!(bw.buffer, UInt8(bw.bit_container))
-            bw.bit_container = 0
-            bw.container_bits = 0
-        end
+    n == 0 && return
+    # Add n bits from val (LSB first) into the container
+    bw.bit_container |= (val & ((UInt64(1) << n) - 1)) << bw.container_bits
+    bw.container_bits += n
+    # Flush complete bytes
+    while bw.container_bits >= 8
+        push!(bw.buffer, UInt8(bw.bit_container & 0xFF))
+        bw.bit_container >>= 8
+        bw.container_bits -= 8
     end
 end
 

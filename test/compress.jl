@@ -85,3 +85,19 @@ end
     @test decompress(comp_rand) == data_rand
     @test transcode(ZstdDecompressor, comp_rand) == data_rand
 end
+
+@testset "Repeat Offsets" begin
+    # Pattern where repeat offsets should kick in heavily
+    data_rep4 = repeat(b"abcd", 1000)
+    comp_rep4 = compress(data_rep4)
+    @test decompress(comp_rep4) == data_rep4
+    @test transcode(ZstdDecompressor, comp_rep4) == data_rep4
+    @test length(comp_rep4) < length(data_rep4) ÷ 10  # Should compress very well
+
+    # Multi-block with repeat offsets persisting across blocks
+    data_rep_large = repeat(b"xyzw", 40 * 1024)  # 160 KB, spans multiple 128KB blocks
+    comp_rep_large = compress(data_rep_large)
+    @test decompress(comp_rep_large) == data_rep_large
+    @test transcode(ZstdDecompressor, comp_rep_large) == data_rep_large
+    @test length(comp_rep_large) < length(data_rep_large) ÷ 10
+end

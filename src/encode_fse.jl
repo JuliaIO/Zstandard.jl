@@ -40,7 +40,7 @@ function build_fse_encoding_table(probabilities::Vector{Int}, accuracy_log::Int)
     for (sym, p) in enumerate(probabilities)
         freq = p == -1 ? 1 : p
         if freq == 0; continue end
-        k_s = accuracy_log - floor(Int, log2(freq)); deltaNbBits[sym] = (UInt32(k_s) << 16) - (UInt32(freq) << k_s)
+        k_s = accuracy_log - (8 * sizeof(freq) - leading_zeros(freq) - 1); deltaNbBits[sym] = (UInt32(k_s) << 16) - (UInt32(freq) << k_s)
         deltaFindState[sym] = Int32(cumulative_states - freq)
         append!(state_table, symbol_states[sym])
         cumulative_states += freq
