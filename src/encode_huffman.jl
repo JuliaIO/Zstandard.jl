@@ -13,36 +13,79 @@ end
 
 function build_huffman_tree(freqs::Vector{Int}, max_bits_limit::Int=11)
     num_symbols = length(freqs)
-    nodes = [(f, i-1) for (i, f) in enumerate(freqs) if f > 0]
 
-    if isempty(nodes)
+    # Collect active symbols
+    active = Int[]
+    for i in 1:num_symbols
+        if freqs[i] > 0
+            push!(active, i)
+        end
+    end
+
+    if isempty(active)
         return Int[], 0
     end
-    if length(nodes) == 1
+    if length(active) == 1
         weights = zeros(Int, num_symbols)
-        weights[nodes[1][2] + 1] = 1
+        weights[active[1]] = 1
         return weights, 1
     end
 
-    tree = Any[n for n in nodes]
-    while length(tree) > 1
-        sort!(tree, by=x->x[1])
-        n1 = popfirst!(tree)
-        n2 = popfirst!(tree)
-        push!(tree, (n1[1] + n2[1], (n1, n2)))
-    end
-    root = tree[1]
+    # Build Huffman tree using flat arrays instead of recursive Any[] tuples.
+    # Each node has: freq, left child index (-1 if leaf), right child index, symbol (if leaf).
+    n_active = length(active)
+    max_nodes = 2 * n_active - 1
+    node_freq  = Vector{Int}(undef, max_nodes)
+    node_left  = Vector{Int}(undef, max_nodes)  # -1 for leaf
+    node_right = Vector{Int}(undef, max_nodes)
+    node_sym   = Vector{Int}(undef, max_nodes)  # 1-indexed symbol, only valid for leaves
 
+    # Initialize leaf nodes
+    for i in 1:n_active
+        node_freq[i]  = freqs[active[i]]
+        node_left[i]  = -1
+        node_right[i] = -1
+        node_sym[i]   = active[i]
+    end
+    num_nodes = n_active
+
+    # Simple priority queue: maintain a sorted list of active node indices by freq.
+    # Use a flat array sorted descending so pop! gives the minimum.
+    pq = collect(1:n_active)
+    sort!(pq, by=i -> node_freq[i], rev=true)
+
+    while length(pq) > 1
+        # Pop two smallest (from end, since sorted descending)
+        n1 = pop!(pq)
+        n2 = pop!(pq)
+
+        # Create internal node
+        num_nodes += 1
+        node_freq[num_nodes]  = node_freq[n1] + node_freq[n2]
+        node_left[num_nodes]  = n1
+        node_right[num_nodes] = n2
+        node_sym[num_nodes]   = 0
+
+        # Insert new node in sorted position (descending by freq)
+        new_f = node_freq[num_nodes]
+        idx = searchsortedlast(pq, num_nodes, by=i -> -node_freq[i])
+        insert!(pq, idx + 1, num_nodes)
+    end
+
+    root = pq[1]
+
+    # Walk tree to assign bit lengths (iterative to avoid stack overflow)
     lengths = zeros(Int, num_symbols)
-    function walk(node, d)
-        if node[2] isa Int
-            lengths[node[2] + 1] = d
+    stack = [(root, 0)]
+    while !isempty(stack)
+        nd, d = pop!(stack)
+        if node_left[nd] == -1  # leaf
+            lengths[node_sym[nd]] = d
         else
-            walk(node[2][1], d + 1)
-            walk(node[2][2], d + 1)
+            push!(stack, (node_left[nd], d + 1))
+            push!(stack, (node_right[nd], d + 1))
         end
     end
-    walk(root, 0)
 
     limit_bit_lengths!(lengths, max_bits_limit)
 

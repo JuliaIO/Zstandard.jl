@@ -1,6 +1,6 @@
 module MatchFinder
 
-export Sequence, find_sequences
+export Sequence, find_sequences, MatchContext
 
 """
     SAFE_MODE[]
@@ -16,6 +16,31 @@ struct Sequence
     literal_length::UInt32
     match_length::UInt32
     offset::UInt32 # This is the RAW offset (distance)
+end
+
+"""
+    MatchContext
+
+Pre-allocated tables for the match finder, reusable across blocks.
+Create once and pass to `find_sequences` to avoid per-call allocation.
+"""
+mutable struct MatchContext
+    hash_table::Vector{Int}
+    chain_table::Vector{Int}
+    hash_log::Int
+end
+
+function MatchContext(; hash_log::Int=14, max_block_size::Int=128*1024)
+    hash_size = 1 << hash_log
+    MatchContext(zeros(Int, hash_size), Vector{Int}(undef, max_block_size), hash_log)
+end
+
+function reset!(ctx::MatchContext, n::Int)
+    fill!(ctx.hash_table, 0)  # 16K entries = ~128KB, fast memset
+    if length(ctx.chain_table) < n
+        resize!(ctx.chain_table, n)
+    end
+    # chain_table doesn't need zeroing: entries are written before read
 end
 
 @inline function hash4_safe(data::AbstractVector{UInt8}, pos::Int)
@@ -55,22 +80,28 @@ end
     return ml
 end
 
-function find_sequences(data::AbstractVector{UInt8}; hash_log::Int=14, search_depth::Int=64, min_match::Int=3, step::Int=1)
+function find_sequences(data::AbstractVector{UInt8}; hash_log::Int=14, search_depth::Int=64, min_match::Int=3, step::Int=1, ctx::Union{Nothing,MatchContext}=nothing)
     Base.require_one_based_indexing(data)
     if SAFE_MODE[]
-        return _find_sequences_safe(data; hash_log, search_depth, min_match, step)
+        return _find_sequences_safe(data; hash_log, search_depth, min_match, step, ctx)
     else
-        return _find_sequences_unsafe(data; hash_log, search_depth, min_match, step)
+        return _find_sequences_unsafe(data; hash_log, search_depth, min_match, step, ctx)
     end
 end
 
-function _find_sequences_safe(data::AbstractVector{UInt8}; hash_log::Int, search_depth::Int, min_match::Int, step::Int)
+function _find_sequences_safe(data::AbstractVector{UInt8}; hash_log::Int, search_depth::Int, min_match::Int, step::Int, ctx::Union{Nothing,MatchContext})
     n = length(data)
     sequences = Sequence[]
 
-    hash_size = 1 << hash_log
-    hash_table = fill(0, hash_size)
-    chain_table = fill(0, n)
+    if ctx !== nothing && ctx.hash_log == hash_log
+        reset!(ctx, n)
+        hash_table = ctx.hash_table
+        chain_table = ctx.chain_table
+    else
+        hash_size = 1 << hash_log
+        hash_table = zeros(Int, hash_size)
+        chain_table = Vector{Int}(undef, n)
+    end
 
     pos = 1
     anchor = 1
@@ -128,13 +159,19 @@ function _find_sequences_safe(data::AbstractVector{UInt8}; hash_log::Int, search
     return sequences
 end
 
-function _find_sequences_unsafe(data::AbstractVector{UInt8}; hash_log::Int, search_depth::Int, min_match::Int, step::Int)
+function _find_sequences_unsafe(data::AbstractVector{UInt8}; hash_log::Int, search_depth::Int, min_match::Int, step::Int, ctx::Union{Nothing,MatchContext})
     n = length(data)
     sequences = Sequence[]
 
-    hash_size = 1 << hash_log
-    hash_table = fill(0, hash_size)
-    chain_table = fill(0, n)
+    if ctx !== nothing && ctx.hash_log == hash_log
+        reset!(ctx, n)
+        hash_table = ctx.hash_table
+        chain_table = ctx.chain_table
+    else
+        hash_size = 1 << hash_log
+        hash_table = zeros(Int, hash_size)
+        chain_table = Vector{Int}(undef, n)
+    end
 
     pos = 1
     anchor = 1

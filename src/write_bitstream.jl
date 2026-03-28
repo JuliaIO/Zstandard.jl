@@ -4,38 +4,30 @@ export ForwardBitWriter, BackwardBitWriter, write_bits, flush_bits, take_bits
 
 mutable struct ForwardBitWriter
     io::IO
-    current_byte::UInt8
-    bits_in_container::Int
+    bit_container::UInt64
+    container_bits::Int
 end
 
 function ForwardBitWriter(io::IO)
-    return ForwardBitWriter(io, 0x00, 0)
+    return ForwardBitWriter(io, UInt64(0), 0)
 end
 
-function write_bits(bw::ForwardBitWriter, val::UInt32, n::Int)
+@inline function write_bits(bw::ForwardBitWriter, val::UInt32, n::Int)
     n == 0 && return
-    remaining = UInt32(val & ((UInt32(1) << n) - 1))
-    bits_left = n
-    while bits_left > 0
-        avail = 8 - bw.bits_in_container
-        take = min(bits_left, avail)
-        bw.current_byte |= UInt8((remaining & ((UInt32(1) << take) - 1)) << bw.bits_in_container)
-        bw.bits_in_container += take
-        remaining >>= take
-        bits_left -= take
-        if bw.bits_in_container == 8
-            write(bw.io, bw.current_byte)
-            bw.current_byte = 0x00
-            bw.bits_in_container = 0
-        end
+    bw.bit_container |= UInt64(val & ((UInt32(1) << n) - 1)) << bw.container_bits
+    bw.container_bits += n
+    while bw.container_bits >= 8
+        write(bw.io, UInt8(bw.bit_container & 0xFF))
+        bw.bit_container >>= 8
+        bw.container_bits -= 8
     end
 end
 
 function flush_bits(bw::ForwardBitWriter)
-    if bw.bits_in_container > 0
-        write(bw.io, bw.current_byte)
-        bw.current_byte = 0x00
-        bw.bits_in_container = 0
+    if bw.container_bits > 0
+        write(bw.io, UInt8(bw.bit_container & 0xFF))
+        bw.bit_container = UInt64(0)
+        bw.container_bits = 0
     end
 end
 
@@ -54,7 +46,7 @@ function BackwardBitWriter()
     return BackwardBitWriter(UInt8[], 0, 0)
 end
 
-function write_bits(bw::BackwardBitWriter, val::UInt64, n::Int)
+@inline function write_bits(bw::BackwardBitWriter, val::UInt64, n::Int)
     n == 0 && return
     # Add n bits from val (LSB first) into the container
     bw.bit_container |= (val & ((UInt64(1) << n) - 1)) << bw.container_bits

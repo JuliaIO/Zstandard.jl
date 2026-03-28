@@ -1,8 +1,31 @@
 # Benchmark Results Log
 
-## 2026-03-28 — After @inbounds, vectorized match extension, MSB-first bitreader
+## 2026-03-28 — Table reuse, typed Huffman tree, ForwardBitWriter bulk ops
 
 Commit: (pending commit)
+
+### Compression (MB/s, median)
+
+| Dataset | Zstd.jl | libzstd | Slowdown | Ratio (jl/lib) |
+|---------|---------|---------|----------|----------------|
+| text 5KB | 41.6 | 117.0 | 2.8x | 37.0/73.5 |
+| text 50KB | 56.3 | 899.2 | 16.0x | 129.1/825.0 |
+| repetitive 160KB | 62.9 | 2088.2 | 33.2x | 182.7/4551.1 |
+| repetitive 1MB | 60.8 | 1849.5 | 30.4x | 201.8/8738.1 |
+| random 1MB | 16.9 | 948.4 | 56.2x | 1.0/1.0 |
+
+### Notes
+- Table reuse via MatchContext: hash_table zeroed with memset (16K entries), chain_table reused without zeroing
+- Huffman tree builder: replaced Any[] + sort! with typed flat arrays + sorted priority queue
+- ForwardBitWriter: bulk bit packing into UInt64 container instead of byte-at-a-time
+- IOBuffer pre-sized with sizehint
+- Remaining gap is largely algorithmic: search_depth=64 chain walk dominates
+
+---
+
+## 2026-03-28 — After @inbounds, vectorized match extension, MSB-first bitreader
+
+Commit: 3c559db
 
 ### Decompression (MB/s, median)
 

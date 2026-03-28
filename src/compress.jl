@@ -2,7 +2,7 @@ module Compress
 
 import ..Zstandard: MAGIC_NUMBER
 import ..Frames: FrameHeader
-import ..MatchFinder: find_sequences, Sequence
+import ..MatchFinder: find_sequences, Sequence, MatchContext
 import ..EncodeSequences: encode_sequences
 import ..EncodeHuffman: build_huffman_encoder, encode_huffman_literals
 using XXHashNative
@@ -23,7 +23,7 @@ end
 const MAX_BLOCK_SIZE = 128 * 1024
 
 function compress(data::AbstractVector{UInt8}; level::Int=3)
-    io = IOBuffer()
+    io = IOBuffer(sizehint=length(data))
     write_frame_header(io, length(data))
     eff_level = (level == 0) ? 3 : level
     hash_log = 14
@@ -35,12 +35,13 @@ function compress(data::AbstractVector{UInt8}; level::Int=3)
     else
         pos = 1
         rep_offsets = [1, 4, 8]  # Persist across blocks within a frame
+        mctx = MatchContext(hash_log=hash_log, max_block_size=MAX_BLOCK_SIZE)
         while pos <= length(data)
             chunk_end = min(pos + MAX_BLOCK_SIZE - 1, length(data))
             is_last = (chunk_end == length(data))
             chunk = view(data, pos:chunk_end)
 
-            sequences = find_sequences(chunk, hash_log=hash_log, search_depth=search_depth, step=step)
+            sequences = find_sequences(chunk, hash_log=hash_log, search_depth=search_depth, step=step, ctx=mctx)
             has_seqs = !isempty(sequences) && !(length(sequences) == 1 && sequences[1].match_length == 0)
 
             if has_seqs
