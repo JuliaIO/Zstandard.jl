@@ -13,11 +13,18 @@ A pure Julia implementation of the [Zstandard](https://facebook.github.io/zstd/)
 - Skippable frames
 - Optional content checksums (XXH64)
 
+## See Also
+
+- [CodecZstd.jl](https://github.com/JuliaIO/CodecZstd.jl) -- wraps the C libzstd library via [TranscodingStreams.jl](https://github.com/JuliaIO/TranscodingStreams.jl), providing a mature and battle-tested streaming interface.
+- [ChunkCodecsLibZstd.jl](https://github.com/JuliaIO/ChunkCodecs.jl/tree/main/libs/ChunkCodecsLibZstd) -- wraps the C libzstd library via [ChunkCodecs.jl](https://github.com/JuliaIO/ChunkCodecs.jl), providing chunk-based encoding and decoding.
+
+For production use, these C-backed packages are likely more reliable and performant. Zstandard.jl is useful when a pure Julia implementation is preferred, such as for environments where C dependencies are unavailable or for educational purposes.
+
 ## Installation
 
 ```julia
 using Pkg
-Pkg.add(url="https://github.com/mkitti/Zstandard.jl")
+Pkg.add(url="https://github.com/JuliaIO/Zstandard.jl")
 ```
 
 ## Usage
