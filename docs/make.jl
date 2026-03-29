@@ -1,16 +1,26 @@
 using Documenter
+using DocumenterVitepress
 using Zstandard
 
-makedocs(
+makedocs(;
     sitename = "Zstandard.jl",
-    format = Documenter.HTML(),
     modules = [Zstandard],
+    format = DocumenterVitepress.MarkdownVitepress(
+        repo = "github.com/JuliaIO/Zstandard.jl",
+        devbranch = "main",
+        devurl = "dev",
+    ),
     pages = [
         "Home" => "index.md",
+        "API Reference" => "api.md",
     ],
-    remotes = nothing,
+    warnonly = true,
 )
 
-deploydocs(
-    repo = "github.com/mkitti/Zstandard.jl.git",
+DocumenterVitepress.deploydocs(;
+    repo = "github.com/JuliaIO/Zstandard.jl",
+    target = joinpath(@__DIR__, "build"),
+    branch = "gh-pages",
+    devbranch = "main",
+    push_preview = true,
 )

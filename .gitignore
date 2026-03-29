@@ -2,7 +2,9 @@ zeros.bin
 zeros.zst
 formatted.dict
 docs/build/
+docs/Manifest.toml
 *.swp
 Manifest.toml
 test/Manifest.toml
 temp/*
+docs/node_modules/
