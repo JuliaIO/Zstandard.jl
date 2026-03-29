@@ -27,6 +27,8 @@ using Pkg
 Pkg.add(url="https://github.com/JuliaIO/Zstandard.jl")
 ```
 
+> **Note:** This package depends on a fork of [XXHashNative.jl](https://github.com/Moelf/XXHashNative.jl) that adds XXH64 support. The `[sources]` section in `Project.toml` points to this fork until [Moelf/XXHashNative.jl#28](https://github.com/Moelf/XXHashNative.jl/pull/28) is merged.
+
 ## Usage
 
 ```julia

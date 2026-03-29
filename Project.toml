@@ -17,5 +17,8 @@ Test = "1.11"
 XXHashNative = "1.1"
 julia = "1.11"
 
+[sources]
+XXHashNative = {url = "https://github.com/mkitti/XXHashNative.jl", rev = "mkitti-XXH64"}
+
 [workspace]
 projects = ["test"]
