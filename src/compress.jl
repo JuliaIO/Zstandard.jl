@@ -83,8 +83,9 @@ function compress(data::AbstractVector{UInt8}; level::Int=3, ctx::Union{Nothing,
         rep_offsets = [1, 4, 8]
         data_pos = 1
         for (blk_idx, blk_seqs) in enumerate(block_sequences)
-            chunk_end = min(data_pos + MAX_BLOCK_SIZE - 1, length(data))
-            is_last = (chunk_end == length(data))
+            block_bytes_count = sum(Int(s.literal_length) + Int(s.match_length) for s in blk_seqs)
+            chunk_end = data_pos + block_bytes_count - 1
+            is_last = (blk_idx == length(block_sequences))
             chunk = view(data, data_pos:chunk_end)
 
             has_seqs = !isempty(blk_seqs) && !(length(blk_seqs) == 1 && blk_seqs[1].match_length == 0)

@@ -28,7 +28,7 @@ function read_frame_header(io::IO)
     window_size = 0
     if single_segment_flag == 0
         wd = read(io, UInt8)
-        exponent = wd >> 3
+        exponent = Int(wd >> 3) + 10
         mantissa = wd & 0x07
         window_size = (1 << exponent) + ((mantissa * (1 << exponent)) ÷ 8)
     end

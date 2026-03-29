@@ -50,7 +50,11 @@ function decode_sequences(sequences_data::Vector{UInt8}, literals::Vector{UInt8}
         byte2 = read(io, UInt8)
         num_sequences = Int(byte1) + (Int(byte2) << 8) + 0x7F00
     end
-    
+
+    if num_sequences == 0
+        return literals
+    end
+
     symbol_compression_modes = read(io, UInt8)
     ll_mode = (symbol_compression_modes >> 6) & 0x03
     of_mode = (symbol_compression_modes >> 4) & 0x03

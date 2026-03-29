@@ -86,8 +86,21 @@ function get_code(val::UInt32, base_table::Vector{Int})
 end
 
 function encode_sequences(io::IO, sequences::Vector{Sequence}, history_len::Int; rep_offsets::Vector{Int}=[1, 4, 8])
-    # Filter out zero-match-length sequences (trailing literals; not valid FSE sequences)
-    sequences = filter(s -> s.match_length > 0, sequences)
+    # Merge zero-match-length sequences (pure literals) into the next real sequence.
+    # Their literal bytes are already in the literals section from gather_literals,
+    # so we add their literal_length to the following sequence to keep assignments in sync.
+    merged = Sequence[]
+    carry_ll = UInt32(0)
+    for s in sequences
+        if s.match_length == 0
+            carry_ll += s.literal_length
+        else
+            push!(merged, Sequence(s.literal_length + carry_ll, s.match_length, s.offset))
+            carry_ll = UInt32(0)
+        end
+    end
+    # Any remaining carry_ll is trailing literals — no sequence needed (decoder handles them)
+    sequences = merged
     num_sequences = length(sequences)
     if num_sequences == 0
         write(io, UInt8(0))
