@@ -4,11 +4,18 @@ version = "0.1.0"
 authors = ["Mark Kittisopikul <markkitt@gmail.com>"]
 
 [deps]
-Test = "8dfed614-e22c-5e08-85e1-65c5234f0b40"
 XXHashNative = "e5d8e439-e7fa-4681-9c12-1c64bda517be"
 
+[extras]
+Test = "8dfed614-e22c-5e08-85e1-65c5234f0b40"
+
+[targets]
+test = ["Test"]
+
 [compat]
-Test = "1.11.0"
+Test = "1.11"
+XXHashNative = "1.1"
+julia = "1.11"
 
 [workspace]
 projects = ["test"]

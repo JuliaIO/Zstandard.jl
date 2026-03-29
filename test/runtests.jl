@@ -1,5 +1,6 @@
 using Zstandard
 using Test
+using Aqua
 
 @testset "Zstandard Decompressor" begin
     fixtures_dir = joinpath(@__DIR__, "fixtures")
@@ -76,3 +77,7 @@ using Test
 end
 
 include("compress.jl")
+
+@testset "Aqua.jl" begin
+    Aqua.test_all(Zstandard)
+end
