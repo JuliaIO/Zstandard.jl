@@ -1,6 +1,6 @@
 name = "Zstandard"
 uuid = "1affa58d-55fd-4c2a-ac15-0c0ae7390835"
-version = "0.1.0"
+version = "0.1.1"
 authors = ["Mark Kittisopikul <markkitt@gmail.com>"]
 
 [deps]
@@ -16,9 +16,6 @@ test = ["Test"]
 Test = "1.11"
 XXHashNative = "1.1"
 julia = "1.11"
-
-[sources]
-XXHashNative = {url = "https://github.com/mkitti/XXHashNative.jl", rev = "mkitti-XXH64"}
 
 [workspace]
 projects = ["test"]
