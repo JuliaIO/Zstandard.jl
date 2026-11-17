@@ -203,10 +203,11 @@ end
     cur = pos_of(ip, base)
     cur < next && return 0, next            # inside a region skipped by the tree update
     btlog = clog - 1
-    while next < cur                        # bring the tree up to date
+    # Bring the tree up to date. Long repetitive matches let insertion skip
+    # ahead, but the current position is always searched (ZSTD_updateTree).
+    while next < cur
         next += bt_insert1!(ht, bt, hlog, btlog, mls, attempts, base, ptr_of(next, base), iend, lowlimit)
     end
-    cur < next && return 0, next
     nm = 0
     best = mls - 1
     mlens = o.mlens; moffs = o.moffs

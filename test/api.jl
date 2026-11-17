@@ -194,6 +194,14 @@ end
     # the optimal parser beats lazy2 and is close to libzstd at the same level
     @test sizes[19] < sizes[15]
     @test sizes[19] < 1.05 * length(transcode(CodecZstd.ZstdCompressor(level=19), data))
+    # highly repetitive input spanning several blocks (period 256): the tree's
+    # skip-ahead over long repetitions must not hide positions from the search
+    periodic = UInt8[UInt8((i * 2654435761 >> 13) & 0xff) for i in 1:1_000_000]
+    for level in (16, 19)
+        c = compress(periodic; level)
+        @test decompress(c) == periodic
+        @test length(c) < 2 * length(compress(periodic; level=9)) + 100
+    end
     # long stream at level 19: the binary tree is rebased with the input buffer
     big = repeat(make_text(300_000), 40)
     buf = IOBuffer()
