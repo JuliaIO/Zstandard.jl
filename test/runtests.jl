@@ -77,6 +77,7 @@ using Aqua
 end
 
 include("compress.jl")
+include("api.jl")
 
 @testset "Aqua.jl" begin
     Aqua.test_all(Zstandard)

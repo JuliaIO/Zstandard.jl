@@ -12,11 +12,12 @@
 
 module Encoder
 
-using XXHashNative: xxh64
+using XXHashNative: xxh64, XXH64State, update!, digest!
 import ..Decoder: LL_BASE, LL_BITS, ML_BASE, ML_BITS, LL_DEFAULT_NORM, ML_DEFAULT_NORM,
-                  OF_DEFAULT_NORM, MAGIC_NUMBER, BLOCK_SIZE_MAX
+                  OF_DEFAULT_NORM, MAGIC_NUMBER, BLOCK_SIZE_MAX, ZstdDictionary, has_entropy
 
-export CompressionContext, compress_frame!, compression_parameters, MIN_LEVEL, MAX_LEVEL
+export CompressionContext, compress_frame!, compression_parameters, MIN_LEVEL, MAX_LEVEL,
+       StreamCompressor, stream_write!, stream_flush!, stream_finish!
 
 const MIN_LEVEL = -7
 const MAX_LEVEL = 22
@@ -973,6 +974,49 @@ function reset_context!(cc::CompressionContext, p::CParams, level::Int)
     return cc
 end
 
+norm_log(norm::Vector{Int16}) = highbit(sum(x -> x == -1 ? 1 : Int(x), norm))
+
+"""Start a frame that uses `dict`: repeat offsets and entropy tables come from it."""
+function apply_dict_entropy!(cc::CompressionContext, dict::ZstdDictionary)
+    cc.rep = dict.rep_offsets
+    cc.prep1, cc.prep2 = dict.rep_offsets[1], dict.rep_offsets[2]
+    has_entropy(dict) || return cc
+    for (t, norm) in ((cc.ll_prev, dict.ll_norm), (cc.ml_prev, dict.ml_norm), (cc.of_prev, dict.of_norm))
+        build_ctable!(t, norm, length(norm) - 1, norm_log(norm), cc.tabsym, cc.cumul)
+    end
+    cc.ll_prev_ok = cc.ml_prev_ok = cc.of_prev_ok = true
+    ws = dict.huf_weights
+    tl = dict.huf_log
+    lens = cc.lens
+    fill!(lens, 0x00)
+    for i in eachindex(ws)
+        ws[i] > 0 && (lens[i] = UInt8(tl + 1 - ws[i]))
+    end
+    huf_codes!(cc.huf_prev, lens, length(ws) - 1, tl)
+    cc.huf_prev_ok = true
+    return cc
+end
+
+"""Insert dictionary positions [1, n) of `base` into the match-finder tables."""
+function load_dict!(cc::CompressionContext, base::Ptr{UInt8}, n::Int)
+    p = cc.params
+    n < HASH_READ_SIZE + 1 && return cc
+    last = n - HASH_READ_SIZE
+    mls = clamp(p.min_match, 4, 7)
+    if p.strategy == S_FAST
+        @inbounds for i in 1:last
+            cc.htab[zhash(ptr_of(i, base), p.hash_log, mls) + 1] = i % Int32
+        end
+    elseif p.strategy == S_DFAST
+        @inbounds for i in 1:last
+            cc.htab[zhash(ptr_of(i, base), p.hash_log, 8) + 1] = i % Int32
+            cc.ctab[zhash(ptr_of(i, base), p.chain_log, mls) + 1] = i % Int32
+        end
+    end
+    # hash-chain strategies insert lazily from next_to_update = 1
+    return cc
+end
+
 # ---------------------------------------------------------------------------
 # Literals section
 # ---------------------------------------------------------------------------
@@ -1411,26 +1455,45 @@ function compress_block!(cc::CompressionContext, out::Vector{UInt8}, pos::Int, b
     return pos + csize
 end
 
-function write_frame_header!(out::Vector{UInt8}, pos::Int, src_size::Int, window_log::Int, checksum::Bool)
+"""
+Write a frame header. `src_size < 0` means unknown (no Frame_Content_Size);
+`dict_id == 0` omits the dictionary ID.
+"""
+function write_frame_header!(out::Vector{UInt8}, pos::Int, src_size::Int, window_log::Int,
+                             checksum::Bool, dict_id::UInt32=UInt32(0))
     for k in 0:3
         out[pos + k] = (MAGIC_NUMBER >> (8k)) % UInt8
     end
     pos += 4
     window = 1 << window_log
-    single = src_size <= window
-    fcs_code = src_size < 256 ? 0 : src_size < 65536 + 256 ? 1 : src_size <= 0xFFFFFFFF ? 2 : 3
-    (fcs_code == 0 && !single) && (fcs_code = 1)
-    fd = (fcs_code << 6) | (Int(single) << 5) | (Int(checksum) << 2)
+    known = src_size >= 0
+    single = known && src_size <= window
+    if !known
+        fcs_code = 0
+    else
+        fcs_code = src_size < 256 ? 0 : src_size < 65536 + 256 ? 1 : src_size <= 0xFFFFFFFF ? 2 : 3
+        (fcs_code == 0 && !single) && (fcs_code = 1)
+    end
+    did_code = dict_id == 0 ? 0 : dict_id < 256 ? 1 : dict_id < 65536 ? 2 : 3
+    fd = (fcs_code << 6) | (Int(single) << 5) | (Int(checksum) << 2) | did_code
     out[pos] = UInt8(fd); pos += 1
     if !single
         out[pos] = UInt8((window_log - 10) << 3); pos += 1
     end
-    v = fcs_code == 1 ? src_size - 256 : src_size
-    nb = (1, 2, 4, 8)[fcs_code + 1]
-    for k in 0:nb-1
-        out[pos + k] = (v >> (8k)) % UInt8
+    nd = (0, 1, 2, 4)[did_code + 1]
+    for k in 0:nd-1
+        out[pos + k] = (dict_id >> (8k)) % UInt8
     end
-    return pos + nb
+    pos += nd
+    if known
+        v = fcs_code == 1 ? src_size - 256 : src_size
+        nb = (1, 2, 4, 8)[fcs_code + 1]
+        for k in 0:nb-1
+            out[pos + k] = (v >> (8k)) % UInt8
+        end
+        pos += nb
+    end
+    return pos
 end
 
 """
@@ -1439,23 +1502,33 @@ end
 Compress `data` as a single Zstandard frame.
 """
 function compress_frame!(cc::CompressionContext, data::AbstractVector{UInt8}, level::Integer;
-                         checksum::Bool=false)
-    src = data isa Vector{UInt8} ? data : Vector{UInt8}(data)
-    n = length(src)
-    p = compression_parameters(level, n)
+                         checksum::Bool=false, dict::Union{Nothing,ZstdDictionary}=nothing)
+    n = length(data)
+    dlen = dict === nothing ? 0 : length(dict.content)
+    if dlen > 0
+        # The dictionary content is history preceding the data.
+        src = Vector{UInt8}(undef, dlen + n)
+        copyto!(src, 1, dict.content, 1, dlen)
+        copyto!(src, dlen + 1, data, 1, n)
+    else
+        src = data isa Vector{UInt8} ? data : Vector{UInt8}(data)
+    end
+    p = compression_parameters(level, n + dlen)
     reset_context!(cc, p, Int(level))
+    dict === nothing || apply_dict_entropy!(cc, dict)
     bound = n + (n >> 7) + 64 + 3 * (n ÷ BLOCK_SIZE_MAX + 1)
     out = Vector{UInt8}(undef, bound)
-    pos = write_frame_header!(out, 1, n, p.window_log, checksum)
+    pos = write_frame_header!(out, 1, n, p.window_log, checksum, dict === nothing ? UInt32(0) : dict.id)
     GC.@preserve src begin
         base = pointer(src)
+        dlen > 0 && load_dict!(cc, base, dlen)
         if n == 0
             pos = write_block_header!(out, pos, true, 0, 0)
         else
-            off = 0
-            while off < n
-                bn = min(BLOCK_SIZE_MAX, n - off)
-                last = off + bn == n
+            off = dlen
+            while off < dlen + n
+                bn = min(BLOCK_SIZE_MAX, dlen + n - off)
+                last = off + bn == dlen + n
                 length(out) < pos + bn + 16 && resize!(out, pos + bn + 1024)
                 pos = compress_block!(cc, out, pos, base, base + off, base + off + bn, last)
                 off += bn
@@ -1463,7 +1536,7 @@ function compress_frame!(cc::CompressionContext, data::AbstractVector{UInt8}, le
         end
     end
     if checksum
-        h = xxh64(src) % UInt32
+        h = (dlen > 0 ? xxh64(view(src, dlen+1:dlen+n)) : xxh64(src)) % UInt32
         length(out) < pos + 4 && resize!(out, pos + 4)
         for k in 0:3
             out[pos + k] = (h >> (8k)) % UInt8
@@ -1472,6 +1545,173 @@ function compress_frame!(cc::CompressionContext, data::AbstractVector{UInt8}, le
     end
     resize!(out, pos - 1)
     return out
+end
+
+# ---------------------------------------------------------------------------
+# Streaming compression
+# ---------------------------------------------------------------------------
+
+"""
+    StreamCompressor(; level=3, checksum=false, dict=nothing)
+
+Incremental compressor producing one frame without a known content size.
+Input is fed with [`stream_write!`](@ref); compressed bytes accumulate in
+`sc.out[1:sc.olen]` and are taken by the caller. Memory use is bounded by the
+window size of the level.
+"""
+mutable struct StreamCompressor
+    cc::CompressionContext
+    level::Int
+    checksum::Bool
+    dict::Union{Nothing,ZstdDictionary}
+    buf::Vector{UInt8}   # [history | pending input]
+    len::Int             # valid bytes in buf
+    pend::Int            # first byte not yet compressed (1-based)
+    cap::Int             # maximum buffer size
+    gran::Int            # compaction granularity (multiple of the chain table size)
+    out::Vector{UInt8}
+    olen::Int
+    started::Bool
+    finished::Bool
+    xxh::XXH64State
+end
+
+function StreamCompressor(; level::Integer=3, checksum::Bool=false,
+                          dict::Union{Nothing,ZstdDictionary}=nothing)
+    StreamCompressor(CompressionContext(), Int(level), checksum, dict, UInt8[], 0, 1, 0, 0,
+                     UInt8[], 0, false, false, XXH64State())
+end
+
+function out_reserve!(sc::StreamCompressor, n::Int)
+    need = sc.olen + n
+    length(sc.out) < need && resize!(sc.out, max(need, 2 * length(sc.out)))
+    return sc
+end
+
+function stream_begin!(sc::StreamCompressor)
+    cc = sc.cc
+    dlen = sc.dict === nothing ? 0 : length(sc.dict.content)
+    p = compression_parameters(sc.level, -1)
+    reset_context!(cc, p, sc.level)
+    sc.dict === nothing || apply_dict_entropy!(cc, sc.dict)
+    window = 1 << p.window_log
+    sc.gran = 1 << max(p.chain_log, 17)
+    sc.cap = window + dlen + sc.gran + 2 * BLOCK_SIZE_MAX
+    resize!(sc.buf, min(sc.cap, max(dlen + 2 * BLOCK_SIZE_MAX, 1 << 18)))
+    sc.len = 0
+    if dlen > 0
+        copyto!(sc.buf, 1, sc.dict.content, 1, dlen)
+        sc.len = dlen
+        GC.@preserve sc load_dict!(cc, pointer(sc.buf), dlen)
+    end
+    sc.pend = sc.len + 1
+    out_reserve!(sc, 32)
+    sc.olen = write_frame_header!(sc.out, sc.olen + 1, -1, p.window_log, sc.checksum,
+                                  sc.dict === nothing ? UInt32(0) : sc.dict.id) - 1
+    sc.xxh = XXH64State()
+    sc.started = true
+    sc.finished = false
+    return sc
+end
+
+# Shift tables and buffer down by `d` bytes (a multiple of sc.gran).
+function rebase!(sc::StreamCompressor, d::Int)
+    cc = sc.cc
+    for t in (cc.htab, cc.ctab)
+        @inbounds for i in eachindex(t)
+            v = Int(t[i]) - d
+            t[i] = v < 1 ? Int32(0) : v % Int32
+        end
+    end
+    cc.next_to_update = max(1, cc.next_to_update - d)
+    copyto!(sc.buf, 1, sc.buf, d + 1, sc.len - d)
+    sc.len -= d
+    sc.pend -= d
+    return sc
+end
+
+# Make room for n more input bytes (n <= BLOCK_SIZE_MAX).
+function make_input_room!(sc::StreamCompressor, n::Int)
+    sc.len + n <= length(sc.buf) && return sc
+    if length(sc.buf) < sc.cap
+        resize!(sc.buf, min(sc.cap, max(2 * length(sc.buf), sc.len + n)))
+        sc.len + n <= length(sc.buf) && return sc
+    end
+    window = 1 << sc.cc.params.window_log
+    d = ((sc.pend - 1 - window) ÷ sc.gran) * sc.gran
+    if d > 0
+        rebase!(sc, d)
+    end
+    sc.len + n > length(sc.buf) && resize!(sc.buf, sc.len + n)
+    return sc
+end
+
+function emit_block!(sc::StreamCompressor, bn::Int, last::Bool)
+    out_reserve!(sc, bn + 64)
+    GC.@preserve sc begin
+        base = pointer(sc.buf)
+        sc.olen = compress_block!(sc.cc, sc.out, sc.olen + 1, base, base + sc.pend - 1,
+                                  base + sc.pend - 1 + bn, last) - 1
+    end
+    sc.pend += bn
+    return sc
+end
+
+"""
+    stream_write!(sc, data::AbstractVector{UInt8})
+
+Feed input. Full blocks are compressed as soon as more input follows them.
+"""
+function stream_write!(sc::StreamCompressor, data::AbstractVector{UInt8})
+    sc.finished && error("stream already finished")
+    sc.started || stream_begin!(sc)
+    i = firstindex(data)
+    stop = lastindex(data)
+    while i <= stop
+        k = min(stop - i + 1, BLOCK_SIZE_MAX)
+        make_input_room!(sc, k)
+        copyto!(sc.buf, sc.len + 1, data, i, k)
+        sc.len += k
+        i += k
+        # keep the last (possibly full) block pending so it can be marked last
+        while sc.len - sc.pend + 1 > BLOCK_SIZE_MAX
+            emit_block!(sc, BLOCK_SIZE_MAX, false)
+        end
+    end
+    sc.checksum && update!(sc.xxh, data)
+    return sc
+end
+
+"""Compress all pending input into a non-final block, so that it can be decoded."""
+function stream_flush!(sc::StreamCompressor)
+    sc.started || stream_begin!(sc)
+    n = sc.len - sc.pend + 1
+    n > 0 && !sc.finished && emit_block!(sc, n, false)
+    return sc
+end
+
+"""Finish the frame: compress remaining input as the last block and append the checksum."""
+function stream_finish!(sc::StreamCompressor)
+    sc.finished && return sc
+    sc.started || stream_begin!(sc)
+    n = sc.len - sc.pend + 1
+    if n > 0
+        emit_block!(sc, n, true)
+    else
+        out_reserve!(sc, 3)
+        sc.olen = write_block_header!(sc.out, sc.olen + 1, true, 0, 0) - 1
+    end
+    if sc.checksum
+        out_reserve!(sc, 4)
+        h = digest!(sc.xxh) % UInt32
+        for k in 0:3
+            sc.out[sc.olen + 1 + k] = (h >> (8k)) % UInt8
+        end
+        sc.olen += 4
+    end
+    sc.finished = true
+    sc.started = false
+    return sc
 end
 
 end # module

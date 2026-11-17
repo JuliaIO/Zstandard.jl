@@ -345,7 +345,8 @@ const OF_DEFAULT_TABLE = build_default_table(OF_DEFAULT_NORM, 5, OF_BASE, OF_BIT
 
 """
 Decode a Huffman tree description at `p[1:len]` into `table`.
-Returns `(tablelog, bytes_consumed)`.
+Returns `(tablelog, bytes_consumed, nsymbols)`; `ws[1:nsymbols]` holds the
+weights including the implied last one.
 """
 function read_huf_table!(table::Vector{UInt16}, ws::Vector{UInt8}, p::Ptr{UInt8}, len::Int,
                          norm::Vector{Int16}, symnext::Vector{UInt16}, tabsym::Vector{UInt8},
@@ -438,7 +439,7 @@ function read_huf_table!(table::Vector{UInt16}, ws::Vector{UInt8}, p::Ptr{UInt8}
         end
         rankstart[w + 1] = start + n
     end
-    return tl, consumed
+    return tl, consumed, nw
 end
 
 @inline function huf_decode1(b::BitD, tab::Ptr{UInt16}, tl::Int)
@@ -531,14 +532,32 @@ Create with [`parse_dictionary`](@ref).
 """
 struct ZstdDictionary
     id::UInt32
-    huf::Vector{UInt16}       # empty if absent
+    huf::Vector{UInt16}       # decoding tables; empty if absent
     huf_log::Int
-    ll::Vector{UInt64}        # empty if absent
+    ll::Vector{UInt64}
     ml::Vector{UInt64}
     of::Vector{UInt64}
     rep_offsets::NTuple{3,Int}
     content::Vector{UInt8}
+    # entropy statistics, used to build matching encoding tables
+    huf_weights::Vector{UInt8}
+    ll_norm::Vector{Int16}
+    ml_norm::Vector{Int16}
+    of_norm::Vector{Int16}
 end
+
+"""
+    ZstdDictionary(content::AbstractVector{UInt8})
+
+A raw-content dictionary (ID 0): `content` is used as history preceding the
+data, without entropy tables. Same as `parse_dictionary` for data that does
+not start with the dictionary magic number.
+"""
+ZstdDictionary(content::AbstractVector{UInt8}) =
+    ZstdDictionary(UInt32(0), UInt16[], 0, UInt64[], UInt64[], UInt64[], (1, 4, 8),
+                   Vector{UInt8}(content), UInt8[], Int16[], Int16[], Int16[])
+
+has_entropy(d::ZstdDictionary) = !isempty(d.huf)
 
 const DICT_MAGIC = 0xEC30A437
 
@@ -560,14 +579,18 @@ function parse_dictionary(data::AbstractVector{UInt8})
         GC.@preserve d begin
             p = pointer(d)
             rem() = length(d) - pos + 1
-            tl, n = read_huf_table!(huf, ws, p + pos - 1, rem(), norm, symnext, tabsym, wtable)
+            tl, n, nw = read_huf_table!(huf, ws, p + pos - 1, rem(), norm, symnext, tabsym, wtable)
             pos += n
+            weights = ws[1:nw]
             nsym, al, n = read_fse_header!(norm, p + pos - 1, rem(), 32, OF_MAX_AL); pos += n
             build_fse_table!(of, norm, nsym, al, OF_BASE, OF_BITS, symnext, tabsym)
+            of_norm = norm[1:nsym]
             nsym, al, n = read_fse_header!(norm, p + pos - 1, rem(), 53, ML_MAX_AL); pos += n
             build_fse_table!(ml, norm, nsym, al, ML_BASE, ML_BITS, symnext, tabsym)
+            ml_norm = norm[1:nsym]
             nsym, al, n = read_fse_header!(norm, p + pos - 1, rem(), 36, LL_MAX_AL); pos += n
             build_fse_table!(ll, norm, nsym, al, LL_BASE, LL_BITS, symnext, tabsym)
+            ll_norm = norm[1:nsym]
             rem() < 12 && zerr("truncated dictionary")
             r1 = Int(load32(p + pos - 1)); r2 = Int(load32(p + pos + 3)); r3 = Int(load32(p + pos + 7))
             pos += 12
@@ -576,9 +599,10 @@ function parse_dictionary(data::AbstractVector{UInt8})
         for r in (r1, r2, r3)
             (r == 0 || r > length(content)) && zerr("invalid dictionary repeat offset")
         end
-        return ZstdDictionary(id, huf, tl, ll, ml, of, (r1, r2, r3), content)
+        return ZstdDictionary(id, huf, tl, ll, ml, of, (r1, r2, r3), content,
+                              weights, ll_norm, ml_norm, of_norm)
     end
-    return ZstdDictionary(UInt32(0), UInt16[], 0, UInt64[], UInt64[], UInt64[], (1, 4, 8), d)
+    return ZstdDictionary(d)
 end
 
 # ---------------------------------------------------------------------------
@@ -693,7 +717,7 @@ function decode_literals!(st::DecoderState, src::Ptr{UInt8}, len::Int)
     q = src + hs
     tsize = 0
     if ltype == 2
-        tl, tsize = read_huf_table!(st.huf_own, st.ws, q, csize, st.norm, st.symnext, st.tabsym, st.wtable)
+        tl, tsize, _ = read_huf_table!(st.huf_own, st.ws, q, csize, st.norm, st.symnext, st.tabsym, st.wtable)
         st.huf = st.huf_own
         st.huf_log = tl
     elseif isempty(st.huf)

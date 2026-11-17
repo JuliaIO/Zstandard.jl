@@ -9,6 +9,9 @@ A pure Julia implementation of the [Zstandard](https://facebook.github.io/zstd/)
 - Frame content size recorded in the header; optional XXH64 content checksum
 - **Decompression** of all standard frames, including concatenated and skippable frames, raw and formatted dictionaries
 - Streaming decompression via `ZstdDecompressorStream` (implements `IO`, memory bounded by the window size)
+- Streaming compression via `ZstdCompressorStream` (implements `IO`, with `flush` support)
+- Dictionary compression (raw content or formatted dictionaries, e.g. trained with `zstd --train`)
+- [TranscodingStreams.jl](https://github.com/JuliaIO/TranscodingStreams.jl) codecs `ZstandardCompressor` / `ZstandardDecompressor` (package extension, loaded with `using TranscodingStreams`)
 - Malformed input is rejected with a `ZstdError`
 
 ## See Also
@@ -32,11 +35,9 @@ Pkg.add(url="https://github.com/JuliaIO/Zstandard.jl")
 ```julia
 using Zstandard
 
-# Compress
+# Compress / decompress in memory
 compressed = compress("Hello, world!")
-compressed = compress(read("input.bin"))
-
-# Decompress
+compressed = compress(read("input.bin"); level=19, checksum=true)  # levels -7..22, default 3
 data = decompress(compressed)
 
 # Streaming decompression
@@ -45,8 +46,20 @@ open("file.zst") do io
     decompressed = read(stream)
 end
 
-# Compression level (-7 to 22, default 3) and optional content checksum
-compressed = compress(data; level=19, checksum=true)
+# Streaming compression (close finishes the frame and closes the file)
+stream = ZstdCompressorStream(open("out.zst", "w"); level=5)
+write(stream, data)
+close(stream)
+
+# Dictionaries
+dict = parse_dictionary(read("my.dict"))      # formatted (zstd --train) or raw content
+compressed = compress(data; dict)
+decompress(compressed, dict)
+
+# TranscodingStreams codecs
+using TranscodingStreams
+compressed = transcode(ZstandardCompressor(level=3), data)
+stream = TranscodingStream(ZstandardDecompressor(), open("file.zst"))
 ```
 
 ## Performance
