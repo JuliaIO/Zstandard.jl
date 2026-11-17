@@ -10,7 +10,9 @@ A pure Julia implementation of the [Zstandard](https://facebook.github.io/zstd/)
 - **Decompression** of all standard frames, including concatenated and skippable frames, raw and formatted dictionaries
 - Streaming decompression via `ZstdDecompressorStream` (implements `IO`, memory bounded by the window size)
 - Streaming compression via `ZstdCompressorStream` (implements `IO`, with `flush` support)
-- Dictionary compression (raw content or formatted dictionaries, e.g. trained with `zstd --train`)
+- Dictionary compression (raw content or formatted dictionaries) and dictionary training (`train_dictionary`, fastCover as `zstd --train`)
+- Long-distance matching (`long=true`, as `zstd --long`) and multithreaded compression (`nthreads`)
+- Frame inspection: `frame_header`, `frame_content_size`, `frame_compressed_size`, `decompressed_size`, skippable frames
 - [TranscodingStreams.jl](https://github.com/JuliaIO/TranscodingStreams.jl) codecs `ZstandardCompressor` / `ZstandardDecompressor` (package extension, loaded with `using TranscodingStreams`)
 - Malformed input is rejected with a `ZstdError`
 
@@ -55,6 +57,19 @@ close(stream)
 dict = parse_dictionary(read("my.dict"))      # formatted (zstd --train) or raw content
 compressed = compress(data; dict)
 decompress(compressed, dict)
+
+# Train a dictionary from many small samples
+dict_bytes = train_dictionary(samples; dict_size=16384)
+dict = parse_dictionary(dict_bytes)
+
+# Long-distance matching and multithreading (start Julia with `-t N`)
+compressed = compress(big_data; level=9, long=true)
+compressed = compress(big_data; level=3, nthreads=Threads.nthreads())
+
+# Frame inspection
+frame_content_size(compressed)        # decompressed size from the header (or nothing)
+frame_compressed_size(compressed)     # size of the first frame
+meta = skippable_frame("user metadata")
 
 # TranscodingStreams codecs
 using TranscodingStreams

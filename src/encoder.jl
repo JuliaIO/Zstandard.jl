@@ -1007,17 +1007,21 @@ function apply_dict_entropy!(cc::CompressionContext, dict::ZstdDictionary)
 end
 
 """Insert dictionary positions [1, n) of `base` into the match-finder tables."""
-function load_dict!(cc::CompressionContext, base::Ptr{UInt8}, n::Int)
+load_dict!(cc::CompressionContext, base::Ptr{UInt8}, n::Int) = load_history!(cc, base, 1, n + 1)
+
+"""Insert history positions [from, to) of `base` into the match-finder tables."""
+function load_history!(cc::CompressionContext, base::Ptr{UInt8}, from::Int, to::Int)
     p = cc.params
-    n < HASH_READ_SIZE + 1 && return cc
-    last = n - HASH_READ_SIZE
+    to - from < HASH_READ_SIZE + 1 && return cc
+    last = to - 1 - HASH_READ_SIZE
     mls = clamp(p.min_match, 4, 7)
+    cc.next_to_update = from
     if p.strategy == S_FAST
-        @inbounds for i in 1:last
+        @inbounds for i in from:last
             cc.htab[zhash(ptr_of(i, base), p.hash_log, mls) + 1] = i % Int32
         end
     elseif p.strategy == S_DFAST
-        @inbounds for i in 1:last
+        @inbounds for i in from:last
             cc.htab[zhash(ptr_of(i, base), p.hash_log, 8) + 1] = i % Int32
             cc.ctab[zhash(ptr_of(i, base), p.chain_log, mls) + 1] = i % Int32
         end
@@ -1378,6 +1382,8 @@ end
 # Blocks and frames
 # ---------------------------------------------------------------------------
 
+include("ldm.jl")
+
 struct EntropySnapshot
     rep::NTuple{3,Int}
     ll_ok::Bool; ml_ok::Bool; of_ok::Bool; huf_ok::Bool
@@ -1390,9 +1396,19 @@ function write_block_header!(out::Vector{UInt8}, pos::Int, last::Bool, btype::In
 end
 
 function parse_block!(cc::CompressionContext, base::Ptr{UInt8}, bstart::Ptr{UInt8}, bend::Ptr{UInt8})
+    cc.ss.nlit = 0; cc.ss.nseq = 0
+    parse_range!(cc, base, bstart, bend, true)
+end
+
+"""
+Parse [bstart, bend) and append its sequences (and trailing literals) to the
+sequence store. `first` marks the first range of a block (the optimal parser
+refreshes its statistics then).
+"""
+function parse_range!(cc::CompressionContext, base::Ptr{UInt8}, bstart::Ptr{UInt8}, bend::Ptr{UInt8},
+                      first::Bool)
     p = cc.params
     ss = cc.ss
-    ss.nlit = 0; ss.nseq = 0
     window = 1 << p.window_log
     lowlimit = max(1, pos_of(bend, base) - window)
     n = Int(bend - bstart)
@@ -1412,7 +1428,7 @@ function parse_block!(cc::CompressionContext, base::Ptr{UInt8}, bstart::Ptr{UInt
         cc.next_to_update = max(cc.next_to_update, lowlimit)
         cc.next_to_update = parse_opt!(ss, cc.opt, cc.htab, p.hash_log, cc.ctab, p.chain_log,
             clamp(p.min_match, 3, 4), 1 << p.search_log, max(p.target_length, 8), p.strategy == S_BTULTRA,
-            base, bstart, bend, lowlimit, cc.rep, cc.next_to_update)
+            base, bstart, bend, lowlimit, cc.rep, cc.next_to_update, first)
     else
         depth = p.strategy == S_GREEDY ? 0 : p.strategy == S_LAZY ? 1 : 2
         mls = clamp(p.min_match, 4, 6)
@@ -1426,7 +1442,8 @@ end
 
 """Compress one block into out[pos]. Returns new pos."""
 function compress_block!(cc::CompressionContext, out::Vector{UInt8}, pos::Int, base::Ptr{UInt8},
-                         bstart::Ptr{UInt8}, bend::Ptr{UInt8}, last::Bool)
+                         bstart::Ptr{UInt8}, bend::Ptr{UInt8}, last::Bool,
+                         ldm::Union{Nothing,LdmCursor}=nothing)
     n = Int(bend - bstart)
     # RLE block
     if n > 0
@@ -1441,11 +1458,11 @@ function compress_block!(cc::CompressionContext, out::Vector{UInt8}, pos::Int, b
             pos = write_block_header!(out, pos, last, 1, n)
             out[pos] = b0
             # keep the match finder's view consistent
-            parse_block!(cc, base, bstart, bend)
+            ldm === nothing ? parse_block!(cc, base, bstart, bend) : parse_block_ldm!(cc, base, bstart, bend, ldm)
             return pos + 1
         end
     end
-    parse_block!(cc, base, bstart, bend)
+    ldm === nothing ? parse_block!(cc, base, bstart, bend) : parse_block_ldm!(cc, base, bstart, bend, ldm)
     snap = EntropySnapshot(cc.rep, cc.ll_prev_ok, cc.ml_prev_ok, cc.of_prev_ok, cc.huf_prev_ok)
     blk = cc.blk
     need = 2n + 1024
@@ -1516,7 +1533,8 @@ end
 Compress `data` as a single Zstandard frame.
 """
 function compress_frame!(cc::CompressionContext, data::AbstractVector{UInt8}, level::Integer;
-                         checksum::Bool=false, dict::Union{Nothing,ZstdDictionary}=nothing)
+                         checksum::Bool=false, dict::Union{Nothing,ZstdDictionary}=nothing,
+                         long::Bool=false)
     n = length(data)
     dlen = dict === nothing ? 0 : length(dict.content)
     if dlen > 0
@@ -1528,6 +1546,12 @@ function compress_frame!(cc::CompressionContext, data::AbstractVector{UInt8}, le
         src = data isa Vector{UInt8} ? data : Vector{UInt8}(data)
     end
     p = compression_parameters(level, n + dlen)
+    if long
+        # long-distance matching uses a 128 MiB window (as `zstd --long`)
+        src_log = max(10, 64 - leading_zeros(UInt64(max(n + dlen - 1, 1))))
+        wlog = max(p.window_log, min(LDM_WINDOW_LOG, src_log))
+        p = CParams(wlog, p.chain_log, p.hash_log, p.search_log, p.min_match, p.target_length, p.strategy)
+    end
     reset_context!(cc, p, Int(level))
     dict === nothing || apply_dict_entropy!(cc, dict)
     bound = n + (n >> 7) + 64 + 3 * (n ÷ BLOCK_SIZE_MAX + 1)
@@ -1536,6 +1560,12 @@ function compress_frame!(cc::CompressionContext, data::AbstractVector{UInt8}, le
     GC.@preserve src begin
         base = pointer(src)
         dlen > 0 && load_dict!(cc, base, dlen)
+        ldm = nothing
+        if long && n >= 1 << 16
+            mm = p.strategy >= S_BTULTRA ? 32 : 64
+            ldm = ldm_sequences(base, dlen + 1, dlen + n, 1 << p.window_log, mm,
+                                max(6, min(20, p.window_log - 7)))
+        end
         if n == 0
             pos = write_block_header!(out, pos, true, 0, 0)
         else
@@ -1544,7 +1574,7 @@ function compress_frame!(cc::CompressionContext, data::AbstractVector{UInt8}, le
                 bn = min(BLOCK_SIZE_MAX, dlen + n - off)
                 last = off + bn == dlen + n
                 length(out) < pos + bn + 16 && resize!(out, pos + bn + 1024)
-                pos = compress_block!(cc, out, pos, base, base + off, base + off + bn, last)
+                pos = compress_block!(cc, out, pos, base, base + off, base + off + bn, last, ldm)
                 off += bn
             end
         end
@@ -1559,6 +1589,68 @@ function compress_frame!(cc::CompressionContext, data::AbstractVector{UInt8}, le
     end
     resize!(out, pos - 1)
     return out
+end
+
+# ---------------------------------------------------------------------------
+# Multithreaded compression (one frame, independent jobs with overlapping history)
+# ---------------------------------------------------------------------------
+
+"""
+    mt_layout(n, level) -> (params, job_size, overlap)
+
+Job layout for multithreaded compression of `n` bytes, after libzstd's
+defaults: jobs of at least one window (min 1 MiB; four windows for the
+optimal parser, whose history is expensive to load), each loading part of the
+preceding data as history (window/8 for fast..lazy2, more for optimal parsing).
+"""
+function mt_layout(n::Int, level::Integer)
+    p = compression_parameters(level, n)
+    window = 1 << p.window_log
+    job = max(1 << 20, p.strategy >= S_BTOPT ? 4window : window)
+    overlap = window >> (p.strategy == S_BTULTRA ? 1 : p.strategy == S_BTOPT ? 2 : 3)
+    return p, job, overlap
+end
+
+"""
+    compress_job!(cc, p, level, data, job_start, job_end, overlap, last) -> Vector{UInt8}
+
+Compress `data[job_start:job_end]` into blocks (no frame header), using up to
+`overlap` preceding bytes as history. Jobs other than the first start with
+invalidated repeat offsets and no previous entropy tables, so their output can
+follow any preceding job in the same frame.
+"""
+function compress_job!(cc::CompressionContext, p::CParams, level::Integer, data::Vector{UInt8},
+                       job_start::Int, job_end::Int, overlap::Int, last::Bool)
+    reset_context!(cc, p, Int(level))
+    if job_start > 1
+        cc.rep = (0, 0, 0)          # unknown: never emit a repcode until real offsets are known
+        cc.prep1 = cc.prep2 = 0
+    end
+    n = job_end - job_start + 1
+    out = Vector{UInt8}(undef, n + (n >> 7) + 64 + 3 * (n ÷ BLOCK_SIZE_MAX + 1))
+    pos = 1
+    GC.@preserve data begin
+        base = pointer(data)
+        hist = max(1, job_start - overlap)
+        hist < job_start && load_history!(cc, base, hist, job_start)
+        off = job_start - 1
+        while off < job_end
+            bn = min(BLOCK_SIZE_MAX, job_end - off)
+            lastb = last && off + bn == job_end
+            length(out) < pos + bn + 16 && resize!(out, pos + bn + 1024)
+            pos = compress_block!(cc, out, pos, base, base + off, base + off + bn, lastb)
+            off += bn
+        end
+    end
+    resize!(out, pos - 1)
+    return out
+end
+
+"""Frame header bytes (as written by compress_frame!) for an input of n bytes."""
+function frame_header_bytes(n::Int, p::CParams, checksum::Bool)
+    out = Vector{UInt8}(undef, 32)
+    pos = write_frame_header!(out, 1, n, p.window_log, checksum)
+    return resize!(out, pos - 1)
 end
 
 # ---------------------------------------------------------------------------
@@ -1727,5 +1819,7 @@ function stream_finish!(sc::StreamCompressor)
     sc.started = false
     return sc
 end
+
+include("dictbuilder.jl")
 
 end # module

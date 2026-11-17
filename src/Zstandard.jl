@@ -1,7 +1,10 @@
 module Zstandard
 
 export decompress, compress, ZstdDecompressorStream, ZstdCompressorStream, ZstdDictionary,
-       parse_dictionary, ZstdError, ZstandardCompressor, ZstandardDecompressor
+       parse_dictionary, ZstdError, ZstandardCompressor, ZstandardDecompressor,
+       ZstdFrameHeader, frame_header, frame_content_size, frame_compressed_size, frame_dict_id,
+       decompressed_size, is_zstd_frame, is_skippable_frame, skippable_frame, read_skippable_frame,
+       train_dictionary, finalize_dictionary
 
 const MAGIC_NUMBER = 0xFD2FB528
 const SKIPPABLE_MAGIC_START = 0x184D2A50
@@ -10,8 +13,12 @@ const SKIPPABLE_MAGIC_END   = 0x184D2A5F
 include("decoder.jl")
 using .Decoder: ZstdError, ZstdDictionary, parse_dictionary, DecoderState, decompress_frames
 
+include("frameinfo.jl")
+
 include("encoder.jl")
-using .Encoder: CompressionContext, compress_frame!
+using .Encoder: CompressionContext, compress_frame!, mt_layout, compress_job!, frame_header_bytes,
+                train_dictionary, finalize_dictionary
+using XXHashNative: xxh64
 
 include("streaming.jl")
 using .Streaming: ZstdDecompressorStream, ZstdCompressorStream
@@ -87,8 +94,34 @@ end
 # Positions are stored as Int32 in the match finder tables.
 const MAX_FRAME_INPUT = 1 << 30
 
+# Compress one frame with jobs spread over up to `nthreads` tasks.
+function _compress_mt(data::Vector{UInt8}, level::Integer, checksum::Bool, nthreads::Int)
+    n = length(data)
+    p, job, overlap = mt_layout(n, level)
+    njobs = cld(n, job)
+    sem = Base.Semaphore(nthreads)
+    tasks = map(1:njobs) do j
+        js = (j - 1) * job + 1
+        je = min(j * job, n)
+        Threads.@spawn Base.acquire(sem) do
+            _with_cctx(cc -> compress_job!(cc, p, level, data, js, je, overlap, j == njobs))
+        end
+    end
+    parts = fetch.(tasks)
+    out = frame_header_bytes(n, p, checksum)
+    sizehint!(out, length(out) + sum(length, parts) + 4)
+    foreach(x -> append!(out, x), parts)
+    if checksum
+        h = xxh64(data) % UInt32
+        for k in 0:3
+            push!(out, (h >> (8k)) % UInt8)
+        end
+    end
+    return out
+end
+
 """
-    compress(data; level=3, checksum=false, dict=nothing) -> Vector{UInt8}
+    compress(data; level=3, checksum=false, dict=nothing, nthreads=1, long=false) -> Vector{UInt8}
 
 Compress `data` (a byte vector or string) into a Zstandard frame.
 
@@ -98,17 +131,34 @@ content checksum is appended. With a `ZstdDictionary`, its content serves as
 history and, for formatted dictionaries, its entropy tables and repeat offsets
 are used; the frame records the dictionary ID. Inputs larger than 1 GiB are
 written as several concatenated frames.
+
+With `nthreads > 1`, inputs larger than a few window sizes are split into
+jobs compressed in parallel tasks (within a single frame, as libzstd's
+`nbWorkers`); start Julia with several threads (`julia -t N`) to benefit.
+The output differs slightly from single-threaded compression. Not combined with
+`dict` or `long` (those always run on one thread).
+
+With `long=true`, long-distance matching finds repetitions up to 128 MiB
+apart (as `zstd --long`); the frame then declares a window of up to 128 MiB,
+which decoders must be willing to allocate.
 """
 function compress(data::AbstractVector{UInt8}; level::Integer=3, checksum::Bool=false,
-                  dict::Union{Nothing,ZstdDictionary}=nothing)
+                  dict::Union{Nothing,ZstdDictionary}=nothing, nthreads::Integer=1, long::Bool=false)
+    nthreads < 1 && throw(ArgumentError("nthreads must be at least 1"))
+    if nthreads > 1 && dict === nothing && !long && length(data) <= MAX_FRAME_INPUT
+        _, job, _ = mt_layout(length(data), level)
+        if length(data) > job
+            return _compress_mt(data isa Vector{UInt8} ? data : Vector{UInt8}(data), level, checksum, Int(nthreads))
+        end
+    end
     _with_cctx() do cc
         if length(data) <= MAX_FRAME_INPUT
-            return compress_frame!(cc, data, level; checksum, dict)
+            return compress_frame!(cc, data, level; checksum, dict, long)
         end
         out = UInt8[]
         for off in 0:MAX_FRAME_INPUT:length(data)-1
             chunk = view(data, off+1:min(off + MAX_FRAME_INPUT, length(data)))
-            append!(out, compress_frame!(cc, chunk, level; checksum, dict))
+            append!(out, compress_frame!(cc, chunk, level; checksum, dict, long))
         end
         return out
     end
