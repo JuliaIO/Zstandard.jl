@@ -23,7 +23,7 @@ const ZCS = Zstandard.ZstdCompressorStream
 const ZDS = Zstandard.ZstdDecompressorStream
 
 @testset "ZstdCompressorStream" begin
-    for n in (0, 1, 1000, 131072, 131073, 700_000), level in (1, 3, 9), checksum in (false, true)
+    for n in (0, 1, 1000, 131072, 131073, 700_000), level in (1, 3, 9, 17, 19), checksum in (false, true)
         data = make_text(n)
         buf = IOBuffer()
         s = ZCS(buf; level, checksum, close_io=false)
@@ -127,7 +127,7 @@ end
     rd = ZstdDictionary(fd.content)
 
     total = Dict(:none => 0, :raw => 0, :formatted => 0)
-    for smp in samples[301:end], level in (1, 3, 7)
+    for smp in samples[301:end], level in (1, 3, 7, 19)
         c0 = compress(smp; level)
         cr = compress(smp; level, dict=rd)
         cf = compress(smp; level, dict=fd)
@@ -164,4 +164,27 @@ end
     @test decompress(take!(buf), fd) == samples[320]
     c = transcode(ZstandardCompressor(dict=fd), samples[321])
     @test transcode(ZstandardDecompressor(dict=fd), c) == samples[321]
+end
+
+@testset "Optimal parser levels" begin
+    data = make_text(600_000)
+    sizes = Dict{Int,Int}()
+    for level in (15, 16, 17, 18, 19, 22)
+        c = compress(data; level)
+        @test decompress(c) == data
+        @test transcode(CodecZstd.ZstdDecompressor, c) == data
+        sizes[level] = length(c)
+    end
+    # the optimal parser beats lazy2 and is close to libzstd at the same level
+    @test sizes[19] < sizes[15]
+    @test sizes[19] < 1.05 * length(transcode(CodecZstd.ZstdCompressor(level=19), data))
+    # long stream at level 19: the binary tree is rebased with the input buffer
+    big = repeat(make_text(300_000), 40)
+    buf = IOBuffer()
+    s = ZCS(buf; level=19, close_io=false)
+    for i in 1:1_000_000:length(big)
+        write(s, view(big, i:min(i + 999_999, length(big))))
+    end
+    close(s)
+    @test decompress(take!(buf)) == big
 end
