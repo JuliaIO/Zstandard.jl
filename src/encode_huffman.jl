@@ -129,6 +129,28 @@ function limit_bit_lengths!(lengths::Vector{Int}, max_bits::Int)
         lengths[best_idx] += 1
         used += (1 << (max_bits - lengths[best_idx]))
     end
+
+    # The step above can overshoot, leaving an incomplete prefix code
+    # (used < available). Zstandard requires a complete code because the
+    # decoder infers the last symbol's weight from the remaining Kraft space,
+    # so shorten the longest codes to fill the gap exactly. Each Kraft term is
+    # a power of two and the gap is a multiple of the smallest one present, so
+    # this greedy fill terminates with used == available.
+    while used < available
+        gap = available - used
+        best_idx = -1
+        best_len = 1
+        for i in eachindex(lengths)
+            l = lengths[i]
+            if l > best_len && (1 << (max_bits - l)) <= gap
+                best_len = l
+                best_idx = i
+            end
+        end
+        best_idx == -1 && break
+        used += (1 << (max_bits - lengths[best_idx]))
+        lengths[best_idx] -= 1
+    end
 end
 
 function build_huffman_encoder(literals::AbstractVector{UInt8})

@@ -369,3 +369,45 @@ end
         end
     end
 end
+
+# Deterministic shuffle without depending on Random's stream stability
+function randperm_stable(n)
+    p = collect(1:n)
+    x = UInt64(0x9E3779B97F4A7C15)
+    for i in n:-1:2
+        x = xor(x, x << 13); x = xor(x, x >> 7); x = xor(x, x << 17)
+        j = Int(x % UInt64(i)) + 1
+        p[i], p[j] = p[j], p[i]
+    end
+    return p
+end
+
+@testset "Huffman code length limiting" begin
+    EH = Zstandard.EncodeHuffman
+    # Fibonacci-like frequencies produce an unlimited Huffman depth > 11 bits,
+    # forcing limit_bit_lengths! to rebalance. The resulting code must be complete
+    # (Kraft sum exactly 2^max_bits), otherwise the decoder cannot infer the
+    # implicit last weight.
+    for nsym in (14, 20, 30, 64, 128)
+        freqs = zeros(Int, 256)
+        a, b = 1, 1
+        for i in 1:nsym
+            freqs[i] = a
+            a, b = b, min(a + b, 10^9)
+        end
+        weights, max_bits = EH.build_huffman_tree(freqs)
+        @test max_bits <= 11
+        kraft = sum(w > 0 ? 1 << (w - 1) : 0 for w in weights)
+        @test kraft == 1 << max_bits
+    end
+
+    # End-to-end: literals with a very skewed distribution
+    data = UInt8[]
+    for i in 0:24
+        append!(data, fill(UInt8(0x20 + i), round(Int, 1.6^i)))
+    end
+    data = data[randperm_stable(length(data))]
+    comp = compress(data)
+    @test decompress(comp) == data
+    @test transcode(ZstdDecompressor, comp) == data
+end
