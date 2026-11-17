@@ -132,24 +132,23 @@ function end_frame!(d::StreamDecoder)
 end
 
 function decode_body!(d::StreamDecoder)
-    start = d.wpos
     bsize = d.want
+    lim = BLOCK_SIZE_MAX
+    if d.btype == 2 && d.fi.content_size >= 0
+        lim = min(lim, Int(d.fi.content_size) - d.frame_produced)
+        lim < 0 && zerr("frame content size exceeded")
+    end
+    # make_room! may compact the buffer (moving wpos), so take `start` after it
+    make_room!(d, d.btype == 0 ? bsize : d.btype == 1 ? d.skip_left : lim)
+    start = d.wpos
     if d.btype == 0
-        make_room!(d, bsize)
         copyto!(d.out, d.wpos + 1, d.unit, 1, bsize)
         d.wpos += bsize
     elseif d.btype == 1
         n = d.skip_left          # RLE regenerated size
-        make_room!(d, n)
         GC.@preserve d memset!(pointer(d.out) + d.wpos, d.unit[1], n)
         d.wpos += n
     else
-        lim = BLOCK_SIZE_MAX
-        if d.fi.content_size >= 0
-            lim = min(lim, Int(d.fi.content_size) - d.frame_produced)
-            lim < 0 && zerr("frame content size exceeded")
-        end
-        make_room!(d, lim)
         out = d.out
         inp = d.unit
         hist = max(d.frame_start, 0)

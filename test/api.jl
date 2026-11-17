@@ -20,6 +20,7 @@ function make_text(n)
 end
 
 const ZCS = Zstandard.ZstdCompressorStream
+frame_header_checksum(c) = (c[5] >> 2) & 1 == 1
 const ZDS = Zstandard.ZstdDecompressorStream
 
 @testset "ZstdCompressorStream" begin
@@ -68,6 +69,21 @@ const ZDS = Zstandard.ZstdDecompressorStream
     @test transcode(CodecZstd.ZstdDecompressor, c) == data
     ref = read(CodecZstd.ZstdCompressorStream(IOBuffer(data); level=1))
     @test length(c) < 1.1 * length(ref)
+
+    # Streaming decoder on frames larger than the window that record their
+    # content size and a checksum (buffer compaction mid-frame).
+    c = compress(data; level=1, checksum=true)
+    @test frame_header_checksum(c)
+    d = ZDS(IOBuffer(c))
+    got = UInt8[]
+    buf2 = Vector{UInt8}(undef, 65_537)
+    while !eof(d)
+        n = readbytes!(d, buf2)
+        append!(got, view(buf2, 1:n))
+    end
+    @test got == data
+    @test length(d.d.out) < length(data)
+    @test transcode(ZstandardDecompressor(), c) == data
 
     # close_io=true (default) closes the underlying stream
     path = tempname()
