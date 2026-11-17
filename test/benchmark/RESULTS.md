@@ -1,5 +1,58 @@
 # Benchmark Results Log
 
+## 2026-11-17 — New encoder (level strategies, entropy coding)
+
+Script: `test/benchmark/compress_compare.jl`, same machine and corpora as the decoder entry below.
+
+### Before (commit 5e71ef0)
+
+```
+Compression: ratio and throughput (MB/s of input, median)
+------------------------------------------------------------------------------------
+Dataset      level | ratio jl  ratio C |   MB/s jl    MB/s C | slowdown
+------------------------------------------------------------------------------------
+text 4MB         1 |    2.866    3.421 |      29.8     208.7 |     7.0x
+text 4MB         3 |    3.029    3.783 |      13.3     136.0 |    10.2x
+text 4MB         6 |    3.029    4.208 |      14.5      63.7 |     4.4x
+text 4MB         9 |    3.029    4.350 |      12.0      34.6 |     2.9x
+text 4MB        19 |    3.029    4.868 |      13.4       1.9 |     0.1x
+binary           1 |    2.470    2.669 |      31.2     184.2 |     5.9x
+binary           3 |    2.594    2.985 |      10.1     136.6 |    13.6x
+binary           6 |    2.594    3.188 |      11.8      64.2 |     5.5x
+binary           9 |    2.594    3.222 |       9.0      40.9 |     4.5x
+binary          19 |    2.594    3.720 |      11.9       2.1 |     0.2x
+------------------------------------------------------------------------------------
+```
+
+### After
+
+```
+Compression: ratio and throughput (MB/s of input, median)
+------------------------------------------------------------------------------------
+Dataset      level | ratio jl  ratio C |   MB/s jl    MB/s C | slowdown
+------------------------------------------------------------------------------------
+text 4MB         1 |    3.354    3.421 |     255.4     247.2 |     1.0x
+text 4MB         3 |    3.767    3.783 |     150.9     157.2 |     1.0x
+text 4MB         6 |    4.032    4.208 |      70.9      64.8 |     0.9x
+text 4MB         9 |    4.333    4.350 |      24.6      44.9 |     1.8x
+text 4MB        19 |    4.430    4.868 |       2.3       2.0 |     0.9x
+binary           1 |    2.705    2.669 |     168.2     312.7 |     1.9x
+binary           3 |    2.981    2.985 |     120.7     169.5 |     1.4x
+binary           6 |    3.112    3.188 |      55.0      61.2 |     1.1x
+binary           9 |    3.126    3.222 |      20.7      46.3 |     2.2x
+binary          19 |    3.182    3.720 |       4.3       2.4 |     0.5x
+------------------------------------------------------------------------------------
+```
+
+### Notes
+- Level table after libzstd: fast (1-2, negative), dfast (3-4), greedy (5), lazy (6-7), lazy2 (8+).
+- Repeat-offset checks before hash lookups; backward match extension; hash tables kept across blocks.
+- Huffman: two-queue construction with exact length limiting, FSE-compressed weights (binary
+  data now gets Huffman literals), treeless reuse; FSE: cost-based predefined/RLE/FSE/repeat.
+- Levels 13+ lack libzstd's btopt/btultra parsers, hence the ratio gap at level 19.
+
+---
+
 ## 2026-11-17 — Decoder rewrite (vs ZstdInflate.jl)
 
 Script: `test/benchmark/inflate_compare.jl` (realistic corpora: Julia `base/` sources and

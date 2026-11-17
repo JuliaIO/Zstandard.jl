@@ -383,22 +383,23 @@ function randperm_stable(n)
 end
 
 @testset "Huffman code length limiting" begin
-    EH = Zstandard.EncodeHuffman
+    E = Zstandard.Encoder
     # Fibonacci-like frequencies produce an unlimited Huffman depth > 11 bits,
-    # forcing limit_bit_lengths! to rebalance. The resulting code must be complete
-    # (Kraft sum exactly 2^max_bits), otherwise the decoder cannot infer the
-    # implicit last weight.
-    for nsym in (14, 20, 30, 64, 128)
-        freqs = zeros(Int, 256)
+    # forcing length limiting. The resulting code must be complete (Kraft sum
+    # exactly 2^max_bits), otherwise the decoder cannot infer the implicit
+    # last weight.
+    for nsym in (14, 20, 30, 64, 128, 256)
+        counts = zeros(Int, 256)
         a, b = 1, 1
         for i in 1:nsym
-            freqs[i] = a
+            counts[i] = a
             a, b = b, min(a + b, 10^9)
         end
-        weights, max_bits = EH.build_huffman_tree(freqs)
-        @test max_bits <= 11
-        kraft = sum(w > 0 ? 1 << (w - 1) : 0 for w in weights)
-        @test kraft == 1 << max_bits
+        lens = zeros(UInt8, 256)
+        tl = E.huf_lengths!(lens, counts, nsym - 1, 11, zeros(Int, 256), zeros(Int, 512), zeros(Int, 512))
+        @test tl <= 11
+        @test sum(l > 0 ? 1 << (tl - l) : 0 for l in lens) == 1 << tl
+        @test all(lens[i] > 0 for i in 1:nsym)
     end
 
     # End-to-end: literals with a very skewed distribution
@@ -463,4 +464,30 @@ end
         end
     end
     @test bad == 0
+end
+
+@testset "Compression levels on structured data" begin
+    # Text with a realistic mix of literals and matches, binary-like data with
+    # bytes > 127 (exercises FSE-compressed Huffman weights), and multi-block
+    # inputs; every level must round-trip through both decoders.
+    words = ["alpha", "beta", "gamma", "delta", "epsilon", "zeta", "eta", "theta", "\n", " = ", "(x)"]
+    x = UInt64(99)
+    nxt() = (x = x * 6364136223846793005 + 1442695040888963407; Int(x >> 40))
+    text = UInt8[]
+    while length(text) < 300_000
+        append!(text, codeunits(words[nxt() % length(words) + 1]))
+        nxt() % 7 == 0 && append!(text, codeunits(string(nxt() % 1000)))
+    end
+    bin = UInt8[UInt8((nxt() % 3 == 0 ? nxt() : i * 7) & 0xff) for i in 1:200_000]
+    for data in (text, bin), level in (-5, 1, 2, 3, 4, 5, 6, 7, 9, 12, 16, 19, 22)
+        c = compress(data; level)
+        @test decompress(c) == data
+        @test transcode(ZstdDecompressor, c) == data
+    end
+    # Higher levels should not compress worse than level 1 on text
+    @test length(compress(text; level=19)) < length(compress(text; level=1))
+    # Frame content size is recorded in the header
+    c = compress(text)
+    fi = GC.@preserve c Zstandard.Decoder.read_frame_info(pointer(c) + 4, length(c) - 4)
+    @test fi.content_size == length(text)
 end
