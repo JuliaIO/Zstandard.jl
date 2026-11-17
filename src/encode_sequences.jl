@@ -2,7 +2,6 @@ module EncodeSequences
 
 import ..MatchFinder: Sequence
 import ..WriteBitstream: BackwardBitWriter, ForwardBitWriter, write_bits, take_bits
-import ..FSE: FSETable, get_default_ll_table, get_default_ml_table, get_default_of_table
 import ..FSE: LL_DEFAULT_DIST, ML_DEFAULT_DIST, OF_DEFAULT_DIST
 import ..EncodeFSE: build_fse_encoding_table, fse_encode_symbol!, write_fse_table
 

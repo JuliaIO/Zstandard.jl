@@ -4,5 +4,5 @@
 ```
 
 ```@autodocs
-Modules = [Zstandard, Zstandard.Streaming, Zstandard.Dictionary]
+Modules = [Zstandard, Zstandard.Streaming, Zstandard.Decoder]
 ```

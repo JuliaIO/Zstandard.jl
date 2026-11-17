@@ -1,5 +1,53 @@
 # Benchmark Results Log
 
+## 2026-11-17 — Decoder rewrite (vs ZstdInflate.jl)
+
+Script: `test/benchmark/inflate_compare.jl` (realistic corpora: Julia `base/` sources and
+`libjulia-internal.so`, compressed by libzstd at the given level, or by Zstandard.jl for "jl").
+Single thread, Julia 1.11.7, 4-core cloud VM. libzstd is measured through CodecZstd's
+`transcode`, which includes TranscodingStreams buffering overhead.
+
+### Before (commit 487e194)
+
+```
+Decompression throughput (MB/s of output, median), single thread
+------------------------------------------------------------------------------
+Dataset        |   ratio |    Zstd.jl  ZstdInflate    libzstd |  jl/Infl
+------------------------------------------------------------------------------
+text 64KB L3   |   3.15  |      145.4        486.1      653.5 |    3.34x
+text 4MB L1    |   3.42  |      135.4        445.2      803.2 |    3.29x
+text 4MB L3    |   3.78  |      127.7        416.6      650.7 |    3.26x
+text 4MB L19   |   4.87  |      126.2        423.1      573.4 |    3.35x
+binary L3      |   2.99  |       60.5        277.2      465.4 |    4.58x
+```
+
+### After
+
+```
+Decompression throughput (MB/s of output, median), single thread
+------------------------------------------------------------------------------
+Dataset        |   ratio |    Zstd.jl  ZstdInflate    libzstd |  jl/Infl
+------------------------------------------------------------------------------
+text 64KB L3   |   3.15  |      942.8        523.8      661.4 |    0.56x
+text 4MB L1    |   3.42  |      876.2        439.5      708.4 |    0.50x
+text 4MB L3    |   3.78  |      705.6        402.8      631.0 |    0.57x
+text 4MB L19   |   4.87  |      666.3        366.6      562.8 |    0.55x
+binary L3      |   2.99  |      567.7        268.8      508.7 |    0.47x
+text 4MB jl    |   3.03  |      727.3        440.5      585.0 |    0.61x
+------------------------------------------------------------------------------
+```
+
+### Notes
+- New `Decoder` module: frames decoded straight from the input vector into one output buffer
+  (no per-block IOBuffer/allocations, no history copies).
+- libzstd-style backward bit reader (64-bit container, unaligned reloads) held in registers.
+- Packed UInt64 FSE entries; 4-stream Huffman decoded in lockstep; fused sequence decode/execute
+  with wildcopy.
+- Corruption detection: offset 0/out of range, overruns, unconsumed bitstreams, content size and
+  checksum mismatches all raise `ZstdError` (previously-broken golden error tests now pass).
+
+---
+
 ## 2026-03-28 — Window_size fix, optional checksum, optimized frame header
 
 Commit: 2e60e66

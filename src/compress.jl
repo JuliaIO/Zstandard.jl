@@ -1,7 +1,6 @@
 module Compress
 
 import ..Zstandard: MAGIC_NUMBER
-import ..Frames: FrameHeader
 import ..MatchFinder: find_sequences, Sequence, MatchContext
 import ..EncodeSequences: encode_sequences
 import ..EncodeHuffman: build_huffman_encoder, encode_huffman_literals

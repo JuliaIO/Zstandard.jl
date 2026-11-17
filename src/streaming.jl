@@ -2,237 +2,237 @@
 
 module Streaming
 
-import ..Zstandard: FrameContext, MAGIC_NUMBER, SKIPPABLE_MAGIC_START, SKIPPABLE_MAGIC_END, ZstdDictionary
-import ..Blocks: decompress_compressed_block, decode_literals
-import ..Bitstream: BackwardBitReader, read_bits, peek_bits, consume_bits, bits_left
-import ..Frames: FrameHeader, read_frame_header, BlockHeader, read_block_header
-using XXHashNative
+import ..Decoder: DecoderState, ZstdDictionary, FrameInfo, read_frame_info, reset_frame!,
+                  decode_compressed_block!, memset!, zerr, ensure_capacity!,
+                  MAGIC_NUMBER, SKIPPABLE_MAGIC_START, SKIPPABLE_MASK, BLOCK_SIZE_MAX, WILDCOPY_SLACK
+using XXHashNative: XXH64State, update!, digest!
 
-export ZstdDecompressor, ZstdDecompressorStream
+export ZstdDecompressorStream
 
-@enum DecompressorStage begin
-    Stage_GetMagic
-    Stage_DecodeFrameHeader
-    Stage_DecodeBlockHeader
-    Stage_DecompressBlock
-    Stage_CheckChecksum
-    Stage_DecodeSkippableHeader
-    Stage_SkipFrame
-end
-
-mutable struct ZstdDecompressor
-    stage::DecompressorStage
-    ctx::Union{Nothing, FrameContext}
-    fh::Union{Nothing, FrameHeader}
-    
-    out_buffer::Vector{UInt8}
-    out_pos::Int
-    
-    history::Vector{UInt8} # All previously decoded data in current frame
-    
-    # For current block
-    bh::Union{Nothing, BlockHeader}
-    
-    # For skippable frames
-    skip_size::UInt32
-    
-    # Checksum state
-    xxh_state::Union{Nothing, XXH64State}
-    
-    # Dictionary
-    dict::Union{Nothing, ZstdDictionary}
-end
-
-function ZstdDecompressor(dict::Union{Nothing, ZstdDictionary}=nothing)
-    return ZstdDecompressor(
-        Stage_GetMagic,
-        nothing,
-        nothing,
-        UInt8[],
-        1,
-        UInt8[],
-        nothing,
-        0,
-        nothing,
-        dict
-    )
-end
+const STAGE_FRAME = 0   # expecting a frame (or end of input)
+const STAGE_BLOCK = 1   # inside a frame, expecting a block header
 
 """
     ZstdDecompressorStream(io::IO, dict::Union{Nothing, ZstdDictionary}=nothing)
 
 A streaming Zstandard decompressor that implements the `IO` interface.
+Decoded data is produced one block at a time; memory use is bounded by the
+frame's window size plus one block.
 """
 mutable struct ZstdDecompressorStream <: IO
     io::IO
-    d::ZstdDecompressor
+    dict::Union{Nothing,ZstdDictionary}
+    st::DecoderState
+    inbuf::Vector{UInt8}
+    out::Vector{UInt8}
+    rpos::Int            # next unread byte in `out` (1-based)
+    wpos::Int            # number of valid bytes in `out`
+    frame_start::Int     # 0-based offset of the current frame's first byte in `out` (may be < 0)
+    stage::Int
+    fi::FrameInfo
+    frame_produced::Int
+    xxh::Union{Nothing,XXH64State}
 end
 
-function ZstdDecompressorStream(io::IO, dict::Union{Nothing, ZstdDictionary}=nothing)
-    return ZstdDecompressorStream(io, ZstdDecompressor(dict))
+function ZstdDecompressorStream(io::IO, dict::Union{Nothing,ZstdDictionary}=nothing)
+    return ZstdDecompressorStream(io, dict, DecoderState(), Vector{UInt8}(undef, 64),
+        UInt8[], 1, 0, 0, STAGE_FRAME, FrameInfo(0, 0, -1, 0, false, false), 0, nothing)
 end
 
-Base.eof(s::ZstdDecompressorStream) = (s.d.out_pos > length(s.d.out_buffer)) && eof(s.io)
+function read_exact!(s::ZstdDecompressorStream, n::Int, what::String)
+    length(s.inbuf) < n && resize!(s.inbuf, n)
+    got = readbytes!(s.io, s.inbuf, n)
+    got < n && zerr("truncated input ($what)")
+    return s.inbuf
+end
+
+read_u32!(s, what) = (b = read_exact!(s, 4, what);
+    UInt32(b[1]) | (UInt32(b[2]) << 8) | (UInt32(b[3]) << 16) | (UInt32(b[4]) << 24))
+
+# Discard bytes that are already read and no longer needed as match history.
+function compact!(s::ZstdDecompressorStream)
+    hist_from = max(s.frame_start, s.wpos - s.fi.window_size)
+    drop = min(s.rpos - 1, hist_from)
+    if drop > 0
+        copyto!(s.out, 1, s.out, drop + 1, s.wpos - drop)
+        s.rpos -= drop
+        s.wpos -= drop
+        s.frame_start -= drop
+    end
+    return s
+end
+
+function make_room!(s::ZstdDecompressorStream, n::Int)
+    need = s.wpos + n + WILDCOPY_SLACK
+    if length(s.out) < need
+        compact!(s)
+        need = s.wpos + n + WILDCOPY_SLACK
+        ensure_capacity!(s.out, need)
+    end
+end
+
+function begin_frame!(s::ZstdDecompressorStream)
+    while true
+        eof(s.io) && return false
+        magic = read_u32!(s, "magic number")
+        if magic & SKIPPABLE_MASK == SKIPPABLE_MAGIC_START
+            sz = Int(read_u32!(s, "skippable frame size"))
+            while sz > 0
+                k = min(sz, 1 << 16)
+                read_exact!(s, k, "skippable frame")
+                sz -= k
+            end
+            continue
+        end
+        magic != MAGIC_NUMBER && zerr("unknown frame magic number 0x$(string(magic, base=16))")
+        fd = read_exact!(s, 1, "frame header")[1]
+        single = (fd >> 5) & 1 == 1
+        hs = 1 + (single ? 0 : 1) + (0, 1, 2, 4)[(fd & 3) + 1] + (single ? 1 : 0, 2, 4, 8)[(fd >> 6) + 1]
+        hdr = Vector{UInt8}(undef, hs)
+        hdr[1] = fd
+        hs > 1 && (hdr[2:hs] = read_exact!(s, hs - 1, "frame header")[1:hs-1])
+        fi = GC.@preserve hdr read_frame_info(pointer(hdr), hs)
+        d = s.dict
+        if fi.dict_id != 0
+            d === nothing && zerr("frame requires dictionary ID $(fi.dict_id)")
+            (d.id != 0 && d.id != fi.dict_id) &&
+                zerr("dictionary ID mismatch: frame requires $(fi.dict_id), got $(d.id)")
+        end
+        reset_frame!(s.st, d)
+        s.fi = fi
+        # Previous frames are never referenced: drop everything already read.
+        if s.rpos > 1
+            copyto!(s.out, 1, s.out, s.rpos, s.wpos - s.rpos + 1)
+            s.wpos -= s.rpos - 1
+            s.rpos = 1
+        end
+        s.frame_start = s.wpos
+        s.frame_produced = 0
+        s.xxh = fi.checksum ? XXH64State() : nothing
+        s.stage = STAGE_BLOCK
+        return true
+    end
+end
+
+function end_frame!(s::ZstdDecompressorStream)
+    fi = s.fi
+    if fi.content_size >= 0 && s.frame_produced != fi.content_size
+        zerr("frame content size mismatch: header says $(fi.content_size), decoded $(s.frame_produced)")
+    end
+    if fi.checksum
+        expected = read_u32!(s, "frame checksum")
+        actual = digest!(s.xxh) % UInt32
+        actual != expected && zerr("checksum mismatch")
+    end
+    s.stage = STAGE_FRAME
+end
+
+function decode_block!(s::ZstdDecompressorStream)
+    b = read_exact!(s, 3, "block header")
+    bh = Int(b[1]) | (Int(b[2]) << 8) | (Int(b[3]) << 16)
+    last = bh & 1 == 1
+    btype = (bh >> 1) & 3
+    bsize = bh >> 3
+    btype == 3 && zerr("reserved block type")
+    bsize > BLOCK_SIZE_MAX && zerr("block too large")
+    start = s.wpos
+    if btype == 0
+        make_room!(s, bsize)
+        got = readbytes!(s.io, view(s.out, s.wpos+1:s.wpos+bsize), bsize)
+        got < bsize && zerr("truncated input (raw block)")
+        s.wpos += bsize
+    elseif btype == 1
+        v = read_exact!(s, 1, "RLE block")[1]
+        make_room!(s, bsize)
+        GC.@preserve s memset!(pointer(s.out) + s.wpos, v, bsize)
+        s.wpos += bsize
+    else
+        inp = read_exact!(s, bsize, "compressed block")
+        lim = BLOCK_SIZE_MAX
+        if s.fi.content_size >= 0
+            lim = min(lim, Int(s.fi.content_size) - s.frame_produced)
+            lim < 0 && zerr("frame content size exceeded")
+        end
+        make_room!(s, lim)
+        out = s.out
+        hist = max(s.frame_start, 0)
+        d = s.frame_start >= 0 ? s.dict : nothing
+        GC.@preserve out inp begin
+            base = pointer(out)
+            op = decode_compressed_block!(s.st, pointer(inp), bsize, base + s.wpos,
+                                          base + hist, base + s.wpos + lim, d)
+            s.wpos = Int(op - base)
+        end
+    end
+    s.frame_produced += s.wpos - start
+    if s.xxh !== nothing && s.wpos > start
+        update!(s.xxh, view(s.out, start+1:s.wpos))
+    end
+    last && end_frame!(s)
+    return nothing
+end
+
+# Decode until at least one unread byte is available. Returns false at end of input.
+function fill_buffer!(s::ZstdDecompressorStream)
+    while s.rpos > s.wpos
+        if s.stage == STAGE_FRAME
+            begin_frame!(s) || return false
+        else
+            decode_block!(s)
+        end
+    end
+    return true
+end
+
+Base.bytesavailable(s::ZstdDecompressorStream) = s.wpos - s.rpos + 1
+Base.eof(s::ZstdDecompressorStream) = s.rpos > s.wpos && !fill_buffer!(s)
+Base.isopen(s::ZstdDecompressorStream) = isopen(s.io)
+Base.close(s::ZstdDecompressorStream) = close(s.io)
 
 function Base.read(s::ZstdDecompressorStream, ::Type{UInt8})
-    while s.d.out_pos > length(s.d.out_buffer)
-        if eof(s.io)
-            throw(EOFError())
-        end
-        fill_out_buffer!(s)
+    eof(s) && throw(EOFError())
+    v = @inbounds s.out[s.rpos]
+    s.rpos += 1
+    return v
+end
+
+function Base.unsafe_read(s::ZstdDecompressorStream, p::Ptr{UInt8}, n::UInt)
+    n = Int(n)
+    while n > 0
+        eof(s) && throw(EOFError())
+        k = min(n, s.wpos - s.rpos + 1)
+        GC.@preserve s unsafe_copyto!(p, pointer(s.out, s.rpos), k)
+        s.rpos += k
+        p += k
+        n -= k
     end
-    val = s.d.out_buffer[s.d.out_pos]
-    s.d.out_pos += 1
-    return val
+    return nothing
+end
+
+function Base.readbytes!(s::ZstdDecompressorStream, b::AbstractVector{UInt8}, nb=length(b))
+    got = 0
+    while got < nb && !eof(s)
+        k = min(nb - got, s.wpos - s.rpos + 1)
+        if got + k > length(b)
+            resize!(b, got + k)
+        end
+        copyto!(b, got + 1, s.out, s.rpos, k)
+        s.rpos += k
+        got += k
+    end
+    return got
 end
 
 function Base.read(s::ZstdDecompressorStream)
-    # Pre-allocate if frame content size is known
     out = UInt8[]
     while !eof(s)
-        fill_out_buffer!(s)
-        d = s.d
-        if d.fh !== nothing && d.fh.frame_content_size > 0 && isempty(out)
-            sizehint!(out, Int(d.fh.frame_content_size))
-        end
-        avail = length(d.out_buffer) - d.out_pos + 1
-        if avail > 0
-            append!(out, view(d.out_buffer, d.out_pos:d.out_pos+avail-1))
-            d.out_pos += avail
-        end
+        k = s.wpos - s.rpos + 1
+        append!(out, view(s.out, s.rpos:s.wpos))
+        s.rpos += k
     end
     return out
 end
 
-function Base.read(s::ZstdDecompressorStream, nb::Integer)
-    b = Vector{UInt8}(undef, nb)
-    n = readbytes!(s, b, nb)
-    resize!(b, n)
-    return b
-end
-
-function Base.readbytes!(s::ZstdDecompressorStream, b::AbstractVector{UInt8}, nb=length(b))
-    out_idx = 1
-    while out_idx <= nb
-        if s.d.out_pos > length(s.d.out_buffer)
-            if eof(s.io)
-                return out_idx - 1
-            end
-            fill_out_buffer!(s)
-            if s.d.out_pos > length(s.d.out_buffer)
-                return out_idx - 1
-            end
-        end
-        
-        take = min(nb - out_idx + 1, length(s.d.out_buffer) - s.d.out_pos + 1)
-        copyto!(b, out_idx, s.d.out_buffer, s.d.out_pos, take)
-        s.d.out_pos += take
-        out_idx += take
-    end
-    return out_idx - 1
-end
-
-function fill_out_buffer!(s::ZstdDecompressorStream)
-    d = s.d
-    if d.stage == Stage_GetMagic
-        if eof(s.io); return; end
-        magic = read(s.io, UInt32)
-        if magic == MAGIC_NUMBER
-            d.stage = Stage_DecodeFrameHeader
-        elseif magic >= SKIPPABLE_MAGIC_START && magic <= SKIPPABLE_MAGIC_END
-            d.stage = Stage_DecodeSkippableHeader
-        else
-            error("Invalid magic number: $(repr(magic))")
-        end
-    end
-    
-    if d.stage == Stage_DecodeFrameHeader
-        d.fh = read_frame_header(s.io)
-        
-        # Dictionary verification
-        if d.fh.dict_id != 0
-            if d.dict === nothing
-                error("Frame requires dictionary ID $(d.fh.dict_id) but none provided")
-            end
-            if d.dict.id != 0 && d.dict.id != d.fh.dict_id
-                error("Dictionary ID mismatch: frame requires $(d.fh.dict_id), provided $(d.dict.id)")
-            end
-        end
-        
-        d.ctx = FrameContext(d.fh.window_size, d.dict)
-        d.history = (d.dict !== nothing) ? copy(d.dict.content) : UInt8[]
-        
-        if d.fh.content_checksum_flag == 1
-            d.xxh_state = XXH64State()
-        else
-            d.xxh_state = nothing
-        end
-        d.stage = Stage_DecodeBlockHeader
-    end
-    
-    if d.stage == Stage_DecodeBlockHeader
-        d.bh = read_block_header(s.io)
-        d.stage = Stage_DecompressBlock
-    end
-    
-    if d.stage == Stage_DecompressBlock
-        bh = d.bh
-        block_data = UInt8[]
-        if bh.block_type == 0 # Raw
-            block_data = read(s.io, bh.block_size)
-        elseif bh.block_type == 1 # RLE
-            rle_byte = read(s.io, UInt8)
-            block_data = fill(rle_byte, bh.block_size)
-        elseif bh.block_type == 2 # Compressed
-            compressed_data = read(s.io, bh.block_size)
-            block_data = decompress_compressed_block(compressed_data, d.ctx, d.history)
-        elseif bh.block_type == 3 # Reserved
-            error("Reserved block type")
-        end
-        
-        if d.xxh_state !== nothing
-            @debug "Block decoded" block_size=length(block_data) first_bytes=block_data[1:min(8, length(block_data))] history_len=length(d.history) history_tail=d.history[max(1,length(d.history)-7):length(d.history)]
-            update!(d.xxh_state, block_data)
-        end
-        
-        append!(d.history, block_data)
-        d.out_buffer = block_data
-        d.out_pos = 1
-        
-        # Manage history size: keep only window_size history
-        if length(d.history) > d.fh.window_size * 2
-            d.history = d.history[end-d.fh.window_size+1:end]
-        end
-        
-        if bh.last_block
-            if d.fh.content_checksum_flag == 1
-                d.stage = Stage_CheckChecksum
-            else
-                d.stage = Stage_GetMagic
-            end
-        else
-            d.stage = Stage_DecodeBlockHeader
-        end
-    end
-    
-    if d.stage == Stage_CheckChecksum
-        expected_checksum = read(s.io, UInt32)
-        actual_checksum = UInt32(digest!(d.xxh_state) & 0xFFFFFFFF)
-        if expected_checksum != actual_checksum
-            error("Checksum mismatch: expected 0x$(string(expected_checksum, base=16)), got 0x$(string(actual_checksum, base=16))")
-        end
-        d.stage = Stage_GetMagic
-    end
-    
-    if d.stage == Stage_DecodeSkippableHeader
-        d.skip_size = read(s.io, UInt32)
-        d.stage = Stage_SkipFrame
-    end
-    
-    if d.stage == Stage_SkipFrame
-        skip(s.io, d.skip_size)
-        d.stage = Stage_GetMagic
-    end
-end
+Base.read(s::ZstdDecompressorStream, nb::Integer) = (b = Vector{UInt8}(undef, nb); resize!(b, readbytes!(s, b, nb)))
 
 end # module

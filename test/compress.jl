@@ -140,21 +140,21 @@ end
 @testset "Decompression Error Detection" begin
     fixtures_dir = joinpath(@__DIR__, "fixtures")
 
-    # These invalid frames should be rejected by the decoder.
-    # Marked as broken until error detection is implemented.
+    # These invalid frames (from the reference implementation's golden
+    # decompression-errors set) must be rejected by the decoder.
     @testset "Invalid offset 0" begin
         compressed = read(joinpath(fixtures_dir, "off0.bin.zst"))
-        @test_broken try decompress(compressed); false catch; true end
+        @test_throws ZstdError decompress(compressed)
     end
 
     @testset "Truncated Huffman state" begin
         compressed = read(joinpath(fixtures_dir, "truncated_huff_state.zst"))
-        @test_broken try decompress(compressed); false catch; true end
+        @test_throws ZstdError decompress(compressed)
     end
 
     @testset "Extraneous zero sequences" begin
         compressed = read(joinpath(fixtures_dir, "zeroSeq_extraneous.zst"))
-        @test_broken try decompress(compressed); false catch; true end
+        @test_throws ZstdError decompress(compressed)
     end
 end
 
@@ -410,4 +410,57 @@ end
     comp = compress(data)
     @test decompress(comp) == data
     @test transcode(ZstdDecompressor, comp) == data
+end
+
+@testset "Streaming window compaction" begin
+    # libzstd level 1 uses a window far smaller than the data, so reading in
+    # small chunks forces the streaming decoder to discard old history.
+    data = UInt8[]
+    x = UInt32(1)
+    while length(data) < 10 * 1024 * 1024
+        x = x * 0x0019660D + 0x3C6EF35F
+        append!(data, codeunits(string("record ", x >> 20, " value ", (x >> 8) & 0xff, "\n")))
+    end
+    comp = transcode(ZstdCompressor(level=1), data)
+    stream = Zstandard.ZstdDecompressorStream(IOBuffer(comp))
+    out = UInt8[]
+    buf = Vector{UInt8}(undef, 997)
+    while !eof(stream)
+        n = readbytes!(stream, buf)
+        append!(out, view(buf, 1:n))
+    end
+    @test out == data
+    @test length(stream.out) < length(data)  # bounded by window + block, not by output size
+end
+
+@testset "Corrupted input fuzz" begin
+    # Corrupted frames must either decode or throw ZstdError, never crash or
+    # throw anything else.
+    text = Vector{UInt8}(repeat("The quick brown fox jumps over the lazy dog. 0123456789\n", 2000))
+    for i in 1:length(text) ÷ 7
+        text[(i * 7919) % length(text) + 1] = UInt8(i % 251)
+    end
+    inputs = [transcode(ZstdCompressor(level=3), text), transcode(ZstdCompressor(level=19), text[1:5000]),
+              compress(text), compress(text[1:3000], checksum=true)]
+    x = UInt64(42)
+    nexti(n) = (x = x * 6364136223846793005 + 1442695040888963407; Int((x >> 33) % UInt64(n)) + 1)
+    bad = 0
+    for trial in 1:1500
+        c = copy(inputs[nexti(length(inputs))])
+        if trial % 3 == 0
+            c = c[1:nexti(length(c)) - 1]
+        else
+            for _ in 1:nexti(3)
+                c[nexti(length(c))] ⊻= UInt8(1) << (nexti(8) - 1)
+            end
+        end
+        for f in (decompress, c -> read(Zstandard.ZstdDecompressorStream(IOBuffer(c))))
+            try
+                f(c)
+            catch e
+                e isa ZstdError || (bad += 1)
+            end
+        end
+    end
+    @test bad == 0
 end
