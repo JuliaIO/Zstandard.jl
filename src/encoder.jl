@@ -727,7 +727,7 @@ mutable struct HufCTable
 end
 HufCTable() = HufCTable(-1, 0, zeros(UInt8, 256), zeros(UInt16, 256))
 
-"""Code lengths for counts[1:maxsym+1] (Huffman), limited to `maxbits`."""
+"""Huffman code lengths for `counts[1:maxsym+1]`, limited to `maxbits`."""
 function huf_lengths!(lens::Vector{UInt8}, counts::Vector{Int}, maxsym::Int, maxbits::Int,
                       syms::Vector{Int}, freq::Vector{Int}, parent::Vector{Int})
     fill!(lens, 0x00)
