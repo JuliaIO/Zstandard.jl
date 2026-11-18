@@ -149,3 +149,67 @@ end
     # small inputs: long mode is harmless
     @test decompress(compress(a[1:1000]; long=true)) == a[1:1000]
 end
+
+@testset "XXH64" begin
+    X = Zstandard.XXHash
+    # reference values (xxHash spec / python-xxhash / XXHashNative)
+    @test X.xxh64(UInt8[]) == 0xEF46DB3751D8E999
+    @test X.xxh64("abc") == 0x44BC2CF5AD770999
+    @test X.xxh64("Nobody inspects the spammish repetition") == 0xFBCEA83C8A378BF1
+    @test X.xxh64(Vector{UInt8}(0:255)) == 0x1FACBE8406CD904B
+    @test X.xxh64(Vector{UInt8}(0:255), UInt64(42)) == 0xE212741FA701583D
+    # streaming in arbitrary pieces equals one-shot, for every tail length
+    data = UInt8[UInt8((i * 7 + i >> 3) & 0xff) for i in 1:5000]
+    for n in vcat(0:70, [127, 128, 129, 1000, 5000]), step in (1, 5, 31, 32, 33, 1000)
+        st = X.XXH64State(UInt64(n))
+        i = 1
+        while i <= n
+            k = min(step, n - i + 1)
+            X.update!(st, view(data, i:i+k-1))
+            i += k
+        end
+        @test X.digest!(st) == X.xxh64(data[1:n], UInt64(n))
+    end
+    # non-contiguous input falls back to a copy
+    @test X.xxh64(view(data, 1:2:999)) == X.xxh64(data[1:2:999])
+end
+
+@testset "Parallel frame decoding" begin
+    words = ["red", "green", "blue", "\n", " ", "#", "0xff"]
+    x = UInt64(3)
+    text = UInt8[]
+    while length(text) < 1_500_000
+        x = x * 6364136223846793005 + 1442695040888963407
+        append!(text, codeunits(words[(x >> 33) % length(words) + 1]))
+    end
+    pieces = [text[i:min(end, i + 99_999)] for i in 1:100_000:length(text)]
+    frames = Vector{UInt8}[]
+    for (k, p) in enumerate(pieces)
+        push!(frames, k % 3 == 0 ? transcode(CodecZstd.ZstdCompressor, p) :     # no content size
+                      compress(p; checksum=isodd(k)))
+        k == 5 && push!(frames, skippable_frame("between frames"))
+    end
+    mf = reduce(vcat, frames)
+    @test decompress(mf; nthreads=1) == text
+    for nt in (2, 4, 8)
+        @test decompress(mf; nthreads=nt) == text
+    end
+    @test decompress(view(mf, 1:length(mf)); nthreads=4) == text
+
+    # with a dictionary
+    d = ZstdDictionary(text[1:50_000])
+    mfd = reduce(vcat, [compress(p; dict=d) for p in pieces])
+    @test decompress(mfd, d; nthreads=4) == text
+
+    # errors surface as ZstdError, not TaskFailedException
+    bad = copy(mf)
+    mid = sum(length, frames[1:7]) + 200
+    bad[mid] ⊻= 0xff
+    bad[mid + 1] ⊻= 0x5a
+    @test_throws ZstdError decompress(bad; nthreads=4)
+    # cut inside the second-to-last frame
+    @test_throws ZstdError decompress(mf[1:end-length(frames[end])-5]; nthreads=4)
+    # dropping whole trailing frames leaves valid input
+    @test decompress(mf[1:end-length(frames[end])]; nthreads=4) == text[1:end-length(pieces[end])]
+    @test_throws ArgumentError decompress(mf; nthreads=0)
+end

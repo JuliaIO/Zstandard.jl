@@ -14,7 +14,7 @@
 
 module Decoder
 
-using XXHashNative: xxh64
+using ..XXHash: xxh64
 
 export ZstdError, ZstdDictionary, parse_dictionary, DecoderState, decompress_frames,
        FrameInfo, read_frame_info
@@ -980,17 +980,20 @@ end
 end
 
 """
-    decompress_frames(data, st, dict) -> Vector{UInt8}
+    decompress_frames(data, st, dict; range=1:length(data)) -> Vector{UInt8}
 
-Decode all (concatenated) frames in `data` in memory.
+Decode all (concatenated) frames in `data[range]` in memory. `range` must
+start and end on frame boundaries.
 """
 function decompress_frames(data::AbstractVector{UInt8}, st::DecoderState=DecoderState(),
-                           dict::Union{Nothing,ZstdDictionary}=nothing)
+                           dict::Union{Nothing,ZstdDictionary}=nothing;
+                           range::UnitRange{Int}=1:length(data))
     src = data isa Vector{UInt8} ? data : Vector{UInt8}(data)
-    n = length(src)
+    checkbounds(src, range)
+    n = range.stop            # last valid input index
     out = Vector{UInt8}(undef, 0)
     produced = 0
-    pos = 1
+    pos = range.start
     first = true
     GC.@preserve src begin
         p = pointer(src)
@@ -1021,7 +1024,7 @@ function decompress_frames(data::AbstractVector{UInt8}, st::DecoderState=Decoder
             # trigger a huge allocation.
             max_expand = (n - pos + 1) * (BLOCK_SIZE_MAX >> 2) + BLOCK_SIZE_MAX
             if first
-                guess = fi.content_size >= 0 ? min(Int(fi.content_size), max_expand) : min(4n, 1 << 28)
+                guess = fi.content_size >= 0 ? min(Int(fi.content_size), max_expand) : min(4 * length(range), 1 << 28)
                 resize!(out, guess + WILDCOPY_SLACK)
                 first = false
             elseif fi.content_size >= 0

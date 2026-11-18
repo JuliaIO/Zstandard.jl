@@ -6,7 +6,7 @@ import ..Decoder: DecoderState, ZstdDictionary, FrameInfo, read_frame_info, rese
                   decode_compressed_block!, memset!, zerr, ensure_capacity!,
                   MAGIC_NUMBER, SKIPPABLE_MAGIC_START, SKIPPABLE_MASK, BLOCK_SIZE_MAX, WILDCOPY_SLACK
 import ..Encoder: StreamCompressor, stream_write!, stream_flush!, stream_finish!
-using XXHashNative: XXH64State, update!, digest!
+using ..XXHash: XXH64State, update!, digest!
 
 export ZstdDecompressorStream, ZstdCompressorStream, StreamDecoder
 

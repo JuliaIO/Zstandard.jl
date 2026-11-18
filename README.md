@@ -1,13 +1,13 @@
 # Zstandard.jl
 
-A pure Julia implementation of the [Zstandard](https://facebook.github.io/zstd/) (RFC 8878) compression algorithm. No C dependencies required.
+A pure Julia implementation of the [Zstandard](https://facebook.github.io/zstd/) (RFC 8878) compression algorithm, with no dependencies (TranscodingStreams.jl support is an optional extension).
 
 ## Features
 
 - **Compression** at levels -7 to 22 using libzstd-style strategies (fast, dfast, greedy, lazy, lazy2, and binary-tree optimal parsing for levels 16-22) with repeat-offset aware parsing
 - Huffman literals (direct or FSE-compressed weights, 1 or 4 streams, table reuse across blocks) and FSE sequence coding with predefined/RLE/compressed/repeat table selection
 - Frame content size recorded in the header; optional XXH64 content checksum
-- **Decompression** of all standard frames, including concatenated and skippable frames, raw and formatted dictionaries
+- **Decompression** of all standard frames, including concatenated and skippable frames (decoded in parallel with `nthreads`), raw and formatted dictionaries
 - Streaming decompression via `ZstdDecompressorStream` (implements `IO`, memory bounded by the window size)
 - Streaming compression via `ZstdCompressorStream` (implements `IO`, with `flush` support)
 - Dictionary compression (raw content or formatted dictionaries) and dictionary training (`train_dictionary`, fastCover as `zstd --train`)
@@ -30,7 +30,6 @@ using Pkg
 Pkg.add(url="https://github.com/JuliaIO/Zstandard.jl")
 ```
 
-> **Note:** This package depends on a fork of [XXHashNative.jl](https://github.com/Moelf/XXHashNative.jl) that adds XXH64 support. The `[sources]` section in `Project.toml` points to this fork until [Moelf/XXHashNative.jl#28](https://github.com/Moelf/XXHashNative.jl/pull/28) is merged.
 
 ## Usage
 

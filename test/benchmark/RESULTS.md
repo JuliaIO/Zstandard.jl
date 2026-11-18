@@ -1,5 +1,25 @@
 # Benchmark Results Log
 
+## 2026-11-18 — XXH64 rewrite, parallel decoding of concatenated frames
+
+XXH64, 16 MB (MB/s): XXHashNative 3,522; ZstdInflate (SIMD.jl, 4 lanes in one vector) 5,209;
+new scalar implementation 11,167 (one-shot) / 11,010 (streaming, 128 KB updates).
+The four XXH64 lanes are serial multiply/rotate chains, so packing them into one vector does not
+help: `vpmullq` has much higher latency than scalar `imul`. LLVM's SLP vectorizer packed the
+streaming loop on its own (halving its speed); an empty inline-asm barrier per lane prevents that.
+
+Concatenated frames, 4 threads, `decompress` vs `inflate_zstd(...; nthreads=4)` (MB/s):
+
+| Input | Zstandard.jl | ZstdInflate |
+|---|--:|--:|
+| 4 MB in 4 frames | 2,330 | 1,074 |
+| 16 MB in 16 frames | 1,708 | 423 |
+| 16 MB in 256 frames | 1,887 | 1,192 |
+
+Checksummed 4 MB frame: 642 MB/s (was 548), the same as without a checksum.
+
+---
+
 ## 2026-11-17 — Optimal parser for levels 16-22
 
 Script: `test/benchmark/compress_compare.jl` (now also level 16). Same machine and corpora.

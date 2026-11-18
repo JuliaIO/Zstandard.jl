@@ -12,7 +12,7 @@
 
 module Encoder
 
-using XXHashNative: xxh64, XXH64State, update!, digest!
+using ..XXHash: xxh64, XXH64State, update!, digest!
 import ..Decoder: LL_BASE, LL_BITS, ML_BASE, ML_BITS, LL_DEFAULT_NORM, ML_DEFAULT_NORM,
                   OF_DEFAULT_NORM, MAGIC_NUMBER, BLOCK_SIZE_MAX, ZstdDictionary, has_entropy
 

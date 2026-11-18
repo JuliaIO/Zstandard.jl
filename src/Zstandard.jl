@@ -10,6 +10,8 @@ const MAGIC_NUMBER = 0xFD2FB528
 const SKIPPABLE_MAGIC_START = 0x184D2A50
 const SKIPPABLE_MAGIC_END   = 0x184D2A5F
 
+include("xxhash.jl")
+
 include("decoder.jl")
 using .Decoder: ZstdError, ZstdDictionary, parse_dictionary, DecoderState, decompress_frames
 
@@ -18,7 +20,7 @@ include("frameinfo.jl")
 include("encoder.jl")
 using .Encoder: CompressionContext, compress_frame!, mt_layout, compress_job!, frame_header_bytes,
                 train_dictionary, finalize_dictionary
-using XXHashNative: xxh64
+using .XXHash: xxh64
 
 include("streaming.jl")
 using .Streaming: ZstdDecompressorStream, ZstdCompressorStream
@@ -165,14 +167,85 @@ function compress(data::AbstractVector{UInt8}; level::Integer=3, checksum::Bool=
 end
 compress(data::AbstractString; kwargs...) = compress(codeunits(data); kwargs...)
 
+# Inputs smaller than this are always decoded on one thread.
+const PARALLEL_DECODE_MIN = 1 << 17
+
+# Split `src` into runs of whole frames of roughly equal compressed size, or
+# return nothing if there are fewer than two frames or the scan fails (the
+# serial decoder then reports the error at the right place).
+function _frame_chunks(src::Vector{UInt8}, nchunks::Int)
+    bounds = Int[]
+    pos = 1
+    try
+        while pos <= length(src)
+            push!(bounds, pos)
+            pos += frame_compressed_size(src; offset=pos)
+        end
+    catch e
+        e isa ZstdError || rethrow()
+        return nothing
+    end
+    length(bounds) < 2 && return nothing
+    push!(bounds, length(src) + 1)
+    target = cld(length(src), nchunks)
+    chunks = UnitRange{Int}[]
+    start = 1
+    for i in 2:length(bounds)
+        if bounds[i] - start >= target || i == length(bounds)
+            push!(chunks, start:bounds[i]-1)
+            start = bounds[i]
+        end
+    end
+    return length(chunks) < 2 ? nothing : chunks
+end
+
+function _decompress_parallel(src::Vector{UInt8}, dict, chunks::Vector{UnitRange{Int}}, nthreads::Int)
+    sem = Base.Semaphore(nthreads)
+    tasks = map(chunks) do r
+        Threads.@spawn Base.acquire(sem) do
+            _with_state(st -> decompress_frames(src, st, dict; range=r))
+        end
+    end
+    parts = map(tasks) do t
+        try
+            fetch(t)
+        catch e
+            e isa TaskFailedException ? e.task.exception : rethrow()
+        end
+    end
+    for p in parts
+        p isa Exception && throw(p)
+    end
+    out = Vector{UInt8}(undef, sum(length, parts))
+    pos = 1
+    for p in parts
+        copyto!(out, pos, p, 1, length(p))
+        pos += length(p)
+    end
+    return out
+end
+
 """
-    decompress(data::AbstractVector{UInt8}, dict::Union{Nothing, ZstdDictionary}=nothing)
+    decompress(data::AbstractVector{UInt8}, dict::Union{Nothing, ZstdDictionary}=nothing;
+               nthreads=Threads.nthreads())
 
 Decompress Zstandard compressed data, which may contain several concatenated
 and/or skippable frames. Optionally, a `ZstdDictionary` can be provided.
 Throws a [`ZstdError`](@ref) if the data is malformed.
+
+When `data` holds several frames (at least $(PARALLEL_DECODE_MIN ÷ 1024) KiB in
+total), they are decoded in parallel on up to `nthreads` tasks; a single frame
+is always decoded on one thread. The result does not depend on `nthreads`.
 """
-function decompress(data::AbstractVector{UInt8}, dict::Union{Nothing, ZstdDictionary}=nothing)
+function decompress(data::AbstractVector{UInt8}, dict::Union{Nothing, ZstdDictionary}=nothing;
+                    nthreads::Integer=Threads.nthreads())
+    nthreads < 1 && throw(ArgumentError("nthreads must be at least 1"))
+    if nthreads > 1 && length(data) >= PARALLEL_DECODE_MIN
+        src = data isa Vector{UInt8} ? data : Vector{UInt8}(data)
+        chunks = _frame_chunks(src, 4 * Int(nthreads))
+        chunks === nothing || return _decompress_parallel(src, dict, chunks, Int(nthreads))
+        return _with_state(st -> decompress_frames(src, st, dict))
+    end
     return _with_state(st -> decompress_frames(data, st, dict))
 end
 
