@@ -100,8 +100,8 @@ xxh64(s::AbstractString, seed::UInt64=UInt64(0)) = xxh64(codeunits(s), seed)
 """
     XXH64State(seed=0)
 
-Incremental XXH64: feed data with [`update!`](@ref), get the hash with
-[`digest!`](@ref).
+Incremental XXH64: feed data with `update!(state, data)` (or a pointer and
+length), then get the hash with `digest!(state)`.
 """
 mutable struct XXH64State
     v1::UInt64
