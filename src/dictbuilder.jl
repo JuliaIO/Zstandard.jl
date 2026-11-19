@@ -144,6 +144,16 @@ function finalize_dictionary(content::AbstractVector{UInt8}, samples::AbstractVe
     end
     pos += 8                                   # ID written below
     tl = huf_lengths!(cc.lens, lit, 255, HUF_MAX_BITS, cc.hsyms, cc.hfreq, cc.hparent)
+    if tl == 8
+        # All 256 symbols got 8-bit codes (no literals, or uniformly random
+        # ones): such a table cannot be written. As ZDICT_flatLit does, use a
+        # mostly flat distribution that still has a compressible description.
+        fill!(lit, 2)
+        lit[1] = 4
+        lit[254] = 1
+        lit[255] = 1
+        tl = huf_lengths!(cc.lens, lit, 255, HUF_MAX_BITS, cc.hsyms, cc.hfreq, cc.hparent)
+    end
     huf_codes!(cc.huf, cc.lens, 255, tl)
     pos = write_huf_tree!(cc, hdr, pos, cc.huf)
     pos == 0 && error("could not encode the dictionary Huffman table")

@@ -118,6 +118,16 @@ using Zstd_jll
     fd2 = parse_dictionary(finalize_dictionary(content, train; dict_size=6000, dict_id=123456))
     @test fd2.id == 123456
     @test decompress(compress(test[1]; dict=fd2), fd2) == test[1]
+    # samples fully predictable from the content leave no literals: the
+    # literal table falls back to a flat but encodable distribution
+    rep = Vector{UInt8}(repeat("hello world, this is a test ", 2000))
+    reps = [rep[i:i+999] for i in 1:1000:50_000]
+    dr = parse_dictionary(train_dictionary(reps; dict_size=4096))
+    @test decompress(compress(reps[3]; dict=dr), dr) == reps[3]
+    # ... also when the literals are uniformly random
+    noise = [UInt8[UInt8((i * 2654435761 + j * 40503) >> 13 & 0xff) for i in 1:1000] for j in 1:60]
+    dn = parse_dictionary(train_dictionary(noise; dict_size=4096))
+    @test decompress(compress(noise[7]; dict=dn), dn) == noise[7]
     @test_throws ArgumentError train_dictionary(Vector{UInt8}[])
     @test_throws ArgumentError train_dictionary(train; d=7)
 end
