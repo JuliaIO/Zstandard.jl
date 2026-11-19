@@ -130,6 +130,20 @@ using Zstd_jll
     @test decompress(compress(noise[7]; dict=dn), dn) == noise[7]
     @test_throws ArgumentError train_dictionary(Vector{UInt8}[])
     @test_throws ArgumentError train_dictionary(train; d=7)
+
+    # exact COVER, the d search, and parallel trials (same result on any number of tasks)
+    dcov = train_dictionary(train; dict_size=8192, algorithm=:cover)
+    fc = parse_dictionary(dcov)
+    @test length(dcov) <= 8192
+    @test sum(s -> length(compress(s; dict=fc)), test) < 1.1 * ref
+    @test decompress(compress(test[5]; dict=fc), fc) == test[5]
+    @test train_dictionary(train; dict_size=8192, nthreads=1) == d
+    @test train_dictionary(train; dict_size=8192, algorithm=:cover, nthreads=3) == dcov
+    @test train_dictionary(train; dict_size=4096, d=6, k=300, algorithm=:cover) ==
+          train_dictionary(train; dict_size=4096, d=6, k=300, algorithm=:cover)
+    @test length(train_dictionary(train; dict_size=4096, steps=2)) <= 4096
+    @test_throws ArgumentError train_dictionary(train; algorithm=:legacy)
+    @test_throws ArgumentError train_dictionary(train; steps=0)
 end
 
 @testset "Long-distance matching" begin
