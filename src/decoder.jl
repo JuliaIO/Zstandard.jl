@@ -988,7 +988,7 @@ start and end on frame boundaries.
 function decompress_frames(data::AbstractVector{UInt8}, st::DecoderState=DecoderState(),
                            dict::Union{Nothing,ZstdDictionary}=nothing;
                            range::UnitRange{Int}=1:length(data),
-                           out::Vector{UInt8}=Vector{UInt8}(undef, 0))
+                           out::Vector{UInt8}=Vector{UInt8}(undef, 0), magicless::Bool=false)
     src = data isa Vector{UInt8} ? data : Vector{UInt8}(data)
     checkbounds(src, range)
     n = range.stop            # last valid input index
@@ -998,9 +998,13 @@ function decompress_frames(data::AbstractVector{UInt8}, st::DecoderState=Decoder
     GC.@preserve src begin
         p = pointer(src)
         while pos <= n
-            n - pos + 1 < 4 && zerr("truncated frame (magic number)")
-            magic = load32(p + pos - 1)
-            pos += 4
+            if magicless
+                magic = MAGIC_NUMBER         # frames without magic numbers (no skippable frames)
+            else
+                n - pos + 1 < 4 && zerr("truncated frame (magic number)")
+                magic = load32(p + pos - 1)
+                pos += 4
+            end
             if magic & SKIPPABLE_MASK == SKIPPABLE_MAGIC_START
                 n - pos + 1 < 4 && zerr("truncated skippable frame")
                 sz = Int(load32(p + pos - 1)); pos += 4

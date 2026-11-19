@@ -16,22 +16,29 @@ mutable struct ZstandardCompressorCodec <: Codec
     checksum::Bool
     dict::Union{Nothing,ZstdDictionary,Zstandard.PreparedDictionary}
     params::Zstandard.Encoder.ParameterOverrides
+    frame::Zstandard.Encoder.FrameOptions
+    size_hint::Union{Nothing,Int}
     sc::StreamCompressor
     opos::Int            # next byte of sc.out to emit
 end
 
 function Zstandard.ZstandardCompressor(; level::Union{Nothing,Integer}=nothing, checksum::Bool=false,
                                        dict::Union{Nothing,ZstdDictionary,Zstandard.PreparedDictionary}=nothing,
+                                       content_size::Bool=true, dict_id::Bool=true, magicless::Bool=false,
+                                       size_hint::Union{Nothing,Integer}=nothing,
                                        window_log=nothing, hash_log=nothing, chain_log=nothing, search_log=nothing, min_match=nothing, target_length=nothing, strategy=nothing)
     params = Zstandard.Encoder.parameter_overrides(; window_log, hash_log, chain_log, search_log, min_match, target_length, strategy)
-    sc = StreamCompressor(; level, checksum, dict, params)
-    ZstandardCompressorCodec(sc.level, checksum, dict, params, sc, 1)
+    frame = Zstandard.Encoder.FrameOptions(; content_size, dict_id, magicless)
+    hint = size_hint === nothing ? nothing : Int(size_hint)
+    sc = StreamCompressor(; level, checksum, dict, params, frame, size_hint=hint)
+    ZstandardCompressorCodec(sc.level, checksum, dict, params, frame, hint, sc, 1)
 end
 
 Base.show(io::IO, c::ZstandardCompressorCodec) = print(io, "ZstandardCompressor(level=$(c.level))")
 
 function TranscodingStreams.startproc(c::ZstandardCompressorCodec, mode::Symbol, err::Error)
-    c.sc = StreamCompressor(; level=c.level, checksum=c.checksum, dict=c.dict, params=c.params)
+    c.sc = StreamCompressor(; level=c.level, checksum=c.checksum, dict=c.dict, params=c.params,
+                            frame=c.frame, size_hint=c.size_hint)
     c.opos = 1
     return :ok
 end
@@ -88,13 +95,16 @@ end
 mutable struct ZstandardDecompressorCodec <: Codec
     dict::Union{Nothing,ZstdDictionary}
     max_window_size::Int
+    magicless::Bool
     d::StreamDecoder
     frames_reported::Int
 end
 
 Zstandard.ZstandardDecompressor(; dict::Union{Nothing,ZstdDictionary}=nothing,
-                                max_window_size::Integer=Zstandard.Streaming.DEFAULT_MAX_WINDOW_SIZE) =
-    ZstandardDecompressorCodec(dict, Int(max_window_size), StreamDecoder(dict; max_window_size), 0)
+                                max_window_size::Integer=Zstandard.Streaming.DEFAULT_MAX_WINDOW_SIZE,
+                                magicless::Bool=false) =
+    ZstandardDecompressorCodec(dict, Int(max_window_size), magicless,
+                               StreamDecoder(dict; max_window_size, magicless), 0)
 
 Base.show(io::IO, ::ZstandardDecompressorCodec) = print(io, "ZstandardDecompressor()")
 
@@ -113,7 +123,7 @@ end
 
 function TranscodingStreams.startproc(c::ZstandardDecompressorCodec, mode::Symbol, err::Error)
     if !at_boundary(c.d)
-        c.d = StreamDecoder(c.dict; max_window_size=c.max_window_size)
+        c.d = StreamDecoder(c.dict; max_window_size=c.max_window_size, magicless=c.magicless)
         c.frames_reported = 0
     end
     return :ok

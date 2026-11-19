@@ -178,6 +178,24 @@ end
 
 const NO_OVERRIDES = ParameterOverrides(-1, -1, -1, -1, -1, -1, -1)
 
+"""
+    FrameOptions(; content_size=true, dict_id=true, magicless=false)
+
+Frame header options (libzstd's `ZSTD_c_contentSizeFlag`, `ZSTD_c_dictIDFlag`
+and the `ZSTD_f_zstd1_magicless` format): whether the header records the
+content size and the dictionary ID, and whether the frame starts with the
+magic number. A magicless frame can only be read by a decoder told to
+expect it.
+"""
+struct FrameOptions
+    content_size::Bool
+    dict_id::Bool
+    magicless::Bool
+end
+FrameOptions(; content_size::Bool=true, dict_id::Bool=true, magicless::Bool=false) =
+    FrameOptions(content_size, dict_id, magicless)
+const DEFAULT_FRAME = FrameOptions()
+
 # libzstd strategy names
 const STRATEGY_NAMES = Dict(:fast => S_FAST, :dfast => S_DFAST, :greedy => S_GREEDY,
                             :lazy => S_LAZY, :lazy2 => S_LAZY2, :btlazy2 => S_BTLAZY2,
@@ -1975,11 +1993,15 @@ Write a frame header. `src_size < 0` means unknown (no Frame_Content_Size);
 `dict_id == 0` omits the dictionary ID.
 """
 function write_frame_header!(out::Vector{UInt8}, pos::Int, src_size::Int, window_log::Int,
-                             checksum::Bool, dict_id::UInt32=UInt32(0))
-    for k in 0:3
-        out[pos + k] = (MAGIC_NUMBER >> (8k)) % UInt8
+                             checksum::Bool, dict_id::UInt32=UInt32(0), fo::FrameOptions=DEFAULT_FRAME)
+    if !fo.magicless
+        for k in 0:3
+            out[pos + k] = (MAGIC_NUMBER >> (8k)) % UInt8
+        end
+        pos += 4
     end
-    pos += 4
+    fo.content_size || (src_size = -1)
+    fo.dict_id || (dict_id = UInt32(0))
     window = 1 << window_log
     known = src_size >= 0
     single = known && src_size <= window
@@ -2022,7 +2044,7 @@ function compress_frame!(cc::CompressionContext, data::AbstractVector{UInt8}, le
                          checksum::Bool=false,
                          dict::Union{Nothing,ZstdDictionary,PreparedDictionary}=nothing,
                          long::Bool=false, params::ParameterOverrides=NO_OVERRIDES,
-                         dest::Union{Nothing,Vector{UInt8}}=nothing)
+                         dest::Union{Nothing,Vector{UInt8}}=nothing, frame::FrameOptions=DEFAULT_FRAME)
     prepared = nothing
     if dict isa PreparedDictionary
         level = dict.level
@@ -2069,7 +2091,7 @@ function compress_frame!(cc::CompressionContext, data::AbstractVector{UInt8}, le
     else
         out = Vector{UInt8}(undef, bound)
     end
-    pos = write_frame_header!(out, 1, n, p.window_log, checksum, dict === nothing ? UInt32(0) : dict.id)
+    pos = write_frame_header!(out, 1, n, p.window_log, checksum, dict === nothing ? UInt32(0) : dict.id, frame)
     GC.@preserve src begin
         base = pointer(src)
         dlen > 0 && prepared === nothing && load_dict!(cc, base, dlen)
@@ -2166,9 +2188,9 @@ function compress_job!(cc::CompressionContext, p::CParams, level::Integer, data:
 end
 
 """Frame header bytes (as written by compress_frame!) for an input of n bytes."""
-function frame_header_bytes(n::Int, p::CParams, checksum::Bool)
+function frame_header_bytes(n::Int, p::CParams, checksum::Bool, frame::FrameOptions=DEFAULT_FRAME)
     out = Vector{UInt8}(undef, 32)
-    pos = write_frame_header!(out, 1, n, p.window_log, checksum)
+    pos = write_frame_header!(out, 1, n, p.window_log, checksum, UInt32(0), frame)
     return resize!(out, pos - 1)
 end
 
@@ -2207,12 +2229,16 @@ mutable struct StreamCompressor
     total::Int           # bytes written to the current frame
     params::ParameterOverrides
     bsize::Int           # block size of the current frame
+    frame::FrameOptions
+    size_hint::Int       # expected input size when none is pledged (-1: none)
 end
 
 function StreamCompressor(; level::Union{Nothing,Integer}=nothing, checksum::Bool=false,
                           dict::Union{Nothing,ZstdDictionary,PreparedDictionary}=nothing,
                           pledged_size::Union{Nothing,Integer}=nothing,
-                          params::ParameterOverrides=NO_OVERRIDES)
+                          params::ParameterOverrides=NO_OVERRIDES, frame::FrameOptions=DEFAULT_FRAME,
+                          size_hint::Union{Nothing,Integer}=nothing)
+    size_hint === nothing || size_hint >= 0 || throw(ArgumentError("size_hint must be non-negative"))
     if dict isa PreparedDictionary
         use_prepared(dict, 0, level, params)    # checks level and parameters
         level = dict.level
@@ -2220,7 +2246,8 @@ function StreamCompressor(; level::Union{Nothing,Integer}=nothing, checksum::Boo
     end
     level = level === nothing ? 3 : Int(level)
     sc = StreamCompressor(CompressionContext(), level, checksum, dict, UInt8[], 0, 1, 0, 0,
-                          UInt8[], 0, false, false, ChecksumState(), -1, 0, params, BLOCK_SIZE_MAX)
+                          UInt8[], 0, false, false, ChecksumState(), -1, 0, params, BLOCK_SIZE_MAX,
+                          frame, size_hint === nothing ? -1 : Int(size_hint))
     pledged_size === nothing || stream_pledge!(sc, pledged_size)
     return sc
 end
@@ -2253,7 +2280,9 @@ function stream_begin!(sc::StreamCompressor)
         p = pd.params
         use_prepared!(cc, pd)
     else
-        p = compression_parameters(sc.level, sc.pledged < 0 ? -1 : sc.pledged + dlen, sc.params)
+        # parameters for the pledged size, else the size hint (ZSTD_c_srcSizeHint)
+        expect = sc.pledged >= 0 ? sc.pledged : sc.size_hint
+        p = compression_parameters(sc.level, expect < 0 ? -1 : expect + dlen, sc.params)
         reset_context!(cc, p, sc.level)
         dict === nothing || apply_dict_entropy!(cc, dict)
     end
@@ -2271,7 +2300,7 @@ function stream_begin!(sc::StreamCompressor)
     sc.pend = sc.len + 1
     out_reserve!(sc, 32)
     sc.olen = write_frame_header!(sc.out, sc.olen + 1, sc.pledged, p.window_log, sc.checksum,
-                                  dict === nothing ? UInt32(0) : dict.id) - 1
+                                  dict === nothing ? UInt32(0) : dict.id, sc.frame) - 1
     sc.xxh = ChecksumState()
     sc.total = 0
     sc.started = true

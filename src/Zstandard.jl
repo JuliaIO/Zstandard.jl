@@ -35,7 +35,9 @@ using .Streaming: ZstdDecompressorStream, ZstdCompressorStream
 A [TranscodingStreams.jl](https://github.com/JuliaIO/TranscodingStreams.jl) codec
 compressing to the Zstandard format, for use with `transcode`,
 `TranscodingStream`, etc. Available once `TranscodingStreams` is loaded.
-Accepts the parameter keywords of [`compress`](@ref) (`window_log`, ...).
+Accepts the parameter and frame keywords of [`compress`](@ref) (`window_log`,
+..., `content_size`, `dict_id`, `magicless`), and `size_hint` (see
+`ZstdCompressorStream`) for streams whose size is not pledged.
 
 ```julia
 using Zstandard, TranscodingStreams
@@ -46,12 +48,13 @@ stream = TranscodingStream(ZstandardCompressor(), open("out.zst", "w"))
 function ZstandardCompressor end
 
 """
-    ZstandardDecompressor(; dict=nothing, max_window_size=128 MiB)
+    ZstandardDecompressor(; dict=nothing, max_window_size=128 MiB, magicless=false)
 
 A [TranscodingStreams.jl](https://github.com/JuliaIO/TranscodingStreams.jl) codec
 decoding Zstandard data (concatenated and skippable frames included). Frames
 with a window larger than `max_window_size` are rejected (see
-`ZstdDecompressorStream`).
+`ZstdDecompressorStream`). With `magicless=true`, frames have no magic
+numbers (see `compress`).
 Available once `TranscodingStreams` is loaded.
 """
 function ZstandardDecompressor end
@@ -105,7 +108,7 @@ const MAX_FRAME_INPUT = 1 << 30
 
 # Compress one frame with jobs spread over up to `nthreads` tasks.
 function _compress_mt(data::Vector{UInt8}, level::Integer, checksum::Bool, nthreads::Int,
-                      params=Encoder.NO_OVERRIDES)
+                      params=Encoder.NO_OVERRIDES, frame=Encoder.DEFAULT_FRAME)
     n = length(data)
     p, job, overlap = mt_layout(n, level, params)
     njobs = cld(n, job)
@@ -118,7 +121,7 @@ function _compress_mt(data::Vector{UInt8}, level::Integer, checksum::Bool, nthre
         end
     end
     parts = fetch.(tasks)
-    out = frame_header_bytes(n, p, checksum)
+    out = frame_header_bytes(n, p, checksum, frame)
     sizehint!(out, length(out) + sum(length, parts) + 4)
     foreach(x -> append!(out, x), parts)
     if checksum
@@ -132,6 +135,7 @@ end
 
 """
     compress(data; level=3, checksum=false, dict=nothing, nthreads=1, long=false,
+             content_size=true, dict_id=true, magicless=false,
              window_log, hash_log, chain_log, search_log, min_match, target_length, strategy)
         -> Vector{UInt8}
 
@@ -161,13 +165,21 @@ The output differs slightly from single-threaded compression. Not combined with
 With `long=true`, long-distance matching finds repetitions up to 128 MiB
 apart (as `zstd --long`); the frame then declares a window of up to 128 MiB,
 which decoders must be willing to allocate.
+
+Frame header options (libzstd's `ZSTD_c_contentSizeFlag`, `ZSTD_c_dictIDFlag`
+and `ZSTD_f_zstd1_magicless`): `content_size=false` leaves the content size
+out of the header, `dict_id=false` the dictionary ID (the decoder must then be
+given the right dictionary), and `magicless=true` omits the 4-byte magic
+number; such frames are decoded with `decompress(data; magicless=true)`.
 """
 function compress(data::AbstractVector{UInt8}; level::Union{Nothing,Integer}=nothing,
                   checksum::Bool=false, dict::Union{Nothing,ZstdDictionary,PreparedDictionary}=nothing,
                   nthreads::Integer=1, long::Bool=false,
+                  content_size::Bool=true, dict_id::Bool=true, magicless::Bool=false,
                   window_log=nothing, hash_log=nothing, chain_log=nothing, search_log=nothing, min_match=nothing, target_length=nothing, strategy=nothing)
     nthreads < 1 && throw(ArgumentError("nthreads must be at least 1"))
     params = Encoder.parameter_overrides(; window_log, hash_log, chain_log, search_log, min_match, target_length, strategy)
+    frame = Encoder.FrameOptions(; content_size, dict_id, magicless)
     if dict isa PreparedDictionary
         Encoder.use_prepared(dict, 0, level, params)     # checks level and parameters
         level = dict.level
@@ -177,17 +189,17 @@ function compress(data::AbstractVector{UInt8}; level::Union{Nothing,Integer}=not
         _, job, _ = mt_layout(length(data), level, params)
         if length(data) > job
             return _compress_mt(data isa Vector{UInt8} ? data : Vector{UInt8}(data), level, checksum,
-                                Int(nthreads), params)
+                                Int(nthreads), params, frame)
         end
     end
     _with_cctx() do cc
         if length(data) <= MAX_FRAME_INPUT
-            return compress_frame!(cc, data, level; checksum, dict, long, params)
+            return compress_frame!(cc, data, level; checksum, dict, long, params, frame)
         end
         out = UInt8[]
         for off in 0:MAX_FRAME_INPUT:length(data)-1
             chunk = view(data, off+1:min(off + MAX_FRAME_INPUT, length(data)))
-            append!(out, compress_frame!(cc, chunk, level; checksum, dict, long, params))
+            append!(out, compress_frame!(cc, chunk, level; checksum, dict, long, params, frame))
         end
         return out
     end
@@ -263,10 +275,14 @@ Throws a [`ZstdError`](@ref) if the data is malformed.
 When `data` holds several frames (at least $(PARALLEL_DECODE_MIN ÷ 1024) KiB in
 total), they are decoded in parallel on up to `nthreads` tasks; a single frame
 is always decoded on one thread. The result does not depend on `nthreads`.
+
+With `magicless=true`, frames are read without magic numbers (as written by
+`compress(data; magicless=true)`); skippable frames cannot occur then.
 """
 function decompress(data::AbstractVector{UInt8}, dict::Union{Nothing, ZstdDictionary}=nothing;
-                    nthreads::Integer=Threads.nthreads())
+                    nthreads::Integer=Threads.nthreads(), magicless::Bool=false)
     nthreads < 1 && throw(ArgumentError("nthreads must be at least 1"))
+    magicless && return _with_state(st -> decompress_frames(data, st, dict; magicless))
     if nthreads > 1 && length(data) >= PARALLEL_DECODE_MIN
         src = data isa Vector{UInt8} ? data : Vector{UInt8}(data)
         chunks = _frame_chunks(src, 4 * Int(nthreads))

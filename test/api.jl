@@ -556,3 +556,85 @@ end
     @test_throws ZstdError decompress!(ZstdDecompressionContext(), UInt8[], UInt8[1, 2, 3, 4, 5])
     @test occursin("level=4", sprint(show, ctx))
 end
+
+# libzstd's experimental format parameter (ZSTD_c_format / ZSTD_d_format)
+const ZLIB = Zstd_jll.libzstd
+function lib_magicless_compress(src, level)
+    cctx = ccall((:ZSTD_createCCtx, ZLIB), Ptr{Cvoid}, ())
+    ccall((:ZSTD_CCtx_setParameter, ZLIB), Csize_t, (Ptr{Cvoid}, Cint, Cint), cctx, 10, 1)   # ZSTD_c_format = magicless
+    ccall((:ZSTD_CCtx_setParameter, ZLIB), Csize_t, (Ptr{Cvoid}, Cint, Cint), cctx, 100, level)
+    dst = Vector{UInt8}(undef, length(src) + 1024)
+    n = ccall((:ZSTD_compress2, ZLIB), Csize_t, (Ptr{Cvoid}, Ptr{UInt8}, Csize_t, Ptr{UInt8}, Csize_t),
+              cctx, dst, length(dst), src, length(src))
+    ccall((:ZSTD_freeCCtx, ZLIB), Csize_t, (Ptr{Cvoid},), cctx)
+    return resize!(dst, n)
+end
+function lib_magicless_decompress(src, n)
+    dctx = ccall((:ZSTD_createDCtx, ZLIB), Ptr{Cvoid}, ())
+    ccall((:ZSTD_DCtx_setParameter, ZLIB), Csize_t, (Ptr{Cvoid}, Cint, Cint), dctx, 1000, 1) # ZSTD_d_format = magicless
+    dst = Vector{UInt8}(undef, n)
+    k = ccall((:ZSTD_decompressDCtx, ZLIB), Csize_t, (Ptr{Cvoid}, Ptr{UInt8}, Csize_t, Ptr{UInt8}, Csize_t),
+              dctx, dst, n, src, length(src))
+    ccall((:ZSTD_freeDCtx, ZLIB), Csize_t, (Ptr{Cvoid},), dctx)
+    return k == n ? dst : nothing
+end
+
+@testset "Frame header options" begin
+    data = make_text(150_000)
+    dict = parse_dictionary(train_dictionary([make_text(900 + 13i) for i in 1:200]; dict_size=8192))
+    # content size flag
+    c = compress(data; content_size=false)
+    @test frame_content_size(c) === nothing
+    @test !frame_header(c).single_segment
+    @test decompress(c) == data
+    @test transcode(CodecZstd.ZstdDecompressor, c) == data
+    @test frame_content_size(transcode(ZstandardCompressor(content_size=false), data)) === nothing
+    buf = IOBuffer()
+    s = Zstandard.ZstdCompressorStream(buf; pledged_size=length(data), content_size=false, close_io=false)
+    write(s, data); close(s)
+    c = take!(buf)
+    @test frame_content_size(c) === nothing && decompress(c) == data
+    # dictionary ID flag
+    c = compress(data; dict, dict_id=false)
+    @test frame_dict_id(c) == 0
+    @test decompress(c, dict) == data
+    @test frame_dict_id(compress(data; dict)) == dict.id
+    # magicless frames
+    for kw in ((;), (; checksum=true), (; dict), (; level=19), (; content_size=false, level=1))
+        c = compress(data; magicless=true, kw...)
+        ref = compress(data; kw...)
+        @test c == ref[5:end]
+        d = haskey(kw, :dict) ? dict : nothing
+        @test decompress(c, d; magicless=true) == data
+        @test frame_compressed_size(c; magicless=true) == length(c)
+        haskey(kw, :dict) || @test lib_magicless_decompress(c, length(data)) == data
+    end
+    @test_throws ZstdError decompress(compress(data; magicless=true))
+    lc = lib_magicless_compress(data, 5)
+    @test decompress(lc; magicless=true) == data
+    two = vcat(compress(data; magicless=true), lc)
+    @test decompress(two; magicless=true) == vcat(data, data)
+    @test read(Zstandard.ZstdDecompressorStream(IOBuffer(two); magicless=true)) == vcat(data, data)
+    @test transcode(ZstandardDecompressor(magicless=true), two) == vcat(data, data)
+    @test decompress(ZstdDecompressionContext(magicless=true), two) == vcat(data, data)
+    @test decompress(compress(ZstdCompressionContext(magicless=true), data); magicless=true) == data
+    @test decompress(compress(repeat(data, 30); nthreads=2, level=1, magicless=true); magicless=true) == repeat(data, 30)
+    @test frame_header(compress(data; magicless=true); magicless=true).content_size == length(data)
+    # size hint: parameters for the hinted size, no recorded size, any amount of input
+    buf = IOBuffer()
+    s = Zstandard.ZstdCompressorStream(buf; size_hint=2000, close_io=false)
+    write(s, data); close(s)
+    c = take!(buf)
+    @test frame_header(c).window_size == 2048
+    @test frame_content_size(c) === nothing
+    @test decompress(c) == data
+    # a pledged size (as `transcode` makes) takes precedence over the hint
+    @test frame_header(transcode(ZstandardCompressor(size_hint=10_000), data)).window_size == length(data)
+    buf = IOBuffer()
+    st = TranscodingStream(ZstandardCompressor(size_hint=10_000), buf; stop_on_end=false)
+    write(st, data); write(st, TranscodingStreams.TOKEN_END); flush(st)
+    c = take!(buf)
+    @test frame_header(c).window_size == 1 << 14
+    @test decompress(c) == data
+    @test_throws ArgumentError Zstandard.ZstdCompressorStream(IOBuffer(); size_hint=-1)
+end

@@ -3,6 +3,7 @@
 
 """
     ZstdCompressionContext(; level=3, checksum=false, dict=nothing, long=false,
+                           content_size=true, dict_id=true, magicless=false,
                            window_log, hash_log, chain_log, search_log, min_match,
                            target_length, strategy)
 
@@ -31,11 +32,13 @@ mutable struct ZstdCompressionContext
     dict::Union{Nothing,ZstdDictionary,PreparedDictionary}
     long::Bool
     params::Encoder.ParameterOverrides
+    frame::Encoder.FrameOptions
 end
 
 function ZstdCompressionContext(; level::Union{Nothing,Integer}=nothing, checksum::Bool=false,
                                 dict::Union{Nothing,ZstdDictionary,PreparedDictionary}=nothing,
-                                long::Bool=false, window_log=nothing, hash_log=nothing,
+                                long::Bool=false, content_size::Bool=true, dict_id::Bool=true,
+                                magicless::Bool=false, window_log=nothing, hash_log=nothing,
                                 chain_log=nothing, search_log=nothing, min_match=nothing,
                                 target_length=nothing, strategy=nothing)
     params = Encoder.parameter_overrides(; window_log, hash_log, chain_log, search_log, min_match,
@@ -45,7 +48,8 @@ function ZstdCompressionContext(; level::Union{Nothing,Integer}=nothing, checksu
         level = dict.level
     end
     level = level === nothing ? 3 : Int(level)
-    return ZstdCompressionContext(CompressionContext(), level, checksum, dict, long, params)
+    return ZstdCompressionContext(CompressionContext(), level, checksum, dict, long, params,
+                                  Encoder.FrameOptions(; content_size, dict_id, magicless))
 end
 
 function Base.show(io::IO, ctx::ZstdCompressionContext)
@@ -76,34 +80,35 @@ function compress!(ctx::ZstdCompressionContext, out::Vector{UInt8},
     out === src && throw(ArgumentError("out must not be the input"))
     if length(src) <= MAX_FRAME_INPUT
         return compress_frame!(ctx.cc, src, ctx.level; checksum=ctx.checksum, dict=ctx.dict,
-                               long=ctx.long, params=ctx.params, dest=out)
+                               long=ctx.long, params=ctx.params, dest=out, frame=ctx.frame)
     end
     empty!(out)
     for off in 0:MAX_FRAME_INPUT:length(src)-1
         chunk = view(src, off+1:min(off + MAX_FRAME_INPUT, length(src)))
         append!(out, compress_frame!(ctx.cc, chunk, ctx.level; checksum=ctx.checksum, dict=ctx.dict,
-                                     long=ctx.long, params=ctx.params))
+                                     long=ctx.long, params=ctx.params, frame=ctx.frame))
     end
     return out
 end
 
 """
-    ZstdDecompressionContext(; dict=nothing)
+    ZstdDecompressionContext(; dict=nothing, magicless=false)
 
 A decompression context reused across calls (as a libzstd `ZSTD_DCtx`): its
 decoding tables persist. Use it with `decompress(ctx, data)`, or
 `decompress!(ctx, out, data)` to decode into a vector you reuse. Data may hold
 several concatenated and skippable frames; `dict` is used for frames that
-need it.
+need it. With `magicless=true`, frames have no magic numbers (see `compress`).
 
 A context must not be used by several tasks at the same time.
 """
 mutable struct ZstdDecompressionContext
     st::DecoderState
     dict::Union{Nothing,ZstdDictionary}
+    magicless::Bool
 end
-ZstdDecompressionContext(; dict::Union{Nothing,ZstdDictionary}=nothing) =
-    ZstdDecompressionContext(DecoderState(), dict)
+ZstdDecompressionContext(; dict::Union{Nothing,ZstdDictionary}=nothing, magicless::Bool=false) =
+    ZstdDecompressionContext(DecoderState(), dict, magicless)
 
 Base.show(io::IO, ctx::ZstdDecompressionContext) =
     print(io, "ZstdDecompressionContext(", ctx.dict === nothing ? "" : "dict", ")")
@@ -114,7 +119,7 @@ Base.show(io::IO, ctx::ZstdDecompressionContext) =
 Decompress `data` with the context (and its dictionary, if any).
 """
 decompress(ctx::ZstdDecompressionContext, data::AbstractVector{UInt8}) =
-    decompress_frames(data, ctx.st, ctx.dict)
+    decompress_frames(data, ctx.st, ctx.dict; magicless=ctx.magicless)
 
 """
     decompress!(ctx::ZstdDecompressionContext, out::Vector{UInt8}, data) -> out
@@ -125,5 +130,5 @@ Decompress `data` into `out`, which is resized to the decoded content. Reusing
 function decompress!(ctx::ZstdDecompressionContext, out::Vector{UInt8}, data::AbstractVector{UInt8})
     out === data && throw(ArgumentError("out must not be the input"))
     resize!(out, 0)
-    return decompress_frames(data, ctx.st, ctx.dict; out)
+    return decompress_frames(data, ctx.st, ctx.dict; out, magicless=ctx.magicless)
 end
