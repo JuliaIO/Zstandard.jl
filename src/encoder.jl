@@ -251,15 +251,25 @@ mutable struct SeqStore
     ml::Vector{UInt32}
     off::Vector{UInt32}     # raw match distance
     nseq::Int
+    wlimit::Ptr{UInt8}      # literals ending at or before this may be copied in 16-byte chunks
 end
 SeqStore() = SeqStore(Vector{UInt8}(undef, BLOCK_SIZE_MAX + 32), 0,
                       Vector{UInt32}(undef, BLOCK_SIZE_MAX ÷ 3 + 2),
                       Vector{UInt32}(undef, BLOCK_SIZE_MAX ÷ 3 + 2),
-                      Vector{UInt32}(undef, BLOCK_SIZE_MAX ÷ 3 + 2), 0)
+                      Vector{UInt32}(undef, BLOCK_SIZE_MAX ÷ 3 + 2), 0, C_NULL)
 
 @inline function store_seq!(ss::SeqStore, anchor::Ptr{UInt8}, ll::Int, offset::Int, ml::Int)
     if ll > 0
-        GC.@preserve ss unsafe_copyto!(pointer(ss.lit) + ss.nlit, anchor, ll)
+        GC.@preserve ss begin
+            dst = pointer(ss.lit) + ss.nlit
+            if anchor + ll <= ss.wlimit && ll <= 32
+                # wildcopy: may write up to 15 bytes past (the literal buffer has slack)
+                unsafe_store!(Ptr{UInt128}(dst), unsafe_load(Ptr{UInt128}(anchor)))
+                ll > 16 && unsafe_store!(Ptr{UInt128}(dst + 16), unsafe_load(Ptr{UInt128}(anchor + 16)))
+            else
+                unsafe_copyto!(dst, anchor, ll)
+            end
+        end
         ss.nlit += ll
     end
     n = ss.nseq + 1
@@ -290,59 +300,115 @@ const HASH_READ_SIZE = 8
 @inline pos_of(p::Ptr{UInt8}, base::Ptr{UInt8}) = Int(p - base) + 1
 @inline ptr_of(i::Integer, base::Ptr{UInt8}) = base + (i - 1)
 
+const K_STEP_INCR = 1 << (K_SEARCH_STRENGTH - 1)
+
+# libzstd 1.5's ZSTD_compressBlock_fast_noDict_generic: two adjacent positions
+# per step (ip0, ip1) with the repcode checked ahead at ip2; the step starts at
+# targetLength + 1 (at least 2) and grows by one every K_STEP_INCR bytes
+# without a match.
 function parse_fast!(ss::SeqStore, htab::Vector{Int32}, hlog::Int, mls::Int, step0::Int,
                      base::Ptr{UInt8}, istart::Ptr{UInt8}, iend::Ptr{UInt8}, lowlimit::Int,
                      rep1::Int, rep2::Int)
     ilimit = iend - HASH_READ_SIZE
     anchor = istart
-    ip = istart
-    ip == base && (ip += 1)
+    ip0 = istart
+    lowp = ptr_of(lowlimit, base)
+    ip0 == lowp && (ip0 += 1)
+    stepsize = max(step0, 2)
+    # repeat offsets reaching before the window are invalid in this block
+    maxrep = pos_of(ip0, base) - lowlimit
+    saved1 = 0; saved2 = 0
+    rep2 > maxrep && (saved2 = rep2; rep2 = 0)
+    rep1 > maxrep && (saved1 = rep1; rep1 = 0)
     GC.@preserve htab begin
         ht = pointer(htab)
-        while ip < ilimit
-            cur = pos_of(ip, base)
-            h = zhash(ip, hlog, mls)
-            midx = Int(unsafe_load(ht, h + 1))
-            unsafe_store!(ht, cur % Int32, h + 1)
-            # repeat offset at ip+1
-            if rep1 > 0 && cur + 1 - rep1 >= lowlimit && load32(ip + 1 - rep1) == load32(ip + 1)
-                ml = zcount(ip + 5, ip + 5 - rep1, iend) + 4
-                ip += 1
-                store_seq!(ss, anchor, Int(ip - anchor), rep1, ml)
-            elseif midx >= lowlimit && midx > 0 && load32(ptr_of(midx, base)) == load32(ip)
-                m = ptr_of(midx, base)
-                ml = zcount(ip + 4, m + 4, iend) + 4
-                while ip > anchor && m > ptr_of(lowlimit, base) && unsafe_load(ip - 1) == unsafe_load(m - 1)
-                    ip -= 1; m -= 1; ml += 1
+        @inbounds while true
+            # _start
+            step = stepsize
+            nextstep = ip0 + K_STEP_INCR
+            ip1 = ip0 + 1
+            ip2 = ip0 + step
+            ip3 = ip2 + 1
+            ip3 >= ilimit && break
+            hash0 = zhash(ip0, hlog, mls)
+            hash1 = zhash(ip1, hlog, mls)
+            midx = Int(unsafe_load(ht, hash0 + 1))
+            found = 0          # 1: repcode at ip0 (match0 set), 2: new offset at ip0 (midx)
+            cur0 = 0
+            match0 = ip0
+            while true
+                cur0 = pos_of(ip0, base)
+                unsafe_store!(ht, cur0 % Int32, hash0 + 1)
+                if rep1 > 0 && load32(ip2) == load32(ip2 - rep1)
+                    ip0 = ip2
+                    match0 = ip0 - rep1
+                    if match0 > lowp && unsafe_load(ip0 - 1) == unsafe_load(match0 - 1)
+                        ip0 -= 1; match0 -= 1
+                    end
+                    unsafe_store!(ht, pos_of(ip1, base) % Int32, hash1 + 1)
+                    found = 1
+                    break
                 end
-                offset = Int(ip - m)
-                rep2 = rep1; rep1 = offset
-                store_seq!(ss, anchor, Int(ip - anchor), offset, ml)
-            else
-                ip += ((Int(ip - anchor) >> K_SEARCH_STRENGTH) + step0)
-                continue
+                if midx >= lowlimit && midx > 0 && load32(ptr_of(midx, base)) == load32(ip0)
+                    unsafe_store!(ht, pos_of(ip1, base) % Int32, hash1 + 1)
+                    found = 2
+                    break
+                end
+                midx = Int(unsafe_load(ht, hash1 + 1))
+                hash0 = hash1
+                hash1 = zhash(ip2, hlog, mls)
+                ip0 = ip1; ip1 = ip2; ip2 = ip3
+                cur0 = pos_of(ip0, base)
+                unsafe_store!(ht, cur0 % Int32, hash0 + 1)
+                if midx >= lowlimit && midx > 0 && load32(ptr_of(midx, base)) == load32(ip0)
+                    step <= 4 && unsafe_store!(ht, pos_of(ip1, base) % Int32, hash1 + 1)
+                    found = 2
+                    break
+                end
+                midx = Int(unsafe_load(ht, hash1 + 1))
+                hash0 = hash1
+                hash1 = zhash(ip2, hlog, mls)
+                ip0 = ip1; ip1 = ip2
+                ip2 = ip0 + step
+                ip3 = ip1 + step
+                if ip2 >= nextstep
+                    step += 1
+                    nextstep += K_STEP_INCR
+                end
+                ip3 < ilimit || break
             end
-            ip += ml
-            anchor = ip
-            if ip <= ilimit
-                # fill the table with a position inside the match
-                p2 = ip - 2
-                unsafe_store!(ht, pos_of(p2, base) % Int32, zhash(p2, hlog, mls) + 1)
-                # immediate repcode (ll == 0)
-                while ip <= ilimit && rep2 > 0 && pos_of(ip, base) - rep2 >= lowlimit &&
-                      load32(ip) == load32(ip - rep2)
-                    rl = zcount(ip + 4, ip + 4 - rep2, iend) + 4
+            found == 0 && break
+            if found == 2
+                match0 = ptr_of(midx, base)
+                rep2 = rep1
+                rep1 = Int(ip0 - match0)
+                while ip0 > anchor && match0 > lowp && unsafe_load(ip0 - 1) == unsafe_load(match0 - 1)
+                    ip0 -= 1; match0 -= 1
+                end
+            end
+            # _match
+            ml = zcount(ip0, match0, iend)
+            store_seq!(ss, anchor, Int(ip0 - anchor), Int(ip0 - match0), ml)
+            ip0 += ml
+            anchor = ip0
+            if ip0 <= ilimit
+                p2 = ptr_of(cur0 + 2, base)
+                unsafe_store!(ht, (cur0 + 2) % Int32, zhash(p2, hlog, mls) + 1)
+                unsafe_store!(ht, pos_of(ip0 - 2, base) % Int32, zhash(ip0 - 2, hlog, mls) + 1)
+                while rep2 > 0 && ip0 <= ilimit && load32(ip0) == load32(ip0 - rep2)
+                    rl = zcount(ip0 + 4, ip0 + 4 - rep2, iend) + 4
                     rep1, rep2 = rep2, rep1
-                    unsafe_store!(ht, pos_of(ip, base) % Int32, zhash(ip, hlog, mls) + 1)
+                    unsafe_store!(ht, pos_of(ip0, base) % Int32, zhash(ip0, hlog, mls) + 1)
                     store_seq!(ss, anchor, 0, rep1, rl)
-                    ip += rl
-                    anchor = ip
+                    ip0 += rl
+                    anchor = ip0
                 end
             end
         end
     end
     store_last_literals!(ss, anchor, Int(iend - anchor))
-    return rep1, rep2
+    saved2 = (saved1 != 0 && rep1 != 0) ? saved1 : saved2
+    return (rep1 != 0 ? rep1 : saved1), (rep2 != 0 ? rep2 : saved2)
 end
 
 function parse_dfast!(ss::SeqStore, hlong::Vector{Int32}, hllog::Int, hsmall::Vector{Int32},
@@ -1095,6 +1161,8 @@ include("postsplit.jl")
 Reusable compression state (match-finder tables, entropy tables, scratch
 buffers). Not thread-safe; use one per task.
 """
+const OUT_SCRATCH_MAX = 1 << 26     # 64 MiB
+
 mutable struct CompressionContext
     params::CParams
     level::Int
@@ -1134,6 +1202,8 @@ mutable struct CompressionContext
     fp_new::Vector{Int}
     fp_mid::Vector{Int}
     split::Union{Nothing,SplitState}   # post-splitting scratch, created on first use
+    counts4::Vector{Int32}    # interleaved histogram scratch
+    outbuf::Vector{UInt8}     # one-shot output scratch (see OUT_SCRATCH_MAX)
 end
 
 function default_ctable(norm, al, tabsym, cumul)
@@ -1157,7 +1227,7 @@ function CompressionContext()
         zeros(UInt8, 256), zeros(Int, 256), zeros(Int, 512), zeros(Int, 512),
         zeros(Int16, 16), FSECTable(), zeros(Int, 16), zeros(UInt8, 256),
         zeros(UInt8, 1024), zeros(UInt8, 1024), OptState(), 0, zeros(Int, 1024), zeros(Int, 1024),
-        zeros(Int, 256), nothing)
+        zeros(Int, 256), nothing, zeros(Int32, 4 * 64), UInt8[])
 end
 
 function reset_context!(cc::CompressionContext, p::CParams, level::Int; clear::Bool=true)
@@ -1345,6 +1415,9 @@ end
 function encode_literals!(cc::CompressionContext, dst::Vector{UInt8}, pos::Int, lit::Vector{UInt8}, n::Int)
     GC.@preserve lit begin
         lp = pointer(lit)
+        # As libzstd (ZSTD_literalsCompressionIsDisabled): the accelerated fast
+        # levels (negative levels, or fast with a target length) store literals raw.
+        cc.params.strategy == S_FAST && cc.params.target_length > 0 && return write_raw_literals!(dst, pos, lp, n)
         # Very small literal runs are not worth a table.
         if n <= 63 && !cc.huf_prev_ok
             n > 0 && all(==(lit[1]), view(lit, 1:n)) && n > 2 && return write_rle_literals!(dst, pos, lit[1], n)
@@ -1429,15 +1502,44 @@ const MODE_RLE = 1
 const MODE_FSE = 2
 const MODE_REPEAT = 3
 
+"""
+Histogram of codes[1:n] (values 0:maxcode) into counts, using four
+interleaved tables so runs of one code do not serialize on the increments
+(as libzstd's HIST_count).
+"""
+function count_codes!(counts::Vector{Int}, c4::Vector{Int32}, codes::Vector{UInt8}, n::Int, maxcode::Int)
+    w = maxcode + 1
+    fill!(view(c4, 1:4w), Int32(0))
+    GC.@preserve c4 codes begin
+        pc = pointer(c4); pk = pointer(codes)
+        i = 1
+        @inbounds while i + 3 <= n
+            a = Int(unsafe_load(pk, i)); b = Int(unsafe_load(pk, i + 1))
+            c = Int(unsafe_load(pk, i + 2)); d = Int(unsafe_load(pk, i + 3))
+            unsafe_store!(pc, unsafe_load(pc, a + 1) + Int32(1), a + 1)
+            unsafe_store!(pc, unsafe_load(pc, w + b + 1) + Int32(1), w + b + 1)
+            unsafe_store!(pc, unsafe_load(pc, 2w + c + 1) + Int32(1), 2w + c + 1)
+            unsafe_store!(pc, unsafe_load(pc, 3w + d + 1) + Int32(1), 3w + d + 1)
+            i += 4
+        end
+        @inbounds while i <= n
+            a = Int(unsafe_load(pk, i))
+            unsafe_store!(pc, unsafe_load(pc, a + 1) + Int32(1), a + 1)
+            i += 1
+        end
+    end
+    @inbounds for s in 1:w
+        counts[s] = Int(c4[s]) + Int(c4[w + s]) + Int(c4[2w + s]) + Int(c4[3w + s])
+    end
+    return counts
+end
+
 """Pick the coding mode for one sequence field and prepare its CTable."""
 function select_mode!(cc::CompressionContext, codes::Vector{UInt8}, nseq::Int, maxcode::Int,
                       max_al::Int, cur::FSECTable, prev::FSECTable, prev_ok::Bool,
                       def::FSECTable, def_al::Int, dst::Vector{UInt8}, pos::Int)
     counts = cc.counts
-    fill!(view(counts, 1:maxcode+1), 0)
-    @inbounds for i in 1:nseq
-        counts[Int(codes[i]) + 1] += 1
-    end
+    count_codes!(counts, cc.counts4, codes, nseq, maxcode)
     maxsym = maxcode
     while maxsym > 0 && counts[maxsym + 1] == 0; maxsym -= 1; end
     largest = maximum(view(counts, 1:maxsym+1))
@@ -1488,8 +1590,8 @@ function encode_sequences!(cc::CompressionContext, dst::Vector{UInt8}, pos::Int)
     llc = cc.llc; mlc = cc.mlc; ofc = cc.ofc; ofv = cc.ofv
     @inbounds for i in 1:nseq
         ll = Int(ss.ll[i]); off = Int(ss.off[i])
-        llc[i] = UInt8(ll_code(ll))
-        mlc[i] = UInt8(ml_code(Int(ss.ml[i]) - MIN_MATCH))
+        llc[i] = ll_code(ll) % UInt8
+        mlc[i] = ml_code(Int(ss.ml[i]) - MIN_MATCH) % UInt8
         if ll > 0
             v = off == r1 ? 1 : off == r2 ? 2 : off == r3 ? 3 : off + 3
         else
@@ -1508,8 +1610,8 @@ function encode_sequences!(cc::CompressionContext, dst::Vector{UInt8}, pos::Int)
                 r3 = r2; r2 = r1; r1 = off
             end
         end
-        ofv[i] = UInt32(v)
-        ofc[i] = UInt8(highbit(v))
+        ofv[i] = v % UInt32
+        ofc[i] = highbit(v) % UInt8
     end
     cc.rep = (r1, r2, r3)
     modes_pos = pos
@@ -1536,17 +1638,41 @@ function encode_sequences!(cc::CompressionContext, dst::Vector{UInt8}, pos::Int)
             b = bitc_flush(b)
             b = bitc_add(b, ofv[n], oc)
             b = bitc_flush(b)
-            for i in n-1:-1:1
-                lc = Int(llc[i]); mc = Int(mlc[i]); oc = Int(ofc[i])
-                ofrle || ((b, sof) = fse_encode(b, sof, oft, oc))
-                mlrle || ((b, sml) = fse_encode(b, sml, mlt, mc))
-                llrle || ((b, sll) = fse_encode(b, sll, llt, lc))
-                b = bitc_flush(b)
-                b = bitc_add(b, Int(ss.ll[i]) - Int(LL_BASE[lc + 1]), Int(LL_BITS[lc + 1]))
-                b = bitc_add(b, Int(ss.ml[i]) - Int(ML_BASE[mc + 1]), Int(ML_BITS[mc + 1]))
-                b = bitc_flush(b)
-                b = bitc_add(b, ofv[i], oc)
-                b = bitc_flush(b)
+            # Raw pointers: stores into the output through pointers would otherwise
+            # force the table fields to be reloaded on every iteration.
+            GC.@preserve llc mlc ofc ofv llt mlt oft begin
+                pllc = pointer(llc); pmlc = pointer(mlc); pofc = pointer(ofc); pofv = pointer(ofv)
+                pll = pointer(ss.ll); pml = pointer(ss.ml)
+                lst = pointer(llt.state); ldn = pointer(llt.dnb); ldf = pointer(llt.dfs)
+                mst = pointer(mlt.state); mdn = pointer(mlt.dnb); mdf = pointer(mlt.dfs)
+                ost = pointer(oft.state); odn = pointer(oft.dnb); odf = pointer(oft.dfs)
+                pllb = pointer(LL_BITS); pllbase = pointer(LL_BASE); pmlb = pointer(ML_BITS); pmlbase = pointer(ML_BASE)
+                for i in n-1:-1:1
+                    lc = Int(unsafe_load(pllc, i)); mc = Int(unsafe_load(pmlc, i)); oc = Int(unsafe_load(pofc, i))
+                    if !ofrle
+                        nb = (sof + Int(unsafe_load(odn, oc + 1))) >> 16
+                        b = bitc_add(b, sof, nb)
+                        sof = Int(unsafe_load(ost, (sof >> nb) + Int(unsafe_load(odf, oc + 1)) + 1))
+                    end
+                    if !mlrle
+                        nb = (sml + Int(unsafe_load(mdn, mc + 1))) >> 16
+                        b = bitc_add(b, sml, nb)
+                        sml = Int(unsafe_load(mst, (sml >> nb) + Int(unsafe_load(mdf, mc + 1)) + 1))
+                    end
+                    if !llrle
+                        nb = (sll + Int(unsafe_load(ldn, lc + 1))) >> 16
+                        b = bitc_add(b, sll, nb)
+                        sll = Int(unsafe_load(lst, (sll >> nb) + Int(unsafe_load(ldf, lc + 1)) + 1))
+                    end
+                    # at most 7 + 26 bits pending here
+                    llb = Int(unsafe_load(pllb, lc + 1)); mlb = Int(unsafe_load(pmlb, mc + 1))
+                    b.pos + llb + mlb > 63 && (b = bitc_flush(b))
+                    b = bitc_add(b, Int(unsafe_load(pll, i)) - Int(unsafe_load(pllbase, lc + 1)), llb)
+                    b = bitc_add(b, Int(unsafe_load(pml, i)) - Int(unsafe_load(pmlbase, mc + 1)), mlb)
+                    b.pos + oc > 63 && (b = bitc_flush(b))
+                    b = bitc_add(b, Int(unsafe_load(pofv, i)), oc)
+                    b = bitc_flush(b)
+                end
             end
             mlrle || (b = fse_flush_state(b, sml, mlt))
             ofrle || (b = fse_flush_state(b, sof, oft))
@@ -1624,6 +1750,7 @@ function parse_range!(cc::CompressionContext, base::Ptr{UInt8}, bstart::Ptr{UInt
                       first::Bool)
     p = cc.params
     ss = cc.ss
+    ss.wlimit = bend - 32
     window = 1 << p.window_log
     lowlimit = max(1, pos_of(bend, base) - window)
     n = Int(bend - bstart)
@@ -1810,7 +1937,16 @@ function compress_frame!(cc::CompressionContext, data::AbstractVector{UInt8}, le
         dict === nothing || apply_dict_entropy!(cc, dict)
     end
     bound = n + (n >> 7) + 64 + 3 * (n ÷ BLOCK_SIZE_MAX + 1)
-    out = Vector{UInt8}(undef, bound)
+    # Compress into the context's scratch buffer (reused across calls, up to
+    # OUT_SCRATCH_MAX) and copy out the exact result: allocating the worst-case
+    # size on every call costs more in GC than the copy.
+    scratch = bound <= OUT_SCRATCH_MAX
+    if scratch
+        length(cc.outbuf) < bound && resize!(cc.outbuf, bound)
+        out = cc.outbuf
+    else
+        out = Vector{UInt8}(undef, bound)
+    end
     pos = write_frame_header!(out, 1, n, p.window_log, checksum, dict === nothing ? UInt32(0) : dict.id)
     GC.@preserve src begin
         base = pointer(src)
@@ -1843,6 +1979,7 @@ function compress_frame!(cc::CompressionContext, data::AbstractVector{UInt8}, le
         end
         pos += 4
     end
+    scratch && return out[1:pos-1]
     resize!(out, pos - 1)
     return out
 end
