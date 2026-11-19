@@ -159,8 +159,9 @@ end
 """Insert position ip into the tree. Returns how many positions may be skipped."""
 @inline function bt_insert1!(ht::Ptr{Int32}, bt::Ptr{Int32}, hlog::Int, btlog::Int, mls::Int,
                              attempts::Int, base::Ptr{UInt8}, ip::Ptr{UInt8}, iend::Ptr{UInt8},
-                             lowlimit::Int)
+                             lowlimit::Int, window::Int=typemax(Int) >> 2)
     cur = pos_of(ip, base)
+    lowlimit = max(lowlimit, cur - window)
     h = zhash(ip, hlog, mls) + 1
     midx = Int(unsafe_load(ht, h))
     unsafe_store!(ht, cur % Int32, h)
@@ -275,13 +276,13 @@ extra length pays for its larger offset, as libzstd does. Returns
 """
 @inline function bt_find_best(ht::Ptr{Int32}, bt::Ptr{Int32}, hlog::Int, btlog::Int, mls::Int,
                               attempts::Int, base::Ptr{UInt8}, ip::Ptr{UInt8}, iend::Ptr{UInt8},
-                              lowlimit::Int, next::Int)
+                              lowlimit::Int, next::Int, window::Int=typemax(Int) >> 2)
     cur = pos_of(ip, base)
     cur < next && return 0, 0, next
     btmask = (1 << btlog) - 1
     dubt_update!(ht, bt, hlog, btmask, mls, base, next, cur)
     h = zhash(ip, hlog, mls) + 1
-    windowlow = max(lowlimit, 1) - 1
+    windowlow = max(lowlimit, cur - window, 1) - 1
     btlow = btmask >= cur ? 0 : cur - btmask
     unsortlimit = max(btlow, windowlow)
     # reach the end of the unsorted candidates, reversing their links
@@ -356,15 +357,16 @@ end
 @inline function collect_matches!(o::OptState, ht::Ptr{Int32}, bt::Ptr{Int32}, hlog::Int, clog::Int,
                                   mls::Int, attempts::Int, base::Ptr{UInt8}, ip::Ptr{UInt8},
                                   iend::Ptr{UInt8}, lowlimit::Int, next::Int,
-                                  r1::Int, r2::Int, r3::Int, ll0::Bool)
+                                  r1::Int, r2::Int, r3::Int, ll0::Bool, window::Int=typemax(Int) >> 2)
     cur = pos_of(ip, base)
     cur < next && return 0, next            # inside a region skipped by the tree update
     btlog = clog - 1
     # Bring the tree up to date. Long repetitive matches let insertion skip
     # ahead, but the current position is always searched (ZSTD_updateTree).
     while next < cur
-        next += bt_insert1!(ht, bt, hlog, btlog, mls, attempts, base, ptr_of(next, base), iend, lowlimit)
+        next += bt_insert1!(ht, bt, hlog, btlog, mls, attempts, base, ptr_of(next, base), iend, lowlimit, window)
     end
+    lowlimit = max(lowlimit, cur - window)        # the window, from this position
     nm = 0
     best = mls - 1
     mlens = o.mlens; moffs = o.moffs
@@ -444,7 +446,7 @@ repeat offsets after that match.
 function parse_opt!(ss::SeqStore, o::OptState, htab::Vector{Int32}, hlog::Int, ctab::Vector{Int32},
                     clog::Int, mls::Int, attempts::Int, sufficient::Int, ultra::Bool,
                     base::Ptr{UInt8}, istart::Ptr{UInt8}, iend::Ptr{UInt8}, lowlimit::Int,
-                    rep::NTuple{3,Int}, next::Int, first::Bool=true)
+                    rep::NTuple{3,Int}, next::Int, first::Bool=true, window::Int=typemax(Int) >> 2)
     ilimit = iend - HASH_READ_SIZE
     anchor = istart
     ip = istart
@@ -459,7 +461,7 @@ function parse_opt!(ss::SeqStore, o::OptState, htab::Vector{Int32}, hlog::Int, c
             litlen0 = Int(ip - anchor)
             ll0 = litlen0 == 0
             nm, next = collect_matches!(o, ht, ch, hlog, clog, mls, attempts, base, ip, iend,
-                                        lowlimit, next, r1, r2, r3, ll0)
+                                        lowlimit, next, r1, r2, r3, ll0, window)
             if nm == 0
                 ip += 1
                 continue
@@ -530,7 +532,7 @@ function parse_opt!(ss::SeqStore, o::OptState, htab::Vector{Int32}, hlog::Int, c
                     sll0 = litlen[cur + 1] == 0
                     s1 = o.r1[cur + 1]; s2 = o.r2[cur + 1]; s3 = o.r3[cur + 1]
                     nm2, next = collect_matches!(o, ht, ch, hlog, clog, mls, attempts, base, inr,
-                                                 iend, lowlimit, next, s1, s2, s3, sll0)
+                                                 iend, lowlimit, next, s1, s2, s3, sll0, window)
                     if nm2 == 0
                         cur += 1
                         continue

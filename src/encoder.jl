@@ -433,7 +433,7 @@ const K_STEP_INCR = 1 << (K_SEARCH_STRENGTH - 1)
 # without a match.
 function parse_fast!(ss::SeqStore, htab::Vector{Int32}, hlog::Int, mls::Int, step0::Int,
                      base::Ptr{UInt8}, istart::Ptr{UInt8}, iend::Ptr{UInt8}, lowlimit::Int,
-                     rep1::Int, rep2::Int)
+                     rep1::Int, rep2::Int, window::Int=typemax(Int) >> 2)
     ilimit = iend - HASH_READ_SIZE
     anchor = istart
     ip0 = istart
@@ -474,7 +474,7 @@ function parse_fast!(ss::SeqStore, htab::Vector{Int32}, hlog::Int, mls::Int, ste
                     found = 1
                     break
                 end
-                if midx >= lowlimit && midx > 0 && load32(ptr_of(midx, base)) == load32(ip0)
+                if midx >= lowlimit && midx > 0 && cur0 - midx <= window && load32(ptr_of(midx, base)) == load32(ip0)
                     unsafe_store!(ht, pos_of(ip1, base) % Int32, hash1 + 1)
                     found = 2
                     break
@@ -485,7 +485,7 @@ function parse_fast!(ss::SeqStore, htab::Vector{Int32}, hlog::Int, mls::Int, ste
                 ip0 = ip1; ip1 = ip2; ip2 = ip3
                 cur0 = pos_of(ip0, base)
                 unsafe_store!(ht, cur0 % Int32, hash0 + 1)
-                if midx >= lowlimit && midx > 0 && load32(ptr_of(midx, base)) == load32(ip0)
+                if midx >= lowlimit && midx > 0 && cur0 - midx <= window && load32(ptr_of(midx, base)) == load32(ip0)
                     step <= 4 && unsafe_store!(ht, pos_of(ip1, base) % Int32, hash1 + 1)
                     found = 2
                     break
@@ -541,7 +541,7 @@ end
 # computed ahead, and the step grows by one every 256 bytes without a match.
 function parse_dfast!(ss::SeqStore, hlong::Vector{Int32}, hllog::Int, hsmall::Vector{Int32},
                       hslog::Int, mls::Int, base::Ptr{UInt8}, istart::Ptr{UInt8}, iend::Ptr{UInt8},
-                      lowlimit::Int, rep1::Int, rep2::Int)
+                      lowlimit::Int, rep1::Int, rep2::Int, window::Int=typemax(Int) >> 2)
     ilimit = iend - HASH_READ_SIZE
     anchor = istart
     ip = istart
@@ -573,11 +573,11 @@ function parse_dfast!(ss::SeqStore, hlong::Vector{Int32}, hllog::Int, hsmall::Ve
                     kind = 1; break
                 end
                 hl1 = zhash(ip1, hllog, 8)
-                if idxl0 > lowlimit && load64(ptr_of(idxl0, base)) == load64(ip)
+                if idxl0 > lowlimit && cur - idxl0 <= window && load64(ptr_of(idxl0, base)) == load64(ip)
                     kind = 2; break
                 end
                 idxl1 = Int(unsafe_load(hl, hl1 + 1))
-                if idxs0 > lowlimit && load32(ptr_of(idxs0, base)) == load32(ip)
+                if idxs0 > lowlimit && cur - idxs0 <= window && load32(ptr_of(idxs0, base)) == load32(ip)
                     kind = 3; break
                 end
                 if ip1 >= nextstep
@@ -602,7 +602,7 @@ function parse_dfast!(ss::SeqStore, hlong::Vector{Int32}, hllog::Int, hsmall::Ve
                 else
                     m = ptr_of(idxs0, base)
                     ml = zcount(ip + 4, m + 4, iend) + 4
-                    if idxl1 > lowlimit && load64(ptr_of(idxl1, base)) == load64(ip1)
+                    if idxl1 > lowlimit && pos_of(ip1, base) - idxl1 <= window && load64(ptr_of(idxl1, base)) == load64(ip1)
                         l1 = zcount(ip1 + 8, ptr_of(idxl1, base) + 8, iend) + 8
                         if l1 > ml
                             ip = ip1; ml = l1; m = ptr_of(idxl1, base)
@@ -715,7 +715,7 @@ end
 # Best match at ip via the row table. Returns (length, offset, next).
 @inline function row_find_best(pos::Ptr{Int32}, tags::Ptr{UInt8}, rbits::Int, rlog::Int, mls::Int,
                                attempts::Int, base::Ptr{UInt8}, ip::Ptr{UInt8}, iend::Ptr{UInt8},
-                               lowlimit::Int, next::Int)
+                               lowlimit::Int, next::Int, window::Int=typemax(Int) >> 2)
     ilimit = iend - HASH_READ_SIZE
     cur = pos_of(ip, base)
     row_insert!(pos, tags, rbits, rlog, mls, base, next, cur)
@@ -731,7 +731,7 @@ end
     m = ((m >> hd) | (m << ((nent - hd) & 63))) & emask
     best = 3
     bestoff = 0
-    lowl = max(lowlimit, 1)
+    lowl = max(lowlimit, cur - window, 1)          # the window, from this position
     # first pass: prefetch the candidates' data, so the comparisons below
     # overlap their cache misses (as libzstd's match buffer does)
     mm = m; k = attempts
@@ -768,7 +768,7 @@ const K_LAZY_SKIPPING_STEP = 8
 function parse_lazy!(::Val{BT}, ss::SeqStore, htab::Vector{Int32}, hlog::Int, ctab::Vector{Int32}, rlog::Int,
                      mls::Int, attempts::Int, depth::Int, base::Ptr{UInt8},
                      istart::Ptr{UInt8}, iend::Ptr{UInt8}, lowlimit::Int, rep1::Int, rep2::Int,
-                     next::Int) where {BT}
+                     next::Int, window::Int=typemax(Int) >> 2) where {BT}
     ilimit = iend - HASH_READ_SIZE
     anchor = istart
     ip = istart
@@ -787,8 +787,8 @@ function parse_lazy!(::Val{BT}, ss::SeqStore, htab::Vector{Int32}, hlog::Int, ct
                 start = ip + 1
             end
             if !(depth == 0 && ml > 0)
-                l2, o2, nxt = (BT ? bt_find_best(ht, ch, hlog, rlog, mls, attempts, base, ip, iend, lowlimit, next) :
-                                row_find_best(ht, ch, rbits, rlog, mls, attempts, base, ip, iend, lowlimit, next))
+                l2, o2, nxt = (BT ? bt_find_best(ht, ch, hlog, rlog, mls, attempts, base, ip, iend, lowlimit, next, window) :
+                                row_find_best(ht, ch, rbits, rlog, mls, attempts, base, ip, iend, lowlimit, next, window))
                 next = nxt
                 if l2 > ml
                     ml = l2; offset = o2; start = ip; isrep = false
@@ -816,8 +816,8 @@ function parse_lazy!(::Val{BT}, ss::SeqStore, htab::Vector{Int32}, hlog::Int, ct
                             ml = mlr; offset = rep1; start = ip; isrep = true
                         end
                     end
-                    l2, o2, nxt = (BT ? bt_find_best(ht, ch, hlog, rlog, mls, attempts, base, ip, iend, lowlimit, next) :
-                                row_find_best(ht, ch, rbits, rlog, mls, attempts, base, ip, iend, lowlimit, next))
+                    l2, o2, nxt = (BT ? bt_find_best(ht, ch, hlog, rlog, mls, attempts, base, ip, iend, lowlimit, next, window) :
+                                row_find_best(ht, ch, rbits, rlog, mls, attempts, base, ip, iend, lowlimit, next, window))
                     next = nxt
                     gain2 = l2 * 4 - highbit(o2 + 3)
                     ocost = isrep ? 0 : highbit(offset + 3)
@@ -838,8 +838,8 @@ function parse_lazy!(::Val{BT}, ss::SeqStore, htab::Vector{Int32}, hlog::Int, ct
                                 ml = mlr; offset = rep1; start = ip
                             end
                         end
-                        l2, o2, nxt = (BT ? bt_find_best(ht, ch, hlog, rlog, mls, attempts, base, ip, iend, lowlimit, next) :
-                                row_find_best(ht, ch, rbits, rlog, mls, attempts, base, ip, iend, lowlimit, next))
+                        l2, o2, nxt = (BT ? bt_find_best(ht, ch, hlog, rlog, mls, attempts, base, ip, iend, lowlimit, next, window) :
+                                row_find_best(ht, ch, rbits, rlog, mls, attempts, base, ip, iend, lowlimit, next, window))
                         next = nxt
                         gain2 = l2 * 4 - highbit(o2 + 3)
                         ocost = isrep ? 0 : highbit(offset + 3)
@@ -1908,7 +1908,9 @@ function parse_range!(cc::CompressionContext, base::Ptr{UInt8}, bstart::Ptr{UInt
     ss = cc.ss
     ss.wlimit = bend - 32
     window = 1 << p.window_log
-    lowlimit = max(1, pos_of(bend, base) - window)
+    # matches may reach `window` bytes back from each position (checked per
+    # position); none can reach before this
+    lowlimit = max(1, pos_of(bstart, base) - window)
     n = Int(bend - bstart)
     if n < HASH_READ_SIZE + 4
         store_last_literals!(ss, bstart, n)
@@ -1918,15 +1920,15 @@ function parse_range!(cc::CompressionContext, base::Ptr{UInt8}, bstart::Ptr{UInt
     if p.strategy == S_FAST
         step = p.target_length + 1
         cc.prep1, cc.prep2 = parse_fast!(ss, cc.htab, p.hash_log, mls, step, base, bstart, bend,
-                                         lowlimit, cc.prep1, cc.prep2)
+                                         lowlimit, cc.prep1, cc.prep2, window)
     elseif p.strategy == S_DFAST
         cc.prep1, cc.prep2 = parse_dfast!(ss, cc.htab, p.hash_log, cc.ctab, p.chain_log, mls,
-                                          base, bstart, bend, lowlimit, cc.prep1, cc.prep2)
+                                          base, bstart, bend, lowlimit, cc.prep1, cc.prep2, window)
     elseif p.strategy >= S_BTOPT
         cc.next_to_update = max(cc.next_to_update, lowlimit)
         cc.next_to_update = parse_opt!(ss, cc.opt, cc.htab, p.hash_log, cc.ctab, p.chain_log,
             clamp(p.min_match, 3, 4), 1 << p.search_log, max(p.target_length, 8), p.strategy >= S_BTULTRA,
-            base, bstart, bend, lowlimit, cc.rep, cc.next_to_update, first)
+            base, bstart, bend, lowlimit, cc.rep, cc.next_to_update, first, window)
     else
         depth = p.strategy == S_GREEDY ? 0 : p.strategy == S_LAZY ? 1 : 2
         mls = clamp(p.min_match, 4, 6)
@@ -1934,11 +1936,11 @@ function parse_range!(cc::CompressionContext, base::Ptr{UInt8}, bstart::Ptr{UInt
         if p.strategy == S_BTLAZY2
             cc.prep1, cc.prep2, cc.next_to_update = parse_lazy!(Val(true), ss, cc.htab, p.hash_log, cc.ctab,
                 p.chain_log - 1, mls, 1 << p.search_log, depth, base, bstart, bend,
-                lowlimit, cc.prep1, cc.prep2, cc.next_to_update)
+                lowlimit, cc.prep1, cc.prep2, cc.next_to_update, window)
         else
             cc.prep1, cc.prep2, cc.next_to_update = parse_lazy!(Val(false), ss, cc.htab, p.hash_log, cc.ctab,
                 row_log(p), mls, 1 << min(p.search_log, row_log(p)), depth, base, bstart, bend,
-                lowlimit, cc.prep1, cc.prep2, cc.next_to_update)
+                lowlimit, cc.prep1, cc.prep2, cc.next_to_update, window)
         end
     end
     return
