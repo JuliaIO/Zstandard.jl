@@ -93,7 +93,8 @@ function prepare_dictionary(dict::ZstdDictionary; level::Integer=3, kwargs...)
     end
     tables = (FSECTable(), FSECTable(), FSECTable())
     copy_ctable!(tables[1], cc.ll_prev); copy_ctable!(tables[2], cc.ml_prev); copy_ctable!(tables[3], cc.of_prev)
-    huf = HufCTable(cc.huf_prev.maxsym, cc.huf_prev.tl, copy(cc.huf_prev.nbits), copy(cc.huf_prev.code))
+    huf = HufCTable(cc.huf_prev.maxsym, cc.huf_prev.tl, copy(cc.huf_prev.nbits), copy(cc.huf_prev.code),
+                    zeros(Int, 16), zeros(Int, 16))
     return PreparedDictionary(dict, level, ov, p, copy(cc.htab), copy(cc.ctab), cc.next_to_update,
                               tables..., huf, cc.huf_prev_ok)
 end

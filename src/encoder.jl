@@ -44,40 +44,121 @@ struct CParams
     strategy::Strategy
 end
 
-# window, chain, hash, search, minMatch, targetLength, strategy
-# As libzstd 1.5.7: levels 13-15 use btlazy2, 16-17 the optimal parser with
-# whole-bit pricing (btopt), 18 the full optimal parser (btultra), 19-22
-# btultra2 (btultra with statistics seeded by a first pass).
+# window, chain, hash, search, minMatch, targetLength, strategy: libzstd's
+# tables, one per input size class (ZSTD_defaultCParameters).
 # Greedy/lazy levels find matches with libzstd's row-based match finder (rows
 # of 2^clamp(searchLog, 4, 6) entries; chainLog is unused); btlazy2 and the
 # optimal parser use a binary tree of 2^(chainLog-1) positions. For the optimal
-# parser, targetLength is the "sufficient" match length. Level 16 hashes 4
-# bytes rather than libzstd's 5 (slightly better ratio at a similar speed).
+# parser, targetLength is the "sufficient" match length.
+# libzstd 1.5.7 parameters for inputs over 256 KiB (or of unknown size)
 const LEVEL_TABLE = CParams[
-    CParams(19, 12, 13, 1, 6, 1, S_FAST),     # base for negative levels
-    CParams(19, 13, 14, 1, 7, 0, S_FAST),     # 1
-    CParams(20, 15, 16, 1, 6, 0, S_FAST),     # 2
-    CParams(21, 16, 17, 1, 5, 0, S_DFAST),    # 3
-    CParams(21, 18, 18, 1, 5, 0, S_DFAST),    # 4
-    CParams(21, 18, 19, 3, 5, 2, S_GREEDY),   # 5
-    CParams(21, 18, 19, 3, 5, 4, S_LAZY),     # 6
-    CParams(21, 19, 20, 4, 5, 8, S_LAZY),     # 7
-    CParams(21, 19, 20, 4, 5, 16, S_LAZY2),   # 8
-    CParams(22, 20, 21, 4, 5, 16, S_LAZY2),   # 9
-    CParams(22, 21, 22, 5, 5, 16, S_LAZY2),   # 10
-    CParams(22, 21, 22, 6, 5, 16, S_LAZY2),   # 11
-    CParams(22, 22, 23, 6, 5, 32, S_LAZY2),   # 12
-    CParams(22, 22, 22, 4, 5, 32, S_BTLAZY2), # 13
-    CParams(22, 22, 23, 5, 5, 32, S_BTLAZY2), # 14
-    CParams(22, 23, 23, 6, 5, 32, S_BTLAZY2), # 15
-    CParams(22, 22, 22, 5, 4, 48, S_BTOPT),   # 16
-    CParams(23, 23, 22, 6, 4, 64, S_BTOPT),   # 17
-    CParams(23, 23, 22, 6, 3, 64, S_BTULTRA), # 18
-    CParams(23, 24, 22, 7, 3, 256, S_BTULTRA2),# 19
-    CParams(25, 25, 23, 7, 3, 256, S_BTULTRA2),# 20
-    CParams(26, 26, 24, 7, 3, 512, S_BTULTRA2),# 21
-    CParams(27, 27, 25, 9, 3, 999, S_BTULTRA2),# 22
+    CParams(19, 12, 13, 1, 6, 1, S_FAST),       # base for negative levels
+    CParams(19, 13, 14, 1, 7, 0, S_FAST),       # level  1
+    CParams(20, 15, 16, 1, 6, 0, S_FAST),       # level  2
+    CParams(21, 16, 17, 1, 5, 0, S_DFAST),      # level  3
+    CParams(21, 18, 18, 1, 5, 0, S_DFAST),      # level  4
+    CParams(21, 18, 19, 3, 5, 2, S_GREEDY),     # level  5
+    CParams(21, 18, 19, 3, 5, 4, S_LAZY),       # level  6
+    CParams(21, 19, 20, 4, 5, 8, S_LAZY),       # level  7
+    CParams(21, 19, 20, 4, 5, 16, S_LAZY2),     # level  8
+    CParams(22, 20, 21, 4, 5, 16, S_LAZY2),     # level  9
+    CParams(22, 21, 22, 5, 5, 16, S_LAZY2),     # level 10
+    CParams(22, 21, 22, 6, 5, 16, S_LAZY2),     # level 11
+    CParams(22, 22, 23, 6, 5, 32, S_LAZY2),     # level 12
+    CParams(22, 22, 22, 4, 5, 32, S_BTLAZY2),   # level 13
+    CParams(22, 22, 23, 5, 5, 32, S_BTLAZY2),   # level 14
+    CParams(22, 23, 23, 6, 5, 32, S_BTLAZY2),   # level 15
+    CParams(22, 22, 22, 5, 5, 48, S_BTOPT),     # level 16
+    CParams(23, 23, 22, 5, 4, 64, S_BTOPT),     # level 17
+    CParams(23, 23, 22, 6, 3, 64, S_BTULTRA),   # level 18
+    CParams(23, 24, 22, 7, 3, 256, S_BTULTRA2), # level 19
+    CParams(25, 25, 23, 7, 3, 256, S_BTULTRA2), # level 20
+    CParams(26, 26, 24, 7, 3, 512, S_BTULTRA2), # level 21
+    CParams(27, 27, 25, 9, 3, 999, S_BTULTRA2), # level 22
 ]
+
+# libzstd 1.5.7 parameters for inputs up to 256 KiB
+const LEVEL_TABLE_256K = CParams[
+    CParams(18, 12, 13, 1, 5, 1, S_FAST),       # base for negative levels
+    CParams(18, 13, 14, 1, 6, 0, S_FAST),       # level  1
+    CParams(18, 14, 14, 1, 5, 0, S_DFAST),      # level  2
+    CParams(18, 16, 16, 1, 4, 0, S_DFAST),      # level  3
+    CParams(18, 16, 17, 3, 5, 2, S_GREEDY),     # level  4
+    CParams(18, 17, 18, 5, 5, 2, S_GREEDY),     # level  5
+    CParams(18, 18, 19, 3, 5, 4, S_LAZY),       # level  6
+    CParams(18, 18, 19, 4, 4, 4, S_LAZY),       # level  7
+    CParams(18, 18, 19, 4, 4, 8, S_LAZY2),      # level  8
+    CParams(18, 18, 19, 5, 4, 8, S_LAZY2),      # level  9
+    CParams(18, 18, 19, 6, 4, 8, S_LAZY2),      # level 10
+    CParams(18, 18, 19, 5, 4, 12, S_BTLAZY2),   # level 11
+    CParams(18, 19, 19, 7, 4, 12, S_BTLAZY2),   # level 12
+    CParams(18, 18, 19, 4, 4, 16, S_BTOPT),     # level 13
+    CParams(18, 18, 19, 4, 3, 32, S_BTOPT),     # level 14
+    CParams(18, 18, 19, 6, 3, 128, S_BTOPT),    # level 15
+    CParams(18, 19, 19, 6, 3, 128, S_BTULTRA),  # level 16
+    CParams(18, 19, 19, 8, 3, 256, S_BTULTRA),  # level 17
+    CParams(18, 19, 19, 6, 3, 128, S_BTULTRA2), # level 18
+    CParams(18, 19, 19, 8, 3, 256, S_BTULTRA2), # level 19
+    CParams(18, 19, 19, 10, 3, 512, S_BTULTRA2),# level 20
+    CParams(18, 19, 19, 12, 3, 512, S_BTULTRA2),# level 21
+    CParams(18, 19, 19, 13, 3, 999, S_BTULTRA2),# level 22
+]
+
+# libzstd 1.5.7 parameters for inputs up to 128 KiB
+const LEVEL_TABLE_128K = CParams[
+    CParams(17, 12, 12, 1, 5, 1, S_FAST),       # base for negative levels
+    CParams(17, 12, 13, 1, 6, 0, S_FAST),       # level  1
+    CParams(17, 13, 15, 1, 5, 0, S_FAST),       # level  2
+    CParams(17, 15, 16, 2, 5, 0, S_DFAST),      # level  3
+    CParams(17, 17, 17, 2, 4, 0, S_DFAST),      # level  4
+    CParams(17, 16, 17, 3, 4, 2, S_GREEDY),     # level  5
+    CParams(17, 16, 17, 3, 4, 4, S_LAZY),       # level  6
+    CParams(17, 16, 17, 3, 4, 8, S_LAZY2),      # level  7
+    CParams(17, 16, 17, 4, 4, 8, S_LAZY2),      # level  8
+    CParams(17, 16, 17, 5, 4, 8, S_LAZY2),      # level  9
+    CParams(17, 16, 17, 6, 4, 8, S_LAZY2),      # level 10
+    CParams(17, 17, 17, 5, 4, 8, S_BTLAZY2),    # level 11
+    CParams(17, 18, 17, 7, 4, 12, S_BTLAZY2),   # level 12
+    CParams(17, 18, 17, 3, 4, 12, S_BTOPT),     # level 13
+    CParams(17, 18, 17, 4, 3, 32, S_BTOPT),     # level 14
+    CParams(17, 18, 17, 6, 3, 256, S_BTOPT),    # level 15
+    CParams(17, 18, 17, 6, 3, 128, S_BTULTRA),  # level 16
+    CParams(17, 18, 17, 8, 3, 256, S_BTULTRA),  # level 17
+    CParams(17, 18, 17, 10, 3, 512, S_BTULTRA), # level 18
+    CParams(17, 18, 17, 5, 3, 256, S_BTULTRA2), # level 19
+    CParams(17, 18, 17, 7, 3, 512, S_BTULTRA2), # level 20
+    CParams(17, 18, 17, 9, 3, 512, S_BTULTRA2), # level 21
+    CParams(17, 18, 17, 11, 3, 999, S_BTULTRA2),# level 22
+]
+
+# libzstd 1.5.7 parameters for inputs up to 16 KiB
+const LEVEL_TABLE_16K = CParams[
+    CParams(14, 12, 13, 1, 5, 1, S_FAST),       # base for negative levels
+    CParams(14, 14, 15, 1, 5, 0, S_FAST),       # level  1
+    CParams(14, 14, 15, 1, 4, 0, S_FAST),       # level  2
+    CParams(14, 14, 15, 2, 4, 0, S_DFAST),      # level  3
+    CParams(14, 14, 14, 4, 4, 2, S_GREEDY),     # level  4
+    CParams(14, 14, 14, 3, 4, 4, S_LAZY),       # level  5
+    CParams(14, 14, 14, 4, 4, 8, S_LAZY2),      # level  6
+    CParams(14, 14, 14, 6, 4, 8, S_LAZY2),      # level  7
+    CParams(14, 14, 14, 8, 4, 8, S_LAZY2),      # level  8
+    CParams(14, 15, 14, 5, 4, 8, S_BTLAZY2),    # level  9
+    CParams(14, 15, 14, 9, 4, 8, S_BTLAZY2),    # level 10
+    CParams(14, 15, 14, 3, 4, 12, S_BTOPT),     # level 11
+    CParams(14, 15, 14, 4, 3, 24, S_BTOPT),     # level 12
+    CParams(14, 15, 14, 5, 3, 32, S_BTULTRA),   # level 13
+    CParams(14, 15, 15, 6, 3, 64, S_BTULTRA),   # level 14
+    CParams(14, 15, 15, 7, 3, 256, S_BTULTRA),  # level 15
+    CParams(14, 15, 15, 5, 3, 48, S_BTULTRA2),  # level 16
+    CParams(14, 15, 15, 6, 3, 128, S_BTULTRA2), # level 17
+    CParams(14, 15, 15, 7, 3, 256, S_BTULTRA2), # level 18
+    CParams(14, 15, 15, 8, 3, 256, S_BTULTRA2), # level 19
+    CParams(14, 15, 15, 8, 3, 512, S_BTULTRA2), # level 20
+    CParams(14, 15, 15, 9, 3, 512, S_BTULTRA2), # level 21
+    CParams(14, 15, 15, 10, 3, 999, S_BTULTRA2),# level 22
+]
+
+const LEVEL_TABLES = (LEVEL_TABLE, LEVEL_TABLE_256K, LEVEL_TABLE_128K, LEVEL_TABLE_16K)
 
 """
     ParameterOverrides
@@ -175,20 +256,25 @@ function compression_parameters(level::Integer, src_size::Integer,
                                 ov::ParameterOverrides=NO_OVERRIDES)
     level = clamp(level, MIN_LEVEL, MAX_LEVEL)
     level == 0 && (level = 3)
-    p = level < 0 ? LEVEL_TABLE[1] : LEVEL_TABLE[level + 1]
+    # table by size class (ZSTD_getCParams_internal)
+    tid = src_size < 0 ? 0 : (src_size <= 256 << 10) + (src_size <= 128 << 10) + (src_size <= 16 << 10)
+    tab = LEVEL_TABLES[tid + 1]
+    p = level < 0 ? tab[1] : tab[level + 1]
     target = level < 0 ? -level : p.target_length
     # explicit parameters replace the level's, then everything is adapted to
-    # the input size (as ZSTD_getCParamsFromCCtxParams + ZSTD_adjustCParams)
+    # the input size (as ZSTD_getCParamsFromCCtxParams + ZSTD_adjustCParams_internal)
     p = apply_overrides(p, ov)
     ov.target_length >= 0 && (target = ov.target_length)
-    wlog = p.window_log
+    wlog = p.window_log; clog = p.chain_log; hlog = p.hash_log
     if src_size >= 0
-        src_log = max(10, 64 - leading_zeros(UInt64(max(src_size - 1, 1))))
+        src_log = src_size < 64 ? 6 : 64 - leading_zeros(UInt64(src_size - 1))
         wlog = min(wlog, src_log)
+        hlog = min(hlog, wlog + 1)
+        btscale = p.strategy >= S_BTLAZY2 ? 1 : 0          # ZSTD_cycleLog
+        clog - btscale > wlog && (clog = wlog + btscale)
     end
-    btplus = p.strategy >= S_GREEDY
-    clog = min(p.chain_log, wlog + (btplus ? 1 : 0))
-    hlog = min(p.hash_log, wlog + 1)
+    wlog = max(wlog, 10)                                  # ZSTD_WINDOWLOG_ABSOLUTEMIN
+    hlog = max(hlog, 6); clog = max(clog, 6)
     return CParams(wlog, clog, hlog, p.search_log, p.min_match, target, p.strategy)
 end
 
@@ -929,21 +1015,23 @@ function normalize_counts!(norm::Vector{Int16}, counts::Vector{Int}, total::Int,
     return norm
 end
 
+@inline function fse_hdr_put(dst::Vector{UInt8}, pos::Int, bits::UInt64, nbits::Int, v::Int, n::Int)
+    bits |= UInt64(v) << nbits
+    nbits += n
+    while nbits >= 8
+        @inbounds dst[pos] = bits % UInt8
+        pos += 1
+        bits >>= 8
+        nbits -= 8
+    end
+    return bits, nbits, pos
+end
+
 """Write an FSE table description (normalized counts) at dst[pos]. Returns new pos."""
 function write_fse_header!(dst::Vector{UInt8}, pos::Int, norm::Vector{Int16}, maxsym::Int, al::Int)
     bits = UInt64(0); nbits = 0
-    @inline function put(bits, nbits, v, n)
-        bits |= UInt64(v) << nbits
-        nbits += n
-        while nbits >= 8
-            dst[pos] = bits % UInt8
-            pos += 1
-            bits >>= 8
-            nbits -= 8
-        end
-        return bits, nbits
-    end
-    bits, nbits = put(bits, nbits, al - 5, 4)
+    # (a plain function: a closure assigning to `pos` would box it)
+    bits, nbits, pos = fse_hdr_put(dst, pos, bits, nbits, al - 5, 4)
     remaining = 1 << al
     s = 1
     @inbounds while remaining > 0 && s <= maxsym + 1
@@ -954,11 +1042,11 @@ function write_fse_header!(dst::Vector{UInt8}, pos::Int, norm::Vector{Int16}, ma
         threshold = (1 << nb) - max_value - 1
         val = prob + 1
         if val < threshold
-            bits, nbits = put(bits, nbits, val, lower)
+            bits, nbits, pos = fse_hdr_put(dst, pos, bits, nbits, val, lower)
         elseif val < (1 << lower)
-            bits, nbits = put(bits, nbits, val, nb)                    # top bit 0
+            bits, nbits, pos = fse_hdr_put(dst, pos, bits, nbits, val, nb)             # top bit 0
         else
-            bits, nbits = put(bits, nbits, val - (1 << lower) + threshold + (1 << lower), nb)
+            bits, nbits, pos = fse_hdr_put(dst, pos, bits, nbits, val - (1 << lower) + threshold + (1 << lower), nb)
         end
         remaining -= prob == -1 ? 1 : prob
         s += 1
@@ -969,7 +1057,7 @@ function write_fse_header!(dst::Vector{UInt8}, pos::Int, norm::Vector{Int16}, ma
             end
             while true
                 c = min(run, 3)
-                bits, nbits = put(bits, nbits, c, 2)
+                bits, nbits, pos = fse_hdr_put(dst, pos, bits, nbits, c, 2)
                 run -= c
                 c < 3 && break
             end
@@ -1006,8 +1094,10 @@ mutable struct HufCTable
     tl::Int
     nbits::Vector{UInt8}
     code::Vector{UInt16}
+    nper::Vector{Int}       # huf_codes! scratch
+    valper::Vector{Int}
 end
-HufCTable() = HufCTable(-1, 0, zeros(UInt8, 256), zeros(UInt16, 256))
+HufCTable() = HufCTable(-1, 0, zeros(UInt8, 256), zeros(UInt16, 256), zeros(Int, 16), zeros(Int, 16))
 
 """Huffman code lengths for `counts[1:maxsym+1]`, limited to `maxbits`."""
 function huf_lengths!(lens::Vector{UInt8}, counts::Vector{Int}, maxsym::Int, maxbits::Int,
@@ -1020,10 +1110,16 @@ function huf_lengths!(lens::Vector{UInt8}, counts::Vector{Int}, maxsym::Int, max
             syms[n] = s
         end
     end
-    sort!(view(syms, 1:n), by = s -> counts[s], alg = InsertionSort)
+    # sort by count, ties by symbol (packed keys: same order as a stable sort)
+    @inbounds for i in 1:n
+        freq[i] = (counts[syms[i]] << 9) | (syms[i] - 1)
+    end
+    sort!(view(freq, 1:n))
     # Two-queue Huffman construction. Nodes 1..n are leaves (sorted), n+1.. internal.
     @inbounds for i in 1:n
-        freq[i] = counts[syms[i]]
+        k = freq[i]
+        syms[i] = (k & 511) + 1
+        freq[i] = k >> 9
     end
     leaf = 1; node = n + 1; nint = n
     @inbounds for _ in 1:n-1
@@ -1046,7 +1142,9 @@ function huf_lengths!(lens::Vector{UInt8}, counts::Vector{Int}, maxsym::Int, max
     @inbounds for i in nint-1:-1:1
         depth[i] = depth[parent[i]] + 1
     end
-    lengths = zeros(Int, maxsym + 1)
+    # `parent` is no longer needed: build the lengths there (no allocation)
+    lengths = view(parent, 1:maxsym+1)
+    fill!(lengths, 0)
     @inbounds for i in 1:n
         lengths[syms[i]] = depth[i]
     end
@@ -1058,7 +1156,7 @@ function huf_lengths!(lens::Vector{UInt8}, counts::Vector{Int}, maxsym::Int, max
 end
 
 """Limit code lengths to `maxbits` while keeping the prefix code complete."""
-function limit_lengths!(lengths::Vector{Int}, maxbits::Int)
+function limit_lengths!(lengths::AbstractVector{Int}, maxbits::Int)
     any(>(maxbits), lengths) || return lengths
     for i in eachindex(lengths)
         lengths[i] > maxbits && (lengths[i] = maxbits)
@@ -1101,12 +1199,12 @@ end
 function huf_codes!(t::HufCTable, lens::Vector{UInt8}, maxsym::Int, tl::Int)
     t.maxsym = maxsym
     t.tl = tl
-    nper = zeros(Int, tl + 2)
+    nper = t.nper; fill!(nper, 0)
     @inbounds for s in 1:maxsym+1
         l = Int(lens[s])
         l > 0 && (nper[l + 1] += 1)
     end
-    valper = zeros(Int, tl + 2)
+    valper = t.valper; fill!(valper, 0)
     v = 0
     @inbounds for l in tl:-1:1
         valper[l + 1] = v
@@ -2011,14 +2109,15 @@ end
     mt_layout(n, level) -> (params, job_size, overlap)
 
 Job layout for multithreaded compression of `n` bytes, after libzstd's
-defaults: jobs of at least one window (min 1 MiB; four windows for the
-optimal parser, whose history is expensive to load), each loading part of the
-preceding data as history (window/8 for fast..lazy2, more for optimal parsing).
+defaults: jobs of four windows (at least 1 MiB), each loading part of the
+preceding data as history (libzstd's overlapLog: window/8 for fast..lazy,
+window/4 for lazy2 and btlazy2, window/2 for btopt and btultra, the whole
+window for btultra2).
 """
 function mt_layout(n::Int, level::Integer, ov::ParameterOverrides=NO_OVERRIDES)
     p = compression_parameters(level, n, ov)
     window = 1 << p.window_log
-    job = max(1 << 20, p.strategy >= S_BTOPT ? 4window : window)
+    job = max(1 << 20, 4window)          # libzstd: jobLog = max(20, windowLog + 2)
     # libzstd's default overlapLog: 9 for btultra2, 8 btopt/btultra, 7 lazy2/btlazy2, 6 otherwise
     overlap = window >> (p.strategy >= S_BTULTRA2 ? 0 : p.strategy >= S_BTOPT ? 1 :
                          p.strategy >= S_LAZY2 ? 2 : 3)
