@@ -1083,6 +1083,8 @@ function huf_cost(counts::Vector{Int}, maxsym::Int, t::HufCTable)
     return bits >> 3
 end
 
+include("postsplit.jl")
+
 # ---------------------------------------------------------------------------
 # Compression context
 # ---------------------------------------------------------------------------
@@ -1131,6 +1133,7 @@ mutable struct CompressionContext
     fp_past::Vector{Int}      # block-splitter fingerprints
     fp_new::Vector{Int}
     fp_mid::Vector{Int}
+    split::Union{Nothing,SplitState}   # post-splitting scratch, created on first use
 end
 
 function default_ctable(norm, al, tabsym, cumul)
@@ -1154,7 +1157,7 @@ function CompressionContext()
         zeros(UInt8, 256), zeros(Int, 256), zeros(Int, 512), zeros(Int, 512),
         zeros(Int16, 16), FSECTable(), zeros(Int, 16), zeros(UInt8, 256),
         zeros(UInt8, 1024), zeros(UInt8, 1024), OptState(), 0, zeros(Int, 1024), zeros(Int, 1024),
-        zeros(Int, 256))
+        zeros(Int, 256), nothing)
 end
 
 function reset_context!(cc::CompressionContext, p::CParams, level::Int; clear::Bool=true)
@@ -1689,6 +1692,17 @@ function compress_block_body!(cc::CompressionContext, out::Vector{UInt8}, pos::I
         end
     end
     ldm === nothing ? parse_block!(cc, base, bstart, bend) : parse_block_ldm!(cc, base, bstart, bend, ldm)
+    if cc.params.strategy >= S_BTOPT && cc.params.window_log >= 17
+        cc.split === nothing && (cc.split = SplitState())
+        p2 = emit_split_block!(cc, out, pos, bstart, n, last)
+        p2 != 0 && return p2
+    end
+    return emit_parsed_block!(cc, out, pos, bstart, n, last)
+end
+
+"""Encode the parsed sequences in cc.ss for source [bstart, bstart+n) as one block."""
+function emit_parsed_block!(cc::CompressionContext, out::Vector{UInt8}, pos::Int,
+                            bstart::Ptr{UInt8}, n::Int, last::Bool)
     snap = EntropySnapshot(cc.rep, cc.ll_prev_ok, cc.ml_prev_ok, cc.of_prev_ok, cc.huf_prev_ok)
     blk = cc.blk
     need = 2n + 1024
