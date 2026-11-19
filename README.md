@@ -52,6 +52,10 @@ stream = ZstdCompressorStream(open("out.zst", "w"); level=5)
 write(stream, data)
 close(stream)
 
+# If the total size is known in advance, pledge it: the frame header then records
+# the content size and the compression parameters are sized to it
+stream = ZstdCompressorStream(open("out.zst", "w"); pledged_size=length(data))
+
 # Dictionaries
 dict = parse_dictionary(read("my.dict"))      # formatted (zstd --train) or raw content
 compressed = compress(data; dict)

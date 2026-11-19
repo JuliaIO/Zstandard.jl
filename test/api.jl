@@ -212,3 +212,77 @@ end
     close(s)
     @test decompress(take!(buf)) == big
 end
+
+@testset "Pledged source size" begin
+    function stream_compress(data; chunk=7919, kwargs...)
+        buf = IOBuffer()
+        s = ZCS(buf; close_io=false, kwargs...)
+        for i in 1:chunk:length(data)
+            write(s, view(data, i:min(i + chunk - 1, length(data))))
+        end
+        close(s)
+        return take!(buf), s
+    end
+    for n in (0, 1, 255, 256, 1000, 65_791, 65_792, 131_072, 131_073, 700_000), level in (1, 3, 19),
+        checksum in (false, true)
+        data = make_text(n)
+        c, s = stream_compress(data; level, checksum, pledged_size=n)
+        @test frame_content_size(c) == n
+        @test decompress(c) == data
+        @test transcode(CodecZstd.ZstdDecompressor, c) == data
+        # the same parameters and block boundaries as one-shot compression
+        @test c == compress(data; level, checksum)
+        h = frame_header(c)
+        @test h.single_segment == (n <= h.window_size)
+    end
+    # without a pledge the content size is not recorded
+    c, _ = stream_compress(make_text(1000))
+    @test frame_content_size(c) === nothing
+
+    # pledges are enforced
+    buf = IOBuffer()
+    s = ZCS(buf; pledged_size=10, close_io=false)
+    write(s, b"0123456789")
+    @test_throws ArgumentError write(s, b"x")
+    close(s)
+    @test decompress(take!(buf)) == b"0123456789"
+    s = ZCS(IOBuffer(); pledged_size=10, close_io=false)
+    write(s, b"01234")
+    @test_throws ArgumentError close(s)
+    sc = Zstandard.Encoder.StreamCompressor()
+    Zstandard.Encoder.stream_write!(sc, b"abc")
+    @test_throws ArgumentError Zstandard.Encoder.stream_pledge!(sc, 3)
+
+    # a pledged size smaller than the level's window shrinks the stream's buffers
+    small = Zstandard.Encoder.StreamCompressor(; level=19, pledged_size=1000)
+    Zstandard.Encoder.stream_write!(small, make_text(1000))
+    big = Zstandard.Encoder.StreamCompressor(; level=19)
+    Zstandard.Encoder.stream_write!(big, make_text(1000))
+    @test small.cap <= 1 << 19 && big.cap >= 1 << 23    # ~385 KiB vs ~25 MiB at level 19
+    @test length(small.cc.htab) < length(big.cc.htab)
+
+    # with a dictionary
+    d = ZstdDictionary(make_text(20_000))
+    data = make_text(50_000)
+    c, _ = stream_compress(data; dict=d, pledged_size=length(data))
+    @test frame_content_size(c) == length(data)
+    @test frame_dict_id(c) == 0
+    @test decompress(c, d) == data
+    @test c == compress(data; dict=d)
+
+    # TranscodingStreams: `transcode` pledges the input size; expectedsize uses it
+    data = make_text(300_000)
+    c = transcode(ZstandardCompressor(level=3), data)
+    @test frame_content_size(c) == length(data)
+    @test c == compress(data)
+    @test transcode(ZstandardDecompressor(), c) == data
+    @test GC.@preserve c TranscodingStreams.expectedsize(ZstandardDecompressor(),
+        TranscodingStreams.Memory(pointer(c), UInt(length(c)))) == length(data)
+    # a streaming TranscodingStream does not pledge
+    buf = IOBuffer()
+    st = TranscodingStream(ZstandardCompressor(), buf; stop_on_end=false)
+    write(st, data); write(st, TranscodingStreams.TOKEN_END); flush(st)
+    c2 = take!(buf)
+    @test frame_content_size(c2) === nothing
+    @test decompress(c2) == data
+end

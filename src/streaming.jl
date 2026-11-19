@@ -368,12 +368,19 @@ Base.read(s::ZstdDecompressorStream, nb::Integer) = (b = Vector{UInt8}(undef, nb
 # ---------------------------------------------------------------------------
 
 """
-    ZstdCompressorStream(io::IO; level=3, checksum=false, dict=nothing, close_io=true)
+    ZstdCompressorStream(io::IO; level=3, checksum=false, dict=nothing, pledged_size=nothing,
+                         close_io=true)
 
 A streaming Zstandard compressor implementing the writable `IO` interface.
-Data written to the stream is compressed into a single frame (without a
-content size) and written to `io` block by block. `flush` emits all pending
-data as a complete block, so everything written so far can be decoded.
+Data written to the stream is compressed into a single frame and written to
+`io` block by block. `flush` emits all pending data as a complete block, so
+everything written so far can be decoded.
+
+Without `pledged_size` the frame header does not record the content size. With
+`pledged_size = n`, it does (so decoders can preallocate, and
+`frame_content_size` reports it), the compression parameters are sized to `n`
+as in one-shot `compress`, and exactly `n` bytes must be written: writing more
+throws an `ArgumentError`, and so does `close` after writing fewer.
 `close` finishes the frame and, if `close_io` is true, closes `io` (pass
 `close_io=false` to keep writing to `io`, e.g. an `IOBuffer` read afterwards).
 """
@@ -385,8 +392,9 @@ mutable struct ZstdCompressorStream <: IO
 end
 
 function ZstdCompressorStream(io::IO; level::Integer=3, checksum::Bool=false,
-                              dict::Union{Nothing,ZstdDictionary}=nothing, close_io::Bool=true)
-    ZstdCompressorStream(io, StreamCompressor(; level, checksum, dict), false, close_io)
+                              dict::Union{Nothing,ZstdDictionary}=nothing,
+                              pledged_size::Union{Nothing,Integer}=nothing, close_io::Bool=true)
+    ZstdCompressorStream(io, StreamCompressor(; level, checksum, dict, pledged_size), false, close_io)
 end
 
 function drain!(s::ZstdCompressorStream)

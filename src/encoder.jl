@@ -17,7 +17,7 @@ import ..Decoder: LL_BASE, LL_BITS, ML_BASE, ML_BITS, LL_DEFAULT_NORM, ML_DEFAUL
                   OF_DEFAULT_NORM, MAGIC_NUMBER, BLOCK_SIZE_MAX, ZstdDictionary, has_entropy
 
 export CompressionContext, compress_frame!, compression_parameters, MIN_LEVEL, MAX_LEVEL,
-       StreamCompressor, stream_write!, stream_flush!, stream_finish!
+       StreamCompressor, stream_write!, stream_flush!, stream_finish!, stream_pledge!
 
 const MIN_LEVEL = -7
 const MAX_LEVEL = 22
@@ -1658,12 +1658,16 @@ end
 # ---------------------------------------------------------------------------
 
 """
-    StreamCompressor(; level=3, checksum=false, dict=nothing)
+    StreamCompressor(; level=3, checksum=false, dict=nothing, pledged_size=nothing)
 
-Incremental compressor producing one frame without a known content size.
-Input is fed with [`stream_write!`](@ref); compressed bytes accumulate in
-`sc.out[1:sc.olen]` and are taken by the caller. Memory use is bounded by the
-window size of the level.
+Incremental compressor producing one frame. Input is fed with
+[`stream_write!`](@ref); compressed bytes accumulate in `sc.out[1:sc.olen]` and
+are taken by the caller. Memory use is bounded by the window size of the level.
+
+With `pledged_size` (or [`stream_pledge!`](@ref) before the first write), the
+frame header records that content size and the compression parameters are
+sized to it, as for one-shot compression. Exactly that many bytes must then be
+written before the frame is finished.
 """
 mutable struct StreamCompressor
     cc::CompressionContext
@@ -1680,12 +1684,29 @@ mutable struct StreamCompressor
     started::Bool
     finished::Bool
     xxh::ChecksumState
+    pledged::Int         # pledged content size of the current frame, -1 if unknown
+    total::Int           # bytes written to the current frame
 end
 
 function StreamCompressor(; level::Integer=3, checksum::Bool=false,
-                          dict::Union{Nothing,ZstdDictionary}=nothing)
-    StreamCompressor(CompressionContext(), Int(level), checksum, dict, UInt8[], 0, 1, 0, 0,
-                     UInt8[], 0, false, false, ChecksumState())
+                          dict::Union{Nothing,ZstdDictionary}=nothing,
+                          pledged_size::Union{Nothing,Integer}=nothing)
+    sc = StreamCompressor(CompressionContext(), Int(level), checksum, dict, UInt8[], 0, 1, 0, 0,
+                          UInt8[], 0, false, false, ChecksumState(), -1, 0)
+    pledged_size === nothing || stream_pledge!(sc, pledged_size)
+    return sc
+end
+
+"""
+    stream_pledge!(sc::StreamCompressor, n)
+
+Pledge that the next frame will contain exactly `n` bytes (a negative `n`
+means unknown). Must be called before the frame's first write.
+"""
+function stream_pledge!(sc::StreamCompressor, n::Integer)
+    sc.started && throw(ArgumentError("the content size must be pledged before writing to the frame"))
+    sc.pledged = n < 0 ? -1 : Int(n)
+    return sc
 end
 
 function out_reserve!(sc::StreamCompressor, n::Int)
@@ -1697,7 +1718,7 @@ end
 function stream_begin!(sc::StreamCompressor)
     cc = sc.cc
     dlen = sc.dict === nothing ? 0 : length(sc.dict.content)
-    p = compression_parameters(sc.level, -1)
+    p = compression_parameters(sc.level, sc.pledged < 0 ? -1 : sc.pledged + dlen)
     reset_context!(cc, p, sc.level)
     sc.dict === nothing || apply_dict_entropy!(cc, sc.dict)
     window = 1 << p.window_log
@@ -1712,9 +1733,10 @@ function stream_begin!(sc::StreamCompressor)
     end
     sc.pend = sc.len + 1
     out_reserve!(sc, 32)
-    sc.olen = write_frame_header!(sc.out, sc.olen + 1, -1, p.window_log, sc.checksum,
+    sc.olen = write_frame_header!(sc.out, sc.olen + 1, sc.pledged, p.window_log, sc.checksum,
                                   sc.dict === nothing ? UInt32(0) : sc.dict.id) - 1
     sc.xxh = ChecksumState()
+    sc.total = 0
     sc.started = true
     sc.finished = false
     return sc
@@ -1771,6 +1793,11 @@ Feed input. Full blocks are compressed as soon as more input follows them.
 function stream_write!(sc::StreamCompressor, data::AbstractVector{UInt8})
     sc.finished && error("stream already finished")
     sc.started || stream_begin!(sc)
+    if sc.pledged >= 0 && sc.total + length(data) > sc.pledged
+        throw(ArgumentError("writing $(length(data)) more bytes exceeds the pledged content size " *
+                            "of $(sc.pledged) bytes ($(sc.total) written)"))
+    end
+    sc.total += length(data)
     i = firstindex(data)
     stop = lastindex(data)
     while i <= stop
@@ -1800,6 +1827,9 @@ end
 function stream_finish!(sc::StreamCompressor)
     sc.finished && return sc
     sc.started || stream_begin!(sc)
+    if sc.pledged >= 0 && sc.total != sc.pledged
+        throw(ArgumentError("frame finished after $(sc.total) bytes, but $(sc.pledged) were pledged"))
+    end
     n = sc.len - sc.pend + 1
     if n > 0
         emit_block!(sc, n, true)
@@ -1817,6 +1847,7 @@ function stream_finish!(sc::StreamCompressor)
     end
     sc.finished = true
     sc.started = false
+    sc.pledged = -1          # a pledge applies to one frame
     return sc
 end
 

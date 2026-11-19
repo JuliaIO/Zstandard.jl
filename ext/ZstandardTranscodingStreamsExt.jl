@@ -2,7 +2,7 @@ module ZstandardTranscodingStreamsExt
 
 using Zstandard
 using Zstandard: ZstdDictionary, ZstdError
-using Zstandard.Encoder: StreamCompressor, stream_write!, stream_finish!
+using Zstandard.Encoder: StreamCompressor, stream_write!, stream_finish!, stream_pledge!
 using Zstandard.Streaming: StreamDecoder, feed!, needed, at_boundary, available
 import TranscodingStreams
 using TranscodingStreams: Codec, Memory, Error
@@ -29,6 +29,17 @@ function TranscodingStreams.startproc(c::ZstandardCompressorCodec, mode::Symbol,
     c.sc = StreamCompressor(; level=c.level, checksum=c.checksum, dict=c.dict)
     c.opos = 1
     return :ok
+end
+
+# `transcode` pledges the total input size: record it in the frame header.
+function TranscodingStreams.pledgeinsize(c::ZstandardCompressorCodec, insize::Int64, err::Error)
+    try
+        stream_pledge!(c.sc, insize)
+        return :ok
+    catch e
+        err[] = e
+        return :error
+    end
 end
 
 function emit!(c::ZstandardCompressorCodec, output::Memory)
@@ -79,6 +90,19 @@ Zstandard.ZstandardDecompressor(; dict::Union{Nothing,ZstdDictionary}=nothing) =
     ZstandardDecompressorCodec(dict, StreamDecoder(dict), 0)
 
 Base.show(io::IO, ::ZstandardDecompressorCodec) = print(io, "ZstandardDecompressor()")
+
+# Use the content sizes recorded in the frame headers, when all are present.
+function TranscodingStreams.expectedsize(c::ZstandardDecompressorCodec, input::Memory)
+    n = Int(input.size)
+    n == 0 && return 0
+    try
+        data = unsafe_wrap(Array, input.ptr, n)
+        s = Zstandard.decompressed_size(data)
+        return s === nothing ? 4n : Int(s)
+    catch
+        return 4n
+    end
+end
 
 function TranscodingStreams.startproc(c::ZstandardDecompressorCodec, mode::Symbol, err::Error)
     if !at_boundary(c.d)
