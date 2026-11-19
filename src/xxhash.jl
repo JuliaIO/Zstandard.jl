@@ -12,7 +12,10 @@
 
 module XXHash
 
-export xxh64, XXH64State, update!, digest!
+using Base.ScopedValues: ScopedValue, with
+
+export xxh64, XXH64State, update!, digest!,
+       AbstractXXH64, NativeXXH64, XXH64_IMPLEMENTATION, with_xxh64_implementation
 
 const P1 = 0x9E3779B185EBCA87
 const P2 = 0xC2B2AE3D27D4EB4F
@@ -88,13 +91,14 @@ function xxh64(p::Ptr{UInt8}, n::Integer, seed::UInt64=UInt64(0))
     return finish(h + UInt64(n), p + i, n - i)
 end
 
-function xxh64(data::AbstractVector{UInt8}, seed::UInt64=UInt64(0))
-    if data isa Union{Vector{UInt8}, Base.FastContiguousSubArray{UInt8,1,Vector{UInt8}}}
-        return GC.@preserve data xxh64(pointer(data), length(data), seed)
-    end
-    d = Vector{UInt8}(data)
-    return GC.@preserve d xxh64(pointer(d), length(d), seed)
-end
+# Byte containers whose memory can be read through a pointer.
+const ContiguousBytes = Union{Vector{UInt8}, Base.CodeUnits{UInt8,String},
+                              Base.FastContiguousSubArray{UInt8,1,Vector{UInt8}},
+                              Base.FastContiguousSubArray{UInt8,1,Base.CodeUnits{UInt8,String}}}
+
+xxh64(data::ContiguousBytes, seed::UInt64=UInt64(0)) =
+    GC.@preserve data xxh64(pointer(data), length(data), seed)
+xxh64(data::AbstractVector{UInt8}, seed::UInt64=UInt64(0)) = xxh64(Vector{UInt8}(data), seed)
 xxh64(s::AbstractString, seed::UInt64=UInt64(0)) = xxh64(codeunits(s), seed)
 
 """
@@ -146,18 +150,85 @@ function update!(st::XXH64State, p::Ptr{UInt8}, n::Integer)
     return st
 end
 
-function update!(st::XXH64State, data::AbstractVector{UInt8})
-    if data isa Union{Vector{UInt8}, Base.FastContiguousSubArray{UInt8,1,Vector{UInt8}}}
-        return GC.@preserve data update!(st, pointer(data), length(data))
-    end
-    d = Vector{UInt8}(data)
-    return GC.@preserve d update!(st, pointer(d), length(d))
-end
+update!(st::XXH64State, data::ContiguousBytes) =
+    GC.@preserve data update!(st, pointer(data), length(data))
+update!(st::XXH64State, data::AbstractVector{UInt8}) = update!(st, Vector{UInt8}(data))
+update!(st::XXH64State, s::AbstractString) = update!(st, codeunits(s))
 
 function digest!(st::XXH64State)
     h = st.total >= 32 ? converge(st.v1, st.v2, st.v3, st.v4) : st.seed + P5
     buf = st.buf
     return GC.@preserve buf finish(h + st.total, pointer(buf), st.buflen)
 end
+
+# ---------------------------------------------------------------------------
+# Implementation interface for Zstandard content checksums
+# ---------------------------------------------------------------------------
+
+"""
+    AbstractXXH64
+
+Supertype of XXH64 implementations used for Zstandard frame content checksums.
+To use another implementation, define a subtype `T` and four methods:
+
+    xxh64(impl::T, p::Ptr{UInt8}, n::Int, seed::UInt64)::UInt64   # one-shot
+    xxh64_init(impl::T, seed::UInt64)                             # -> state
+    xxh64_update!(impl::T, state, p::Ptr{UInt8}, n::Int)          # -> state
+    xxh64_digest(impl::T, state)::UInt64                          # state not consumed
+
+then run code with it via [`with_xxh64_implementation`](@ref). The default is
+[`NativeXXH64`](@ref). Only frame checksums use the selected implementation;
+internal hashing (long-distance matching, dictionary IDs) always uses the
+native code.
+"""
+abstract type AbstractXXH64 end
+
+"""
+    NativeXXH64()
+
+This package's XXH64 implementation (the default).
+"""
+struct NativeXXH64 <: AbstractXXH64 end
+
+xxh64(::NativeXXH64, p::Ptr{UInt8}, n::Int, seed::UInt64) = xxh64(p, n, seed)
+xxh64_init(::NativeXXH64, seed::UInt64) = XXH64State(seed)
+xxh64_update!(::NativeXXH64, st::XXH64State, p::Ptr{UInt8}, n::Int) = update!(st, p, n)
+xxh64_digest(::NativeXXH64, st::XXH64State) = digest!(st)
+
+"""
+    XXH64_IMPLEMENTATION :: ScopedValue{AbstractXXH64}
+
+The XXH64 implementation used for frame checksums in the current scope
+(default `NativeXXH64()`). Scoped values propagate into tasks spawned within
+the scope, including the tasks of multithreaded compression and decoding.
+"""
+const XXH64_IMPLEMENTATION = ScopedValue{AbstractXXH64}(NativeXXH64())
+
+"""
+    with_xxh64_implementation(f, impl::AbstractXXH64)
+
+Run `f()` with `impl` computing and verifying Zstandard frame checksums.
+"""
+with_xxh64_implementation(f, impl::AbstractXXH64) = with(f, XXH64_IMPLEMENTATION => impl)
+
+# --- helpers used by the codec (content checksum = low 32 bits of XXH64, seed 0)
+
+content_checksum(p::Ptr{UInt8}, n::Int) = xxh64(XXH64_IMPLEMENTATION[], p, n, UInt64(0)) % UInt32
+content_checksum(data::ContiguousBytes) = GC.@preserve data content_checksum(pointer(data), length(data))
+content_checksum(data::AbstractVector{UInt8}) = content_checksum(Vector{UInt8}(data))
+
+"""Streaming content checksum; keeps the implementation it was created with."""
+mutable struct ChecksumState
+    impl::AbstractXXH64
+    state::Any
+end
+ChecksumState() = (impl = XXH64_IMPLEMENTATION[]; ChecksumState(impl, xxh64_init(impl, UInt64(0))))
+
+checksum_update!(c::ChecksumState, p::Ptr{UInt8}, n::Int) =
+    (c.state = xxh64_update!(c.impl, c.state, p, n); c)
+checksum_update!(c::ChecksumState, data::ContiguousBytes) =
+    GC.@preserve data checksum_update!(c, pointer(data), length(data))
+checksum_update!(c::ChecksumState, data::AbstractVector{UInt8}) = checksum_update!(c, Vector{UInt8}(data))
+checksum_digest(c::ChecksumState) = xxh64_digest(c.impl, c.state) % UInt32
 
 end # module

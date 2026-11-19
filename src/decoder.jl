@@ -14,7 +14,7 @@
 
 module Decoder
 
-using ..XXHash: xxh64
+using ..XXHash: content_checksum
 
 export ZstdError, ZstdDictionary, parse_dictionary, DecoderState, decompress_frames,
        FrameInfo, read_frame_info
@@ -1079,7 +1079,7 @@ function decompress_frames(data::AbstractVector{UInt8}, st::DecoderState=Decoder
                 n - pos + 1 < 4 && zerr("truncated frame checksum")
                 expected = load32(p + pos - 1)
                 pos += 4
-                actual = (xxh64(view(out, frame_start+1:produced)) % UInt32)
+                actual = content_checksum(view(out, frame_start+1:produced))
                 actual != expected && zerr("checksum mismatch")
             end
         end

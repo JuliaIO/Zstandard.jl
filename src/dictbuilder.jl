@@ -163,6 +163,7 @@ function finalize_dictionary(content::AbstractVector{UInt8}, samples::AbstractVe
     room < 8 && throw(ArgumentError("dict_size too small for the dictionary header"))
     length(content) > room && (content = content[end-room+1:end])
     length(content) < 8 && throw(ArgumentError("dictionary content must be at least 8 bytes"))
+    # dictionary IDs use the native XXH64 (an ID, not a format checksum)
     id = dict_id === nothing ? UInt32(xxh64(content) % UInt64((1 << 31) - 32768) + 32768) : UInt32(dict_id)
     for k in 0:3
         hdr[5 + k] = (id >> (8k)) % UInt8

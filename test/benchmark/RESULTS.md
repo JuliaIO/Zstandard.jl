@@ -1,5 +1,38 @@
 # Benchmark Results Log
 
+## 2026-11-19 — XXH64 implementations compared
+
+Script: `test/benchmark/xxhash_compare.jl` (adapters in `test/xxhash_impls.jl`; ZstdInflate.jl is
+included when installed). Julia 1.11, 4-core Xeon VM.
+
+```
+XXH64 one-shot (MB/s)
+                                16 bytes  100 bytes 1024 bytes 64.000 KiB 16.000 MiB
+Zstandard.jl (native)                381       1734       7398      10967      10718
+XXHashNative.jl                      193        782       2625       3478       3359
+xxHash C library (xxHash_jll)        381       1766       7398      10969      10748
+ZstdInflate.jl                       272       1109       3742       5176       5066
+
+XXH64 streaming, 16 MiB in pieces of the given size (MB/s)
+                               4.000 KiB 128.000 KiB
+Zstandard.jl (native)              10765      10794
+XXHashNative.jl                     3239       3298
+xxHash C library (xxHash_jll)      10789      10833
+ZstdInflate.jl                     10438      10759
+
+Zstandard.jl with each implementation, 4 MiB checksummed frame (MB/s)
+                                decompress  stream read  compress L1
+Zstandard.jl (native)                 5251         1710         5145
+XXHashNative.jl                       2526         1211         2525
+xxHash C library (xxHash_jll)         5185         1673         5134
+ZstdInflate.jl                        3360         2048         3334
+```
+
+Zstandard.jl's native XXH64 matches the C reference library. ZstdInflate.jl's one-shot hash packs the
+four lanes into a SIMD.jl vector and is about half as fast as its own scalar streaming code.
+
+---
+
 ## 2026-11-18 — XXH64 rewrite, parallel decoding of concatenated frames
 
 XXH64, 16 MB (MB/s): XXHashNative 3,522; ZstdInflate (SIMD.jl, 4 lanes in one vector) 5,209;

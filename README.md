@@ -76,6 +76,26 @@ compressed = transcode(ZstandardCompressor(level=3), data)
 stream = TranscodingStream(ZstandardDecompressor(), open("file.zst"))
 ```
 
+## Checksum implementation
+
+Frame content checksums use this package's XXH64 by default. Another implementation can be plugged
+in by subtyping `Zstandard.AbstractXXH64` and defining four methods (see `Zstandard.XXHash`):
+
+```julia
+struct MyXXH64 <: Zstandard.AbstractXXH64 end
+Zstandard.XXHash.xxh64(::MyXXH64, p::Ptr{UInt8}, n::Int, seed::UInt64) = ...   # one-shot
+Zstandard.XXHash.xxh64_init(::MyXXH64, seed::UInt64) = ...                    # streaming state
+Zstandard.XXHash.xxh64_update!(::MyXXH64, state, p::Ptr{UInt8}, n::Int) = ...
+Zstandard.XXHash.xxh64_digest(::MyXXH64, state) = ...
+
+Zstandard.with_xxh64_implementation(MyXXH64()) do
+    compress(data; checksum=true)
+end
+```
+
+The tests check the native code against XXHashNative.jl and the xxHash C library, and
+`test/benchmark/xxhash_compare.jl` compares their speed.
+
 ## Performance
 
 Single thread, Julia 1.11, on realistic data: 4 MB of Julia `base/` sources ("text") and

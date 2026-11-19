@@ -6,7 +6,7 @@ import ..Decoder: DecoderState, ZstdDictionary, FrameInfo, read_frame_info, rese
                   decode_compressed_block!, memset!, zerr, ensure_capacity!,
                   MAGIC_NUMBER, SKIPPABLE_MAGIC_START, SKIPPABLE_MASK, BLOCK_SIZE_MAX, WILDCOPY_SLACK
 import ..Encoder: StreamCompressor, stream_write!, stream_flush!, stream_finish!
-using ..XXHash: XXH64State, update!, digest!
+using ..XXHash: ChecksumState, checksum_update!, checksum_digest
 
 export ZstdDecompressorStream, ZstdCompressorStream, StreamDecoder
 
@@ -51,7 +51,7 @@ mutable struct StreamDecoder
     frames_done::Int     # number of completed frames
     fi::FrameInfo
     frame_produced::Int
-    xxh::Union{Nothing,XXH64State}
+    xxh::Union{Nothing,ChecksumState}
 end
 
 function StreamDecoder(dict::Union{Nothing,ZstdDictionary}=nothing)
@@ -113,7 +113,7 @@ function begin_frame!(d::StreamDecoder, hdr::AbstractVector{UInt8})
     d.frame_start = d.wpos
     d.frame_produced = 0
     d.in_frame = true
-    d.xxh = fi.checksum ? XXH64State() : nothing
+    d.xxh = fi.checksum ? ChecksumState() : nothing
     set_unit!(d, U_BHDR, 3)
 end
 
@@ -162,7 +162,7 @@ function decode_body!(d::StreamDecoder)
     end
     d.frame_produced += d.wpos - start
     if d.xxh !== nothing && d.wpos > start
-        update!(d.xxh, view(d.out, start+1:d.wpos))
+        checksum_update!(d.xxh, view(d.out, start+1:d.wpos))
     end
     if d.blast
         end_frame!(d)
@@ -226,7 +226,7 @@ function process_unit!(d::StreamDecoder)
         decode_body!(d)
     elseif st == U_CKSUM
         expected = u32(u)
-        actual = digest!(d.xxh) % UInt32
+        actual = checksum_digest(d.xxh)
         actual != expected && zerr("checksum mismatch")
         d.in_frame = false
         d.frames_done += 1

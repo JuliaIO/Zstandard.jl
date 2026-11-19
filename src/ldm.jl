@@ -53,7 +53,7 @@ function ldm_sequences(base::Ptr{UInt8}, from::Int, to::Int, window::Int, min_ma
         (h & stopmask) != 0 && continue
         ws = q - min_match + 1
         ws < from && continue
-        xx = xxh64(base + ws - 1, min_match)
+        xx = xxh64(base + ws - 1, min_match)   # internal hash: always the native XXH64
         bucket = Int(xx & UInt64(nbuckets - 1))
         chk = (xx >> 32) % UInt32
         slot0 = bucket * bsize

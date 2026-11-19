@@ -6,6 +6,9 @@ export decompress, compress, ZstdDecompressorStream, ZstdCompressorStream, ZstdD
        decompressed_size, is_zstd_frame, is_skippable_frame, skippable_frame, read_skippable_frame,
        train_dictionary, finalize_dictionary
 
+# Swappable XXH64 implementation for frame checksums (see `Zstandard.XXHash`)
+public XXHash, AbstractXXH64, NativeXXH64, XXH64_IMPLEMENTATION, with_xxh64_implementation
+
 const MAGIC_NUMBER = 0xFD2FB528
 const SKIPPABLE_MAGIC_START = 0x184D2A50
 const SKIPPABLE_MAGIC_END   = 0x184D2A5F
@@ -20,7 +23,7 @@ include("frameinfo.jl")
 include("encoder.jl")
 using .Encoder: CompressionContext, compress_frame!, mt_layout, compress_job!, frame_header_bytes,
                 train_dictionary, finalize_dictionary
-using .XXHash: xxh64
+using .XXHash: content_checksum, AbstractXXH64, NativeXXH64, XXH64_IMPLEMENTATION, with_xxh64_implementation
 
 include("streaming.jl")
 using .Streaming: ZstdDecompressorStream, ZstdCompressorStream
@@ -114,7 +117,7 @@ function _compress_mt(data::Vector{UInt8}, level::Integer, checksum::Bool, nthre
     sizehint!(out, length(out) + sum(length, parts) + 4)
     foreach(x -> append!(out, x), parts)
     if checksum
-        h = xxh64(data) % UInt32
+        h = content_checksum(data)
         for k in 0:3
             push!(out, (h >> (8k)) % UInt8)
         end
