@@ -411,78 +411,96 @@ function parse_fast!(ss::SeqStore, htab::Vector{Int32}, hlog::Int, mls::Int, ste
     return (rep1 != 0 ? rep1 : saved1), (rep2 != 0 ? rep2 : saved2)
 end
 
+# libzstd 1.5's ZSTD_compressBlock_doubleFast_noDict_generic: a long (8-byte)
+# and a short (mls-byte) hash table; the long hash of the next position is
+# computed ahead, and the step grows by one every 256 bytes without a match.
 function parse_dfast!(ss::SeqStore, hlong::Vector{Int32}, hllog::Int, hsmall::Vector{Int32},
                       hslog::Int, mls::Int, base::Ptr{UInt8}, istart::Ptr{UInt8}, iend::Ptr{UInt8},
                       lowlimit::Int, rep1::Int, rep2::Int)
     ilimit = iend - HASH_READ_SIZE
     anchor = istart
     ip = istart
-    ip == base && (ip += 1)
-    lowp = ptr_of(max(lowlimit, 1), base)
+    lowp = ptr_of(lowlimit, base)
+    ip == lowp && (ip += 1)
+    maxrep = pos_of(ip, base) - lowlimit
+    saved1 = 0; saved2 = 0
+    rep2 > maxrep && (saved2 = rep2; rep2 = 0)
+    rep1 > maxrep && (saved1 = rep1; rep1 = 0)
+    kstep = 1 << K_SEARCH_STRENGTH
     GC.@preserve hlong hsmall begin
         hl = pointer(hlong); hs = pointer(hsmall)
-        while ip < ilimit
-            cur = pos_of(ip, base)
-            h8 = zhash(ip, hllog, 8)
-            hsm = zhash(ip, hslog, mls)
-            ml_idx = Int(unsafe_load(hl, h8 + 1))
-            ms_idx = Int(unsafe_load(hs, hsm + 1))
-            unsafe_store!(hl, cur % Int32, h8 + 1)
-            unsafe_store!(hs, cur % Int32, hsm + 1)
-            if rep1 > 0 && cur + 1 - rep1 >= lowlimit && load32(ip + 1 - rep1) == load32(ip + 1)
+        @inbounds while true
+            step = 1
+            nextstep = ip + kstep
+            ip1 = ip + step
+            ip1 > ilimit && break
+            hl0 = zhash(ip, hllog, 8)
+            idxl0 = Int(unsafe_load(hl, hl0 + 1))
+            kind = 0              # 1: repcode stored, 2: long match at ip, 3: short match at ip
+            cur = 0; hl1 = 0; idxl1 = 0; idxs0 = 0
+            while true
+                hs0 = zhash(ip, hslog, mls)
+                idxs0 = Int(unsafe_load(hs, hs0 + 1))
+                cur = pos_of(ip, base)
+                unsafe_store!(hl, cur % Int32, hl0 + 1)
+                unsafe_store!(hs, cur % Int32, hs0 + 1)
+                if rep1 > 0 && load32(ip + 1 - rep1) == load32(ip + 1)
+                    kind = 1; break
+                end
+                hl1 = zhash(ip1, hllog, 8)
+                if idxl0 > lowlimit && load64(ptr_of(idxl0, base)) == load64(ip)
+                    kind = 2; break
+                end
+                idxl1 = Int(unsafe_load(hl, hl1 + 1))
+                if idxs0 > lowlimit && load32(ptr_of(idxs0, base)) == load32(ip)
+                    kind = 3; break
+                end
+                if ip1 >= nextstep
+                    step += 1
+                    nextstep += kstep
+                end
+                ip = ip1
+                ip1 += step
+                hl0 = hl1
+                idxl0 = idxl1
+                ip1 <= ilimit || break
+            end
+            kind == 0 && break
+            if kind == 1
                 ml = zcount(ip + 5, ip + 5 - rep1, iend) + 4
                 ip += 1
                 store_seq!(ss, anchor, Int(ip - anchor), rep1, ml)
             else
-                found = false
-                ml = 0; offset = 0
-                if ml_idx >= lowlimit && ml_idx > 0 && load64(ptr_of(ml_idx, base)) == load64(ip)
-                    m = ptr_of(ml_idx, base)
+                if kind == 2
+                    m = ptr_of(idxl0, base)
                     ml = zcount(ip + 8, m + 8, iend) + 8
-                    offset = Int(ip - m)
-                    while ip > anchor && m > lowp && unsafe_load(ip - 1) == unsafe_load(m - 1)
-                        ip -= 1; m -= 1; ml += 1
+                else
+                    m = ptr_of(idxs0, base)
+                    ml = zcount(ip + 4, m + 4, iend) + 4
+                    if idxl1 > lowlimit && load64(ptr_of(idxl1, base)) == load64(ip1)
+                        l1 = zcount(ip1 + 8, ptr_of(idxl1, base) + 8, iend) + 8
+                        if l1 > ml
+                            ip = ip1; ml = l1; m = ptr_of(idxl1, base)
+                        end
                     end
-                    found = true
-                elseif ms_idx >= lowlimit && ms_idx > 0 && load32(ptr_of(ms_idx, base)) == load32(ip)
-                    # check for a long match at ip+1
-                    h3 = zhash(ip + 1, hllog, 8)
-                    l3 = Int(unsafe_load(hl, h3 + 1))
-                    unsafe_store!(hl, (cur + 1) % Int32, h3 + 1)
-                    if l3 >= lowlimit && l3 > 0 && load64(ptr_of(l3, base)) == load64(ip + 1)
-                        ip += 1
-                        m = ptr_of(l3, base)
-                        ml = zcount(ip + 8, m + 8, iend) + 8
-                    else
-                        m = ptr_of(ms_idx, base)
-                        ml = zcount(ip + 4, m + 4, iend) + 4
-                    end
-                    offset = Int(ip - m)
-                    while ip > anchor && m > lowp && unsafe_load(ip - 1) == unsafe_load(m - 1)
-                        ip -= 1; m -= 1; ml += 1
-                    end
-                    found = true
                 end
-                if !found
-                    ip += ((Int(ip - anchor) >> K_SEARCH_STRENGTH) + 1)
-                    continue
+                while ip > anchor && m > lowp && unsafe_load(ip - 1) == unsafe_load(m - 1)
+                    ip -= 1; m -= 1; ml += 1
                 end
+                offset = Int(ip - m)
                 rep2 = rep1; rep1 = offset
+                step < 4 && unsafe_store!(hl, pos_of(ip1, base) % Int32, hl1 + 1)
                 store_seq!(ss, anchor, Int(ip - anchor), offset, ml)
             end
             ip += ml
             anchor = ip
             if ip <= ilimit
-                # fill tables at positions inside the match
                 ins = ptr_of(cur + 2, base)
-                if ins < ip
-                    unsafe_store!(hl, pos_of(ins, base) % Int32, zhash(ins, hllog, 8) + 1)
-                    unsafe_store!(hs, pos_of(ins, base) % Int32, zhash(ins, hslog, mls) + 1)
-                end
+                unsafe_store!(hl, (cur + 2) % Int32, zhash(ins, hllog, 8) + 1)
                 unsafe_store!(hl, pos_of(ip - 2, base) % Int32, zhash(ip - 2, hllog, 8) + 1)
+                unsafe_store!(hs, (cur + 2) % Int32, zhash(ins, hslog, mls) + 1)
                 unsafe_store!(hs, pos_of(ip - 1, base) % Int32, zhash(ip - 1, hslog, mls) + 1)
-                while ip <= ilimit && rep2 > 0 && pos_of(ip, base) - rep2 >= lowlimit &&
-                      load32(ip) == load32(ip - rep2)
+                while ip <= ilimit && rep2 > 0 && load32(ip) == load32(ip - rep2)
                     rl = zcount(ip + 4, ip + 4 - rep2, iend) + 4
                     rep1, rep2 = rep2, rep1
                     unsafe_store!(hs, pos_of(ip, base) % Int32, zhash(ip, hslog, mls) + 1)
@@ -495,7 +513,8 @@ function parse_dfast!(ss::SeqStore, hlong::Vector{Int32}, hllog::Int, hsmall::Ve
         end
     end
     store_last_literals!(ss, anchor, Int(iend - anchor))
-    return rep1, rep2
+    saved2 = (saved1 != 0 && rep1 != 0) ? saved1 : saved2
+    return (rep1 != 0 ? rep1 : saved1), (rep2 != 0 ? rep2 : saved2)
 end
 
 # Row-based match finder (libzstd's ZSTD_row_*), used by the greedy and lazy
