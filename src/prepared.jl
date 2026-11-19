@@ -74,8 +74,9 @@ function prepare_dictionary(dict::ZstdDictionary; level::Integer=3, kwargs...)
         if last >= 1 && S_GREEDY <= p.strategy <= S_LAZY2
             mls = clamp(p.min_match, 4, 6)
             GC.@preserve cc begin
-                hc_insert!(pointer(cc.htab), pointer(cc.ctab), p.hash_log, (1 << p.chain_log) - 1, mls,
-                           base, 1, last + 1)
+                rl = row_log(p)
+                row_insert!(pointer(cc.htab), Ptr{UInt8}(pointer(cc.ctab)), p.hash_log - rl, rl, mls,
+                            base, 1, last + 1)
             end
             cc.next_to_update = last + 1
         elseif last >= 1 && p.strategy >= S_BTOPT
