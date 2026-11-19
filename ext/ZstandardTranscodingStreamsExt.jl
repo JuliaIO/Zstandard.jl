@@ -150,4 +150,13 @@ function TranscodingStreams.process(c::ZstandardDecompressorCodec, input::Memory
     end
 end
 
+# Precompilation workload for the codecs (see src/precompile.jl).
+if ccall(:jl_generating_output, Cint, ()) == 1
+    let data = Vector{UInt8}(repeat("TranscodingStreams precompile workload. ", 2000))
+        c = transcode(Zstandard.ZstandardCompressor(), data)
+        transcode(Zstandard.ZstandardDecompressor(), c)
+        read(TranscodingStreams.TranscodingStream(Zstandard.ZstandardDecompressor(), IOBuffer(c)))
+    end
+end
+
 end # module

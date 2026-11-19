@@ -252,4 +252,6 @@ function decompress(data::AbstractVector{UInt8}, dict::Union{Nothing, ZstdDictio
     return _with_state(st -> decompress_frames(data, st, dict))
 end
 
+include("precompile.jl")
+
 end # module
