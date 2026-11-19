@@ -987,11 +987,11 @@ start and end on frame boundaries.
 """
 function decompress_frames(data::AbstractVector{UInt8}, st::DecoderState=DecoderState(),
                            dict::Union{Nothing,ZstdDictionary}=nothing;
-                           range::UnitRange{Int}=1:length(data))
+                           range::UnitRange{Int}=1:length(data),
+                           out::Vector{UInt8}=Vector{UInt8}(undef, 0))
     src = data isa Vector{UInt8} ? data : Vector{UInt8}(data)
     checkbounds(src, range)
     n = range.stop            # last valid input index
-    out = Vector{UInt8}(undef, 0)
     produced = 0
     pos = range.start
     first = true
@@ -1025,7 +1025,7 @@ function decompress_frames(data::AbstractVector{UInt8}, st::DecoderState=Decoder
             max_expand = (n - pos + 1) * (BLOCK_SIZE_MAX >> 2) + BLOCK_SIZE_MAX
             if first
                 guess = fi.content_size >= 0 ? min(Int(fi.content_size), max_expand) : min(4 * length(range), 1 << 28)
-                resize!(out, guess + WILDCOPY_SLACK)
+                length(out) < guess + WILDCOPY_SLACK && resize!(out, guess + WILDCOPY_SLACK)
                 first = false
             elseif fi.content_size >= 0
                 ensure_capacity!(out, produced + min(Int(fi.content_size), max_expand) + WILDCOPY_SLACK)

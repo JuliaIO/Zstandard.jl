@@ -32,6 +32,12 @@ function _precompile_workload()
     dict = ZstdDictionary(text[1:8192])
     decompress(compress(text; dict), dict)
     decompress(compress(text[1:2000]; dict=prepare_dictionary(dict)), dict)
+
+    ctx = ZstdCompressionContext(level=3)
+    dctx = ZstdDecompressionContext()
+    out = UInt8[]; buf = UInt8[]
+    decompress!(dctx, buf, compress!(ctx, out, data))
+    decompress(dctx, compress(ctx, text))
     return nothing
 end
 

@@ -516,3 +516,43 @@ end
     rr = UInt8[(x ⊻= x << 13; x ⊻= x >> 7; x ⊻= x << 17; x % UInt8) for _ in 1:600_000]
     @test all(==(128 << 10), frame_block_sizes(compress(rr; level=19))[1:end-1])
 end
+
+@testset "Compression and decompression contexts" begin
+    data = make_text(200_000)
+    dict = parse_dictionary(train_dictionary([make_text(900 + 13i) for i in 1:200]; dict_size=8192))
+    for kw in ((;), (; level=1), (; level=19, checksum=true), (; level=7, window_log=17, strategy=:lazy2),
+               (; level=-3), (; level=5, dict), (; level=3, long=true))
+        ctx = ZstdCompressionContext(; kw...)
+        ref = compress(data; kw...)
+        @test compress(ctx, data) == ref
+        out = UInt8[]
+        @test compress!(ctx, out, data) === out
+        @test out == ref
+        dctx = ZstdDecompressionContext(; dict=haskey(kw, :dict) ? dict : nothing)
+        buf = UInt8[]
+        @test decompress!(dctx, buf, out) === buf
+        @test buf == data
+        @test decompress(dctx, out) == data
+        haskey(kw, :dict) || @test transcode(CodecZstd.ZstdDecompressor, compress(ctx, "abc"^100)) == codeunits("abc"^100)
+        # reuse across sizes, including empty input and output shrinking
+        for n in (0, 1, 17, 5000, 150_000, 3)
+            x = data[1:n]
+            compress!(ctx, out, x)
+            @test out == compress(x; kw...)
+            @test decompress!(dctx, buf, out) == x
+        end
+    end
+    # a prepared dictionary fixes the level
+    pd = prepare_dictionary(dict; level=4)
+    ctx = ZstdCompressionContext(dict=pd)
+    @test ctx.level == 4
+    s = make_text(3000)
+    @test compress(ctx, s) == compress(s; dict=pd)
+    @test_throws ArgumentError ZstdCompressionContext(dict=pd, level=5)
+    @test_throws ArgumentError ZstdCompressionContext(window_log=40)
+    out = UInt8[1, 2, 3]
+    @test_throws ArgumentError compress!(ctx, out, out)
+    @test_throws ArgumentError decompress!(ZstdDecompressionContext(), out, out)
+    @test_throws ZstdError decompress!(ZstdDecompressionContext(), UInt8[], UInt8[1, 2, 3, 4, 5])
+    @test occursin("level=4", sprint(show, ctx))
+end

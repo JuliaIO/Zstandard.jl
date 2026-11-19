@@ -2021,7 +2021,8 @@ Compress `data` as a single Zstandard frame.
 function compress_frame!(cc::CompressionContext, data::AbstractVector{UInt8}, level::Integer;
                          checksum::Bool=false,
                          dict::Union{Nothing,ZstdDictionary,PreparedDictionary}=nothing,
-                         long::Bool=false, params::ParameterOverrides=NO_OVERRIDES)
+                         long::Bool=false, params::ParameterOverrides=NO_OVERRIDES,
+                         dest::Union{Nothing,Vector{UInt8}}=nothing)
     prepared = nothing
     if dict isa PreparedDictionary
         level = dict.level
@@ -2057,8 +2058,12 @@ function compress_frame!(cc::CompressionContext, data::AbstractVector{UInt8}, le
     # Compress into the context's scratch buffer (reused across calls, up to
     # OUT_SCRATCH_MAX) and copy out the exact result: allocating the worst-case
     # size on every call costs more in GC than the copy.
-    scratch = bound <= OUT_SCRATCH_MAX
-    if scratch
+    # (`dest`: write into the caller's vector instead, resized to the frame)
+    scratch = dest === nothing && bound <= OUT_SCRATCH_MAX
+    if dest !== nothing
+        out = dest
+        length(out) < bound && resize!(out, bound)
+    elseif scratch
         length(cc.outbuf) < bound && resize!(cc.outbuf, bound)
         out = cc.outbuf
     else
