@@ -79,8 +79,8 @@ function prepare_dictionary(dict::ZstdDictionary; level::Integer=3, kwargs...)
                             base, 1, last + 1)
             end
             cc.next_to_update = last + 1
-        elseif last >= 1 && p.strategy >= S_BTOPT
-            mls = clamp(p.min_match, 3, 4)
+        elseif last >= 1 && p.strategy >= S_BTLAZY2
+            mls = p.strategy == S_BTLAZY2 ? clamp(p.min_match, 4, 6) : clamp(p.min_match, 3, 4)
             next = 1
             GC.@preserve cc begin
                 while next <= last

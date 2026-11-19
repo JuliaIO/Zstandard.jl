@@ -92,6 +92,7 @@ function parse_block_ldm!(cc::CompressionContext, base::Ptr{UInt8}, bstart::Ptr{
                           cur::LdmCursor)
     ss = cc.ss
     ss.nlit = 0; ss.nseq = 0
+    seed_stats_ultra!(cc, base, bstart, bend)
     bs = pos_of(bstart, base)
     be = pos_of(bend, base)
     ip = bs

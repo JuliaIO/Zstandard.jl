@@ -32,7 +32,7 @@ const MIN_MATCH = 3
 # Compression parameters (after ZSTD_defaultCParameters for large inputs)
 # ---------------------------------------------------------------------------
 
-@enum Strategy S_FAST S_DFAST S_GREEDY S_LAZY S_LAZY2 S_BTOPT S_BTULTRA
+@enum Strategy S_FAST S_DFAST S_GREEDY S_LAZY S_LAZY2 S_BTLAZY2 S_BTOPT S_BTULTRA S_BTULTRA2
 
 struct CParams
     window_log::Int
@@ -45,13 +45,14 @@ struct CParams
 end
 
 # window, chain, hash, search, minMatch, targetLength, strategy
-# Levels 13-15 use lazy2 (libzstd: btlazy2); 16-17 the optimal parser with
-# static-ish pricing (btopt), 18-22 the full optimal parser (btultra).
+# As libzstd 1.5.7: levels 13-15 use btlazy2, 16-17 the optimal parser with
+# whole-bit pricing (btopt), 18 the full optimal parser (btultra), 19-22
+# btultra2 (btultra with statistics seeded by a first pass).
 # Greedy/lazy levels find matches with libzstd's row-based match finder (rows
-# of 2^clamp(searchLog, 4, 6) entries; chainLog is unused). The optimal parser
-# takes candidates from a hash chain rather than a binary tree; search depth is
-# capped where deeper chains stopped paying for themselves on real data.
-# For the optimal parser, targetLength is the "sufficient" match length.
+# of 2^clamp(searchLog, 4, 6) entries; chainLog is unused); btlazy2 and the
+# optimal parser use a binary tree of 2^(chainLog-1) positions. For the optimal
+# parser, targetLength is the "sufficient" match length. Level 16 hashes 4
+# bytes rather than libzstd's 5 (slightly better ratio at a similar speed).
 const LEVEL_TABLE = CParams[
     CParams(19, 12, 13, 1, 6, 1, S_FAST),     # base for negative levels
     CParams(19, 13, 14, 1, 7, 0, S_FAST),     # 1
@@ -66,16 +67,16 @@ const LEVEL_TABLE = CParams[
     CParams(22, 21, 22, 5, 5, 16, S_LAZY2),   # 10
     CParams(22, 21, 22, 6, 5, 16, S_LAZY2),   # 11
     CParams(22, 22, 23, 6, 5, 32, S_LAZY2),   # 12
-    CParams(22, 22, 22, 6, 5, 32, S_LAZY2),   # 13
-    CParams(22, 22, 23, 6, 5, 48, S_LAZY2),   # 14
-    CParams(22, 23, 23, 7, 5, 64, S_LAZY2),   # 15
+    CParams(22, 22, 22, 4, 5, 32, S_BTLAZY2), # 13
+    CParams(22, 22, 23, 5, 5, 32, S_BTLAZY2), # 14
+    CParams(22, 23, 23, 6, 5, 32, S_BTLAZY2), # 15
     CParams(22, 22, 22, 5, 4, 48, S_BTOPT),   # 16
     CParams(23, 23, 22, 6, 4, 64, S_BTOPT),   # 17
     CParams(23, 23, 22, 6, 3, 64, S_BTULTRA), # 18
-    CParams(23, 24, 22, 7, 3, 256, S_BTULTRA),# 19
-    CParams(25, 25, 23, 7, 3, 256, S_BTULTRA),# 20
-    CParams(26, 26, 24, 8, 3, 512, S_BTULTRA),# 21
-    CParams(27, 27, 25, 9, 3, 999, S_BTULTRA),# 22
+    CParams(23, 24, 22, 7, 3, 256, S_BTULTRA2),# 19
+    CParams(25, 25, 23, 7, 3, 256, S_BTULTRA2),# 20
+    CParams(26, 26, 24, 7, 3, 512, S_BTULTRA2),# 21
+    CParams(27, 27, 25, 9, 3, 999, S_BTULTRA2),# 22
 ]
 
 """
@@ -96,11 +97,10 @@ end
 
 const NO_OVERRIDES = ParameterOverrides(-1, -1, -1, -1, -1, -1, -1)
 
-# libzstd strategy names; btlazy2 and btultra2 are not implemented and use
-# the nearest strategy here.
+# libzstd strategy names
 const STRATEGY_NAMES = Dict(:fast => S_FAST, :dfast => S_DFAST, :greedy => S_GREEDY,
-                            :lazy => S_LAZY, :lazy2 => S_LAZY2, :btlazy2 => S_LAZY2,
-                            :btopt => S_BTOPT, :btultra => S_BTULTRA, :btultra2 => S_BTULTRA)
+                            :lazy => S_LAZY, :lazy2 => S_LAZY2, :btlazy2 => S_BTLAZY2,
+                            :btopt => S_BTOPT, :btultra => S_BTULTRA, :btultra2 => S_BTULTRA2)
 
 function checked_param(name::Symbol, v, lo::Int, hi::Int)
     v === nothing && return -1
@@ -127,9 +127,8 @@ with the meaning of libzstd's `ZSTD_c_*` parameters:
 - `target_length` (0-131072): for fast, a step size (acceleration); for
   btopt/btultra, a length taken without optimizing (unused by greedy/lazy,
   as in libzstd)
-- `strategy`: `:fast`, `:dfast`, `:greedy`, `:lazy`, `:lazy2`, `:btopt`,
-  `:btultra` (libzstd's `:btlazy2` and `:btultra2` are accepted and use
-  `:lazy2` and `:btultra`)
+- `strategy`: `:fast`, `:dfast`, `:greedy`, `:lazy`, `:lazy2`, `:btlazy2`,
+  `:btopt`, `:btultra` or `:btultra2` (libzstd's strategies)
 
 Parameters are adapted to the input size afterwards, as in libzstd (e.g.
 the window shrinks for small inputs).
@@ -556,10 +555,10 @@ end
 
 const K_LAZY_SKIPPING_STEP = 8
 
-function parse_lazy!(ss::SeqStore, htab::Vector{Int32}, hlog::Int, ctab::Vector{Int32}, rlog::Int,
+function parse_lazy!(::Val{BT}, ss::SeqStore, htab::Vector{Int32}, hlog::Int, ctab::Vector{Int32}, rlog::Int,
                      mls::Int, attempts::Int, depth::Int, base::Ptr{UInt8},
                      istart::Ptr{UInt8}, iend::Ptr{UInt8}, lowlimit::Int, rep1::Int, rep2::Int,
-                     next::Int)
+                     next::Int) where {BT}
     ilimit = iend - HASH_READ_SIZE
     anchor = istart
     ip = istart
@@ -567,7 +566,7 @@ function parse_lazy!(ss::SeqStore, htab::Vector{Int32}, hlog::Int, ctab::Vector{
     lowp = ptr_of(max(lowlimit, 1), base)
     rbits = hlog - rlog
     GC.@preserve htab ctab begin
-        ht = pointer(htab); ch = Ptr{UInt8}(pointer(ctab))
+        ht = pointer(htab); ch = BT ? pointer(ctab) : Ptr{UInt8}(pointer(ctab))
         while ip < ilimit
             ml = 0; offset = 0; start = ip + 1; isrep = true
             cur = pos_of(ip, base)
@@ -578,7 +577,8 @@ function parse_lazy!(ss::SeqStore, htab::Vector{Int32}, hlog::Int, ctab::Vector{
                 start = ip + 1
             end
             if !(depth == 0 && ml > 0)
-                l2, o2, nxt = row_find_best(ht, ch, rbits, rlog, mls, attempts, base, ip, iend, lowlimit, next)
+                l2, o2, nxt = (BT ? bt_find_best(ht, ch, hlog, rlog, mls, attempts, base, ip, iend, lowlimit, next) :
+                                row_find_best(ht, ch, rbits, rlog, mls, attempts, base, ip, iend, lowlimit, next))
                 next = nxt
                 if l2 > ml
                     ml = l2; offset = o2; start = ip; isrep = false
@@ -606,7 +606,8 @@ function parse_lazy!(ss::SeqStore, htab::Vector{Int32}, hlog::Int, ctab::Vector{
                             ml = mlr; offset = rep1; start = ip; isrep = true
                         end
                     end
-                    l2, o2, nxt = row_find_best(ht, ch, rbits, rlog, mls, attempts, base, ip, iend, lowlimit, next)
+                    l2, o2, nxt = (BT ? bt_find_best(ht, ch, hlog, rlog, mls, attempts, base, ip, iend, lowlimit, next) :
+                                row_find_best(ht, ch, rbits, rlog, mls, attempts, base, ip, iend, lowlimit, next))
                     next = nxt
                     gain2 = l2 * 4 - highbit(o2 + 3)
                     ocost = isrep ? 0 : highbit(offset + 3)
@@ -627,7 +628,8 @@ function parse_lazy!(ss::SeqStore, htab::Vector{Int32}, hlog::Int, ctab::Vector{
                                 ml = mlr; offset = rep1; start = ip
                             end
                         end
-                        l2, o2, nxt = row_find_best(ht, ch, rbits, rlog, mls, attempts, base, ip, iend, lowlimit, next)
+                        l2, o2, nxt = (BT ? bt_find_best(ht, ch, hlog, rlog, mls, attempts, base, ip, iend, lowlimit, next) :
+                                row_find_best(ht, ch, rbits, rlog, mls, attempts, base, ip, iend, lowlimit, next))
                         next = nxt
                         gain2 = l2 * 4 - highbit(o2 + 3)
                         ocost = isrep ? 0 : highbit(offset + 3)
@@ -1581,8 +1583,25 @@ function write_block_header!(out::Vector{UInt8}, pos::Int, last::Bool, btype::In
     return pos + 3
 end
 
+const PREDEF_THRESHOLD = 1024
+
+# btultra2 (ZSTD_initStats_ultra): on the first block of a frame with no
+# history, a first pass only seeds the optimal parser's statistics; its
+# sequences and table entries are then forgotten.
+function seed_stats_ultra!(cc::CompressionContext, base::Ptr{UInt8}, bstart::Ptr{UInt8}, bend::Ptr{UInt8})
+    if cc.params.strategy == S_BTULTRA2 && !cc.opt.have_stats && pos_of(bstart, base) == 1 &&
+       bend - bstart > PREDEF_THRESHOLD
+        parse_range!(cc, base, bstart, bend, true)
+        cc.ss.nlit = 0; cc.ss.nseq = 0
+        fill!(cc.htab, Int32(0)); fill!(cc.ctab, Int32(0))
+        cc.next_to_update = 1
+    end
+    return
+end
+
 function parse_block!(cc::CompressionContext, base::Ptr{UInt8}, bstart::Ptr{UInt8}, bend::Ptr{UInt8})
     cc.ss.nlit = 0; cc.ss.nseq = 0
+    seed_stats_ultra!(cc, base, bstart, bend)
     parse_range!(cc, base, bstart, bend, true)
 end
 
@@ -1613,15 +1632,21 @@ function parse_range!(cc::CompressionContext, base::Ptr{UInt8}, bstart::Ptr{UInt
     elseif p.strategy >= S_BTOPT
         cc.next_to_update = max(cc.next_to_update, lowlimit)
         cc.next_to_update = parse_opt!(ss, cc.opt, cc.htab, p.hash_log, cc.ctab, p.chain_log,
-            clamp(p.min_match, 3, 4), 1 << p.search_log, max(p.target_length, 8), p.strategy == S_BTULTRA,
+            clamp(p.min_match, 3, 4), 1 << p.search_log, max(p.target_length, 8), p.strategy >= S_BTULTRA,
             base, bstart, bend, lowlimit, cc.rep, cc.next_to_update, first)
     else
         depth = p.strategy == S_GREEDY ? 0 : p.strategy == S_LAZY ? 1 : 2
         mls = clamp(p.min_match, 4, 6)
         cc.next_to_update = max(cc.next_to_update, lowlimit)
-        cc.prep1, cc.prep2, cc.next_to_update = parse_lazy!(ss, cc.htab, p.hash_log, cc.ctab,
-            row_log(p), mls, 1 << min(p.search_log, row_log(p)), depth, base, bstart, bend,
-            lowlimit, cc.prep1, cc.prep2, cc.next_to_update)
+        if p.strategy == S_BTLAZY2
+            cc.prep1, cc.prep2, cc.next_to_update = parse_lazy!(Val(true), ss, cc.htab, p.hash_log, cc.ctab,
+                p.chain_log - 1, mls, 1 << p.search_log, depth, base, bstart, bend,
+                lowlimit, cc.prep1, cc.prep2, cc.next_to_update)
+        else
+            cc.prep1, cc.prep2, cc.next_to_update = parse_lazy!(Val(false), ss, cc.htab, p.hash_log, cc.ctab,
+                row_log(p), mls, 1 << min(p.search_log, row_log(p)), depth, base, bstart, bend,
+                lowlimit, cc.prep1, cc.prep2, cc.next_to_update)
+        end
     end
     return
 end
@@ -1809,7 +1834,9 @@ function mt_layout(n::Int, level::Integer, ov::ParameterOverrides=NO_OVERRIDES)
     p = compression_parameters(level, n, ov)
     window = 1 << p.window_log
     job = max(1 << 20, p.strategy >= S_BTOPT ? 4window : window)
-    overlap = window >> (p.strategy == S_BTULTRA ? 1 : p.strategy == S_BTOPT ? 2 : 3)
+    # libzstd's default overlapLog: 9 for btultra2, 8 btopt/btultra, 7 lazy2/btlazy2, 6 otherwise
+    overlap = window >> (p.strategy >= S_BTULTRA2 ? 0 : p.strategy >= S_BTOPT ? 1 :
+                         p.strategy >= S_LAZY2 ? 2 : 3)
     return p, job, overlap
 end
 
