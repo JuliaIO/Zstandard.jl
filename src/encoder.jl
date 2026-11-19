@@ -1620,7 +1620,7 @@ const MODE_FSE = 2
 const MODE_REPEAT = 3
 
 """
-Histogram of codes[1:n] (values 0:maxcode) into counts, using four
+Histogram of the first `n` codes (values `0:maxcode`) into `counts`, using four
 interleaved tables so runs of one code do not serialize on the increments
 (as libzstd's HIST_count).
 """
