@@ -1030,6 +1030,9 @@ function decompress_frames(data::AbstractVector{UInt8}, st::DecoderState=Decoder
             elseif fi.content_size >= 0
                 ensure_capacity!(out, produced + min(Int(fi.content_size), max_expand) + WILDCOPY_SLACK)
             end
+            # Block_Maximum_Size = min(Window_Size, 128 KiB) bounds both the
+            # block content and its decoded size (RFC 8878 section 3.1.1.2.3)
+            block_max = min(BLOCK_SIZE_MAX, fi.window_size)
             while true
                 n - pos + 1 < 3 && zerr("truncated block header")
                 bh = Int(unsafe_load(p, pos)) | (Int(unsafe_load(p, pos + 1)) << 8) | (Int(unsafe_load(p, pos + 2)) << 16)
@@ -1039,22 +1042,22 @@ function decompress_frames(data::AbstractVector{UInt8}, st::DecoderState=Decoder
                 bsize = bh >> 3
                 if btype == 0
                     pos + bsize - 1 > n && zerr("truncated raw block")
-                    bsize > BLOCK_SIZE_MAX && zerr("block too large")
+                    bsize > block_max && zerr("block larger than the maximum block size")
                     ensure_capacity!(out, produced + bsize + WILDCOPY_SLACK)
                     GC.@preserve out unsafe_copyto!(pointer(out) + produced, p + pos - 1, bsize)
                     produced += bsize
                     pos += bsize
                 elseif btype == 1
                     pos > n && zerr("truncated RLE block")
-                    bsize > BLOCK_SIZE_MAX && zerr("block too large")
+                    bsize > block_max && zerr("block larger than the maximum block size")
                     ensure_capacity!(out, produced + bsize + WILDCOPY_SLACK)
                     GC.@preserve out memset!(pointer(out) + produced, unsafe_load(p, pos), bsize)
                     produced += bsize
                     pos += 1
                 elseif btype == 2
                     pos + bsize - 1 > n && zerr("truncated compressed block")
-                    bsize > BLOCK_SIZE_MAX && zerr("block too large")
-                    lim = BLOCK_SIZE_MAX
+                    bsize > block_max && zerr("block larger than the maximum block size")
+                    lim = block_max
                     if fi.content_size >= 0
                         lim = min(lim, Int(fi.content_size) - (produced - frame_start))
                         lim < 0 && zerr("frame content size exceeded")

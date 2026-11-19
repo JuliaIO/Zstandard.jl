@@ -18,7 +18,7 @@ import ..Decoder: LL_BASE, LL_BITS, ML_BASE, ML_BITS, LL_DEFAULT_NORM, ML_DEFAUL
 
 export CompressionContext, compress_frame!, compression_parameters, MIN_LEVEL, MAX_LEVEL,
        StreamCompressor, stream_write!, stream_flush!, stream_finish!, stream_pledge!,
-       PreparedDictionary, prepare_dictionary
+       PreparedDictionary, prepare_dictionary, ParameterOverrides, parameter_overrides, NO_OVERRIDES
 
 const MIN_LEVEL = -7
 const MAX_LEVEL = 22
@@ -77,17 +77,107 @@ const LEVEL_TABLE = CParams[
 ]
 
 """
-    compression_parameters(level, src_size) -> CParams
+    ParameterOverrides
+
+Explicit compression parameters replacing a level's defaults (`-1` = unset).
+Build with [`parameter_overrides`](@ref).
+"""
+struct ParameterOverrides
+    window_log::Int
+    chain_log::Int
+    hash_log::Int
+    search_log::Int
+    min_match::Int
+    target_length::Int
+    strategy::Int        # Int(Strategy) or -1
+end
+
+const NO_OVERRIDES = ParameterOverrides(-1, -1, -1, -1, -1, -1, -1)
+
+# libzstd strategy names; btlazy2 and btultra2 are not implemented and use
+# the nearest strategy here.
+const STRATEGY_NAMES = Dict(:fast => S_FAST, :dfast => S_DFAST, :greedy => S_GREEDY,
+                            :lazy => S_LAZY, :lazy2 => S_LAZY2, :btlazy2 => S_LAZY2,
+                            :btopt => S_BTOPT, :btultra => S_BTULTRA, :btultra2 => S_BTULTRA)
+
+function checked_param(name::Symbol, v, lo::Int, hi::Int)
+    v === nothing && return -1
+    v isa Integer || throw(ArgumentError("$name must be an integer"))
+    lo <= v <= hi || throw(ArgumentError("$name = $v is outside $lo:$hi"))
+    return Int(v)
+end
+
+"""
+    parameter_overrides(; window_log, hash_log, chain_log, search_log, min_match,
+                          target_length, strategy) -> ParameterOverrides
+
+Validate explicit compression parameters (each `nothing` = the level's value),
+with the meaning of libzstd's `ZSTD_c_*` parameters:
+
+- `window_log` (10-30): log2 of the maximum match distance (window size)
+- `hash_log` (6-27): log2 of the main hash table size
+- `chain_log` (6-28): log2 of the chain / secondary table size
+- `search_log` (1-26): log2 of the number of match candidates searched
+- `min_match` (3-7): minimum match length searched for (the match finders
+  use 4-7 for fast/dfast, 4-6 for greedy/lazy, 3-4 for btopt/btultra)
+- `target_length` (0-131072): for fast, a step size (acceleration); for
+  lazy, a length beyond which no better match is sought; for btopt/btultra,
+  a length taken without optimizing
+- `strategy`: `:fast`, `:dfast`, `:greedy`, `:lazy`, `:lazy2`, `:btopt`,
+  `:btultra` (libzstd's `:btlazy2` and `:btultra2` are accepted and use
+  `:lazy2` and `:btultra`)
+
+Parameters are adapted to the input size afterwards, as in libzstd (e.g.
+the window shrinks for small inputs).
+"""
+function parameter_overrides(; window_log=nothing, hash_log=nothing, chain_log=nothing,
+                             search_log=nothing, min_match=nothing, target_length=nothing,
+                             strategy=nothing)
+    st = -1
+    if strategy !== nothing
+        haskey(STRATEGY_NAMES, strategy) ||
+            throw(ArgumentError("unknown strategy $(repr(strategy)); use one of " *
+                                join(repr.(sort(collect(keys(STRATEGY_NAMES)))), ", ")))
+        st = Int(STRATEGY_NAMES[strategy])
+    end
+    ParameterOverrides(checked_param(:window_log, window_log, 10, 30),
+                       checked_param(:chain_log, chain_log, 6, 28),
+                       checked_param(:hash_log, hash_log, 6, 27),
+                       checked_param(:search_log, search_log, 1, 26),
+                       checked_param(:min_match, min_match, 3, 7),
+                       checked_param(:target_length, target_length, 0, 1 << 17), st)
+end
+
+pick(v::Int, default) = v >= 0 ? v : default
+
+apply_overrides(p::CParams, ov::ParameterOverrides) =
+    ov === NO_OVERRIDES ? p :
+    CParams(pick(ov.window_log, p.window_log), pick(ov.chain_log, p.chain_log),
+            pick(ov.hash_log, p.hash_log), pick(ov.search_log, p.search_log),
+            pick(ov.min_match, p.min_match), pick(ov.target_length, p.target_length),
+            ov.strategy >= 0 ? Strategy(ov.strategy) : p.strategy)
+
+"""Block size for parameters `p`: RFC 8878 limits blocks to
+`Block_Maximum_Size = min(Window_Size, 128 KiB)`."""
+block_size(p::CParams) = min(BLOCK_SIZE_MAX, 1 << p.window_log)
+
+"""
+    compression_parameters(level, src_size[, overrides]) -> CParams
 
 Parameters for `level`, shrunk for small inputs as the reference
 implementation does (smaller tables for small data are faster and lose
 nothing).
 """
-function compression_parameters(level::Integer, src_size::Integer)
+function compression_parameters(level::Integer, src_size::Integer,
+                                ov::ParameterOverrides=NO_OVERRIDES)
     level = clamp(level, MIN_LEVEL, MAX_LEVEL)
     level == 0 && (level = 3)
     p = level < 0 ? LEVEL_TABLE[1] : LEVEL_TABLE[level + 1]
     target = level < 0 ? -level : p.target_length
+    # explicit parameters replace the level's, then everything is adapted to
+    # the input size (as ZSTD_getCParamsFromCCtxParams + ZSTD_adjustCParams)
+    p = apply_overrides(p, ov)
+    ov.target_length >= 0 && (target = ov.target_length)
     wlog = p.window_log
     if src_size >= 0
         src_log = max(10, 64 - leading_zeros(UInt64(max(src_size - 1, 1))))
@@ -1538,11 +1628,12 @@ Compress `data` as a single Zstandard frame.
 function compress_frame!(cc::CompressionContext, data::AbstractVector{UInt8}, level::Integer;
                          checksum::Bool=false,
                          dict::Union{Nothing,ZstdDictionary,PreparedDictionary}=nothing,
-                         long::Bool=false)
+                         long::Bool=false, params::ParameterOverrides=NO_OVERRIDES)
     prepared = nothing
     if dict isa PreparedDictionary
         level = dict.level
-        prepared = (!long && use_prepared(dict, length(data), level)) ? dict : nothing
+        prepared = (!long && use_prepared(dict, length(data), level, params)) ? dict : nothing
+        params = dict.overrides
         dict = dict.dict
     end
     n = length(data)
@@ -1555,7 +1646,7 @@ function compress_frame!(cc::CompressionContext, data::AbstractVector{UInt8}, le
     else
         src = data isa Vector{UInt8} ? data : Vector{UInt8}(data)
     end
-    p = compression_parameters(level, n + dlen)
+    p = compression_parameters(level, n + dlen, params)
     if long
         # long-distance matching uses a 128 MiB window (as `zstd --long`)
         src_log = max(10, 64 - leading_zeros(UInt64(max(n + dlen - 1, 1))))
@@ -1581,12 +1672,13 @@ function compress_frame!(cc::CompressionContext, data::AbstractVector{UInt8}, le
             ldm = ldm_sequences(base, dlen + 1, dlen + n, 1 << p.window_log, mm,
                                 max(6, min(20, p.window_log - 7)))
         end
+        bmax = block_size(p)
         if n == 0
             pos = write_block_header!(out, pos, true, 0, 0)
         else
             off = dlen
             while off < dlen + n
-                bn = min(BLOCK_SIZE_MAX, dlen + n - off)
+                bn = min(bmax, dlen + n - off)
                 last = off + bn == dlen + n
                 length(out) < pos + bn + 16 && resize!(out, pos + bn + 1024)
                 pos = compress_block!(cc, out, pos, base, base + off, base + off + bn, last, ldm)
@@ -1618,8 +1710,8 @@ defaults: jobs of at least one window (min 1 MiB; four windows for the
 optimal parser, whose history is expensive to load), each loading part of the
 preceding data as history (window/8 for fast..lazy2, more for optimal parsing).
 """
-function mt_layout(n::Int, level::Integer)
-    p = compression_parameters(level, n)
+function mt_layout(n::Int, level::Integer, ov::ParameterOverrides=NO_OVERRIDES)
+    p = compression_parameters(level, n, ov)
     window = 1 << p.window_log
     job = max(1 << 20, p.strategy >= S_BTOPT ? 4window : window)
     overlap = window >> (p.strategy == S_BTULTRA ? 1 : p.strategy == S_BTOPT ? 2 : 3)
@@ -1649,8 +1741,9 @@ function compress_job!(cc::CompressionContext, p::CParams, level::Integer, data:
         hist = max(1, job_start - overlap)
         hist < job_start && load_history!(cc, base, hist, job_start)
         off = job_start - 1
+        bmax = block_size(p)
         while off < job_end
-            bn = min(BLOCK_SIZE_MAX, job_end - off)
+            bn = min(bmax, job_end - off)
             lastb = last && off + bn == job_end
             length(out) < pos + bn + 16 && resize!(out, pos + bn + 1024)
             pos = compress_block!(cc, out, pos, base, base + off, base + off + bn, lastb)
@@ -1701,18 +1794,22 @@ mutable struct StreamCompressor
     xxh::ChecksumState
     pledged::Int         # pledged content size of the current frame, -1 if unknown
     total::Int           # bytes written to the current frame
+    params::ParameterOverrides
+    bsize::Int           # block size of the current frame
 end
 
 function StreamCompressor(; level::Union{Nothing,Integer}=nothing, checksum::Bool=false,
                           dict::Union{Nothing,ZstdDictionary,PreparedDictionary}=nothing,
-                          pledged_size::Union{Nothing,Integer}=nothing)
+                          pledged_size::Union{Nothing,Integer}=nothing,
+                          params::ParameterOverrides=NO_OVERRIDES)
     if dict isa PreparedDictionary
-        use_prepared(dict, 0, level)        # checks the level
+        use_prepared(dict, 0, level, params)    # checks level and parameters
         level = dict.level
+        params = dict.overrides
     end
     level = level === nothing ? 3 : Int(level)
     sc = StreamCompressor(CompressionContext(), level, checksum, dict, UInt8[], 0, 1, 0, 0,
-                          UInt8[], 0, false, false, ChecksumState(), -1, 0)
+                          UInt8[], 0, false, false, ChecksumState(), -1, 0, params, BLOCK_SIZE_MAX)
     pledged_size === nothing || stream_pledge!(sc, pledged_size)
     return sc
 end
@@ -1745,11 +1842,12 @@ function stream_begin!(sc::StreamCompressor)
         p = pd.params
         use_prepared!(cc, pd)
     else
-        p = compression_parameters(sc.level, sc.pledged < 0 ? -1 : sc.pledged + dlen)
+        p = compression_parameters(sc.level, sc.pledged < 0 ? -1 : sc.pledged + dlen, sc.params)
         reset_context!(cc, p, sc.level)
         dict === nothing || apply_dict_entropy!(cc, dict)
     end
     window = 1 << p.window_log
+    sc.bsize = block_size(p)
     sc.gran = 1 << max(p.chain_log, 17)
     sc.cap = window + dlen + sc.gran + 2 * BLOCK_SIZE_MAX
     resize!(sc.buf, min(sc.cap, max(dlen + 2 * BLOCK_SIZE_MAX, 1 << 18)))
@@ -1835,8 +1933,8 @@ function stream_write!(sc::StreamCompressor, data::AbstractVector{UInt8})
         sc.len += k
         i += k
         # keep the last (possibly full) block pending so it can be marked last
-        while sc.len - sc.pend + 1 > BLOCK_SIZE_MAX
-            emit_block!(sc, BLOCK_SIZE_MAX, false)
+        while sc.len - sc.pend + 1 > sc.bsize
+            emit_block!(sc, sc.bsize, false)
         end
     end
     sc.checksum && checksum_update!(sc.xxh, data)

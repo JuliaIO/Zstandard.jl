@@ -15,20 +15,23 @@ mutable struct ZstandardCompressorCodec <: Codec
     level::Union{Nothing,Int}
     checksum::Bool
     dict::Union{Nothing,ZstdDictionary,Zstandard.PreparedDictionary}
+    params::Zstandard.Encoder.ParameterOverrides
     sc::StreamCompressor
     opos::Int            # next byte of sc.out to emit
 end
 
 function Zstandard.ZstandardCompressor(; level::Union{Nothing,Integer}=nothing, checksum::Bool=false,
-                                       dict::Union{Nothing,ZstdDictionary,Zstandard.PreparedDictionary}=nothing)
-    sc = StreamCompressor(; level, checksum, dict)
-    ZstandardCompressorCodec(sc.level, checksum, dict, sc, 1)
+                                       dict::Union{Nothing,ZstdDictionary,Zstandard.PreparedDictionary}=nothing,
+                                       window_log=nothing, hash_log=nothing, chain_log=nothing, search_log=nothing, min_match=nothing, target_length=nothing, strategy=nothing)
+    params = Zstandard.Encoder.parameter_overrides(; window_log, hash_log, chain_log, search_log, min_match, target_length, strategy)
+    sc = StreamCompressor(; level, checksum, dict, params)
+    ZstandardCompressorCodec(sc.level, checksum, dict, params, sc, 1)
 end
 
 Base.show(io::IO, c::ZstandardCompressorCodec) = print(io, "ZstandardCompressor(level=$(c.level))")
 
 function TranscodingStreams.startproc(c::ZstandardCompressorCodec, mode::Symbol, err::Error)
-    c.sc = StreamCompressor(; level=c.level, checksum=c.checksum, dict=c.dict)
+    c.sc = StreamCompressor(; level=c.level, checksum=c.checksum, dict=c.dict, params=c.params)
     c.opos = 1
     return :ok
 end

@@ -23,6 +23,7 @@ Read-only after creation, so it can be shared between tasks.
 struct PreparedDictionary
     dict::ZstdDictionary
     level::Int
+    overrides::ParameterOverrides
     params::CParams
     htab::Vector{Int32}
     ctab::Vector{Int32}
@@ -37,22 +38,27 @@ Base.show(io::IO, pd::PreparedDictionary) =
           " bytes of content, level ", pd.level, ")")
 
 """
-    prepare_dictionary(dict::ZstdDictionary; level=3) -> PreparedDictionary
+    prepare_dictionary(dict::ZstdDictionary; level=3, params...) -> PreparedDictionary
 
 Digest `dict` for compression at `level`. Pass the result as `dict` to
 `compress`, `ZstdCompressorStream` or `ZstandardCompressor`; it compresses
 small inputs much faster than the plain dictionary (the output is still
 decoded with the plain `ZstdDictionary`). The level is fixed: compressing with
-a different `level` throws an `ArgumentError`.
+a different `level` throws an `ArgumentError`. Explicit compression parameters
+(`window_log`, `hash_log`, ...; see [`parameter_overrides`](@ref)) are fixed
+at preparation as well.
 """
-function prepare_dictionary(dict::ZstdDictionary; level::Integer=3)
+function prepare_dictionary(dict::ZstdDictionary; level::Integer=3, kwargs...)
     level = Int(level)
+    ov = parameter_overrides(; kwargs...)
     dlen = length(dict.content)
-    p = compression_parameters(level, dlen + PREPARED_DICT_SRC_HINT)
+    p = compression_parameters(level, dlen + PREPARED_DICT_SRC_HINT, ov)
     if S_GREEDY <= p.strategy <= S_LAZY2
         # The tables are copied on every use, so keep them tight: a chain of
         # 2^window_log entries already covers every dictionary + input position.
-        p = CParams(p.window_log, min(p.chain_log, p.window_log), min(p.hash_log, p.window_log),
+        p = CParams(p.window_log,
+                    ov.chain_log >= 0 ? p.chain_log : min(p.chain_log, p.window_log),
+                    ov.hash_log >= 0 ? p.hash_log : min(p.hash_log, p.window_log),
                     p.search_log, p.min_match, p.target_length, p.strategy)
     end
     cc = CompressionContext()
@@ -87,7 +93,7 @@ function prepare_dictionary(dict::ZstdDictionary; level::Integer=3)
     tables = (FSECTable(), FSECTable(), FSECTable())
     copy_ctable!(tables[1], cc.ll_prev); copy_ctable!(tables[2], cc.ml_prev); copy_ctable!(tables[3], cc.of_prev)
     huf = HufCTable(cc.huf_prev.maxsym, cc.huf_prev.tl, copy(cc.huf_prev.nbits), copy(cc.huf_prev.code))
-    return PreparedDictionary(dict, level, p, copy(cc.htab), copy(cc.ctab), cc.next_to_update,
+    return PreparedDictionary(dict, level, ov, p, copy(cc.htab), copy(cc.ctab), cc.next_to_update,
                               tables..., huf, cc.huf_prev_ok)
 end
 
@@ -117,8 +123,10 @@ end
 
 """Whether `pd`'s tables should be used for an input of `n` bytes at `level`
 (dictionary + input fit the prepared window); otherwise its dictionary is loaded normally."""
-function use_prepared(pd::PreparedDictionary, n::Integer, level)
+function use_prepared(pd::PreparedDictionary, n::Integer, level, ov::ParameterOverrides=NO_OVERRIDES)
     level === nothing || level == pd.level ||
         throw(ArgumentError("dictionary was prepared for level $(pd.level), not level $level"))
+    ov === NO_OVERRIDES || ov == pd.overrides ||
+        throw(ArgumentError("compression parameters are fixed by the prepared dictionary"))
     return 0 <= n && n + length(pd.dict.content) <= 1 << pd.params.window_log
 end

@@ -5,7 +5,8 @@ module Streaming
 import ..Decoder: DecoderState, ZstdDictionary, FrameInfo, read_frame_info, reset_frame!,
                   decode_compressed_block!, memset!, zerr, ensure_capacity!,
                   MAGIC_NUMBER, SKIPPABLE_MAGIC_START, SKIPPABLE_MASK, BLOCK_SIZE_MAX, WILDCOPY_SLACK
-import ..Encoder: StreamCompressor, stream_write!, stream_flush!, stream_finish!, PreparedDictionary
+import ..Encoder: StreamCompressor, stream_write!, stream_flush!, stream_finish!, PreparedDictionary,
+                  parameter_overrides
 using ..XXHash: ChecksumState, checksum_update!, checksum_digest
 
 export ZstdDecompressorStream, ZstdCompressorStream, StreamDecoder
@@ -150,7 +151,7 @@ end
 
 function decode_body!(d::StreamDecoder)
     bsize = d.want
-    lim = BLOCK_SIZE_MAX
+    lim = min(BLOCK_SIZE_MAX, d.fi.window_size)     # Block_Maximum_Size
     if d.btype == 2 && d.fi.content_size >= 0
         lim = min(lim, Int(d.fi.content_size) - d.frame_produced)
         lim < 0 && zerr("frame content size exceeded")
@@ -229,7 +230,7 @@ function process_unit!(d::StreamDecoder)
         d.btype = (bh >> 1) & 3
         bsize = bh >> 3
         d.btype == 3 && zerr("reserved block type")
-        bsize > BLOCK_SIZE_MAX && zerr("block too large")
+        bsize > min(BLOCK_SIZE_MAX, d.fi.window_size) && zerr("block larger than the maximum block size")
         if d.btype == 1
             d.skip_left = bsize
             set_unit!(d, U_BODY, 1)
@@ -403,6 +404,10 @@ Without `pledged_size` the frame header does not record the content size. With
 `frame_content_size` reports it), the compression parameters are sized to `n`
 as in one-shot `compress`, and exactly `n` bytes must be written: writing more
 throws an `ArgumentError`, and so does `close` after writing fewer.
+
+`window_log`, `hash_log`, `chain_log`, `search_log`, `min_match`,
+`target_length` and `strategy` override the level's parameters, as for
+`compress`.
 `close` finishes the frame and, if `close_io` is true, closes `io` (pass
 `close_io=false` to keep writing to `io`, e.g. an `IOBuffer` read afterwards).
 """
@@ -415,8 +420,10 @@ end
 
 function ZstdCompressorStream(io::IO; level::Union{Nothing,Integer}=nothing, checksum::Bool=false,
                               dict::Union{Nothing,ZstdDictionary,PreparedDictionary}=nothing,
-                              pledged_size::Union{Nothing,Integer}=nothing, close_io::Bool=true)
-    ZstdCompressorStream(io, StreamCompressor(; level, checksum, dict, pledged_size), false, close_io)
+                              pledged_size::Union{Nothing,Integer}=nothing, close_io::Bool=true,
+                              window_log=nothing, hash_log=nothing, chain_log=nothing, search_log=nothing, min_match=nothing, target_length=nothing, strategy=nothing)
+    params = parameter_overrides(; window_log, hash_log, chain_log, search_log, min_match, target_length, strategy)
+    ZstdCompressorStream(io, StreamCompressor(; level, checksum, dict, pledged_size, params), false, close_io)
 end
 
 function drain!(s::ZstdCompressorStream)

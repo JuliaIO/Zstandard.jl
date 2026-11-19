@@ -69,6 +69,9 @@ compressed = compress(message; dict=pdict)      # decompress with `dict` as usua
 dict_bytes = train_dictionary(samples; dict_size=16384)
 dict = parse_dictionary(dict_bytes)
 
+# Explicit parameters override the level's (as libzstd's ZSTD_c_* parameters)
+compressed = compress(data; level=19, window_log=24, strategy=:btultra)
+
 # Long-distance matching and multithreading (start Julia with `-t N`)
 compressed = compress(big_data; level=9, long=true)
 compressed = compress(big_data; level=3, nthreads=Threads.nthreads())

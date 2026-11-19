@@ -364,3 +364,91 @@ end
         @test length(read(ZDS(IOBuffer(c)))) > 0
     end
 end
+
+@testset "Advanced compression parameters" begin
+    E = Zstandard.Encoder
+    # explicit values replace the level's, then adapt to the input size
+    p = E.compression_parameters(3, 10^8, E.parameter_overrides(window_log=24, hash_log=20, chain_log=19,
+                                                               search_log=5, min_match=6, target_length=64,
+                                                               strategy=:lazy2))
+    @test (p.window_log, p.hash_log, p.chain_log, p.search_log, p.min_match, p.target_length, p.strategy) ==
+          (24, 20, 19, 5, 6, 64, E.S_LAZY2)
+    @test E.compression_parameters(3, 5000, E.parameter_overrides(window_log=24)).window_log == 13
+    @test E.compression_parameters(19, 10^8, E.parameter_overrides(strategy=:btultra2)).strategy == E.S_BTULTRA
+
+    # window_log: a repeat 3 MB back is only found with a larger window
+    a = make_text(1_000_000)
+    filler = UInt8[UInt8((i * 2654435761 >> 13) % 251) for i in 1:2_000_000]
+    data = vcat(a, filler, a)
+    c_default = compress(data; level=3)
+    c_wide = compress(data; level=3, window_log=23)
+    @test frame_header(c_default).window_size == 1 << 21
+    @test frame_header(c_wide).single_segment          # 4 MB fits the 8 MiB window
+    @test frame_header(c_wide).window_size == length(data)
+    @test length(c_wide) < length(c_default) - length(compress(a; level=3)) ÷ 2
+    @test decompress(c_wide) == data
+    @test transcode(CodecZstd.ZstdDecompressor, c_wide) == data
+
+    # strategy changes the parser at a fixed level
+    text = make_text(400_000)
+    sizes = Dict(st => length(compress(text; level=5, strategy=st)) for st in (:fast, :dfast, :greedy, :lazy2, :btultra))
+    @test sizes[:btultra] < sizes[:lazy2] < sizes[:fast]
+    @test length(unique(values(sizes))) == 5
+
+    # a grid of parameter combinations decodes with both decoders
+    x = UInt64(5)
+    nxt(r) = (x = x * 6364136223846793005 + 1442695040888963407; r[(x >> 33) % length(r) + 1])
+    for trial in 1:40
+        kw = (window_log=nxt(12:22), hash_log=nxt(8:20), chain_log=nxt(8:20), search_log=nxt(1:7),
+              min_match=nxt(3:7), target_length=nxt([0, 8, 64, 999]),
+              strategy=nxt([:fast, :dfast, :greedy, :lazy, :lazy2, :btlazy2, :btopt, :btultra, :btultra2]))
+        d = text[1:nxt([1000, 50_000, 400_000])]
+        c = compress(d; level=nxt(1:19), kw...)
+        @test decompress(c) == d
+        @test transcode(CodecZstd.ZstdDecompressor, c) == d
+    end
+
+    # streams and the codec take the same parameters (pledged = identical bytes)
+    kw = (level=7, window_log=18, search_log=3, strategy=:greedy)
+    buf = IOBuffer()
+    s = ZCS(buf; pledged_size=length(text), close_io=false, kw...)
+    write(s, text); close(s)
+    @test take!(buf) == compress(text; kw...)
+    @test transcode(ZstandardCompressor(; kw...), text) == compress(text; kw...)
+    # multithreaded compression
+    c = compress(data; nthreads=2, level=3, window_log=20)
+    @test frame_header(c).window_size == 1 << 20
+    @test decompress(c) == data
+
+    # prepared dictionaries fix their parameters
+    dict = ZstdDictionary(text[1:20_000])
+    pd = prepare_dictionary(dict; level=3, window_log=19)
+    @test pd.params.window_log <= 19
+    msg = text[30_001:31_500]
+    @test compress(msg; dict=pd) == compress(msg; dict=pd, window_log=19)
+    @test_throws ArgumentError compress(msg; dict=pd, window_log=20)
+    @test decompress(compress(msg; dict=pd), dict) == msg
+
+    # Block_Maximum_Size = min(window, 128 KiB): small windows mean small blocks
+    for wlog in (10, 12, 16)
+        c = compress(text; level=3, window_log=wlog)
+        @test !frame_header(c).single_segment && frame_header(c).window_size == 1 << wlog
+        @test transcode(CodecZstd.ZstdDecompressor, c) == text
+        b = IOBuffer(); s = ZCS(b; window_log=wlog, close_io=false); write(s, text); close(s)
+        @test transcode(CodecZstd.ZstdDecompressor, take!(b)) == text
+    end
+    # ... and decoders reject a block larger than the window
+    bad = vcat(UInt8[0x28, 0xb5, 0x2f, 0xfd, 0x00, 0x00],          # magic, FHD, 1 KiB window
+               reinterpret(UInt8, [htol(UInt32(1 | (0 << 1) | (2000 << 3)))])[1:3],  # last raw block, 2000 B
+               fill(0x61, 2000))
+    @test_throws ZstdError decompress(bad)
+    @test_throws ZstdError read(ZDS(IOBuffer(bad)))
+    @test_throws Exception transcode(CodecZstd.ZstdDecompressor, bad)   # libzstd agrees
+
+    # validation
+    @test_throws ArgumentError compress(text; window_log=9)
+    @test_throws ArgumentError compress(text; hash_log=40)
+    @test_throws ArgumentError compress(text; min_match=2)
+    @test_throws ArgumentError compress(text; strategy=:bogus)
+    @test_throws ArgumentError compress(text; search_log=1.5)
+end

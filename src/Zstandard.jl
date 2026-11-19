@@ -29,11 +29,12 @@ include("streaming.jl")
 using .Streaming: ZstdDecompressorStream, ZstdCompressorStream
 
 """
-    ZstandardCompressor(; level=3, checksum=false, dict=nothing)
+    ZstandardCompressor(; level=3, checksum=false, dict=nothing, window_log=nothing, ...)
 
 A [TranscodingStreams.jl](https://github.com/JuliaIO/TranscodingStreams.jl) codec
 compressing to the Zstandard format, for use with `transcode`,
 `TranscodingStream`, etc. Available once `TranscodingStreams` is loaded.
+Accepts the parameter keywords of [`compress`](@ref) (`window_log`, ...).
 
 ```julia
 using Zstandard, TranscodingStreams
@@ -102,9 +103,10 @@ end
 const MAX_FRAME_INPUT = 1 << 30
 
 # Compress one frame with jobs spread over up to `nthreads` tasks.
-function _compress_mt(data::Vector{UInt8}, level::Integer, checksum::Bool, nthreads::Int)
+function _compress_mt(data::Vector{UInt8}, level::Integer, checksum::Bool, nthreads::Int,
+                      params=Encoder.NO_OVERRIDES)
     n = length(data)
-    p, job, overlap = mt_layout(n, level)
+    p, job, overlap = mt_layout(n, level, params)
     njobs = cld(n, job)
     sem = Base.Semaphore(nthreads)
     tasks = map(1:njobs) do j
@@ -128,7 +130,9 @@ function _compress_mt(data::Vector{UInt8}, level::Integer, checksum::Bool, nthre
 end
 
 """
-    compress(data; level=3, checksum=false, dict=nothing, nthreads=1, long=false) -> Vector{UInt8}
+    compress(data; level=3, checksum=false, dict=nothing, nthreads=1, long=false,
+             window_log, hash_log, chain_log, search_log, min_match, target_length, strategy)
+        -> Vector{UInt8}
 
 Compress `data` (a byte vector or string) into a Zstandard frame.
 
@@ -142,6 +146,11 @@ inputs with one dictionary, pass a [`PreparedDictionary`](@ref) from
 used (a conflicting `level` throws an `ArgumentError`). Inputs larger than
 1 GiB are written as several concatenated frames.
 
+The remaining keywords override individual parameters of the level, with the
+meaning of libzstd's advanced parameters (`ZSTD_c_windowLog` etc.); see
+[`Zstandard.Encoder.parameter_overrides`](@ref). For example,
+`compress(data; level=19, window_log=24)` searches matches up to 16 MiB back.
+
 With `nthreads > 1`, inputs larger than a few window sizes are split into
 jobs compressed in parallel tasks (within a single frame, as libzstd's
 `nbWorkers`); start Julia with several threads (`julia -t N`) to benefit.
@@ -154,27 +163,30 @@ which decoders must be willing to allocate.
 """
 function compress(data::AbstractVector{UInt8}; level::Union{Nothing,Integer}=nothing,
                   checksum::Bool=false, dict::Union{Nothing,ZstdDictionary,PreparedDictionary}=nothing,
-                  nthreads::Integer=1, long::Bool=false)
+                  nthreads::Integer=1, long::Bool=false,
+                  window_log=nothing, hash_log=nothing, chain_log=nothing, search_log=nothing, min_match=nothing, target_length=nothing, strategy=nothing)
     nthreads < 1 && throw(ArgumentError("nthreads must be at least 1"))
+    params = Encoder.parameter_overrides(; window_log, hash_log, chain_log, search_log, min_match, target_length, strategy)
     if dict isa PreparedDictionary
-        Encoder.use_prepared(dict, 0, level)     # checks the level
+        Encoder.use_prepared(dict, 0, level, params)     # checks level and parameters
         level = dict.level
     end
     level = level === nothing ? 3 : Int(level)
     if nthreads > 1 && dict === nothing && !long && length(data) <= MAX_FRAME_INPUT
-        _, job, _ = mt_layout(length(data), level)
+        _, job, _ = mt_layout(length(data), level, params)
         if length(data) > job
-            return _compress_mt(data isa Vector{UInt8} ? data : Vector{UInt8}(data), level, checksum, Int(nthreads))
+            return _compress_mt(data isa Vector{UInt8} ? data : Vector{UInt8}(data), level, checksum,
+                                Int(nthreads), params)
         end
     end
     _with_cctx() do cc
         if length(data) <= MAX_FRAME_INPUT
-            return compress_frame!(cc, data, level; checksum, dict, long)
+            return compress_frame!(cc, data, level; checksum, dict, long, params)
         end
         out = UInt8[]
         for off in 0:MAX_FRAME_INPUT:length(data)-1
             chunk = view(data, off+1:min(off + MAX_FRAME_INPUT, length(data)))
-            append!(out, compress_frame!(cc, chunk, level; checksum, dict, long))
+            append!(out, compress_frame!(cc, chunk, level; checksum, dict, long, params))
         end
         return out
     end
