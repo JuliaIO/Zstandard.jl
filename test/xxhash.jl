@@ -66,6 +66,54 @@ end
     @test XX.digest!(st) == XX.xxh64("hello world, this message is longer than one stripe", UInt64(7))
 end
 
+# A minimal AbstractVector with offset indices (exercises the in-place
+# indexed path with firstindex != 1), as in XXHashNative.jl's tests.
+struct OffsetBytes <: AbstractVector{UInt8}
+    data::Vector{UInt8}
+end
+Base.size(v::OffsetBytes) = size(v.data)
+Base.axes(v::OffsetBytes) = (0:length(v.data)-1,)
+Base.getindex(v::OffsetBytes, i::Int) = v.data[i + 1]
+Base.IndexStyle(::Type{OffsetBytes}) = IndexLinear()
+
+@testset "XXH64 non-contiguous input (read in place)" begin
+    for n in vcat(0:130, [255, 256, 257, 1000, 4096, 10_007])
+        x = pattern(n)
+        ref = XX.xxh64(x)
+        seed = UInt64(n) * 0x9E3779B97F4A7C15
+        for v in (OffsetBytes(x), view(x, 1:1:n))
+            @test XX.xxh64(v) == ref
+            @test XX.xxh64(v, seed) == XX.xxh64(x, seed)
+        end
+        @test XX.xxh64(view(x, n:-1:1)) == XX.xxh64(reverse(x))
+        @test XX.xxh64(view(x, 1:2:n)) == XX.xxh64(x[1:2:n])
+        # streaming with uneven pieces of a non-contiguous input
+        for step in (1, 7, 31, 32, 33, 100)
+            st = XX.XXH64State()
+            i = 0
+            while i < n
+                k = min(step, n - i)
+                XX.update!(st, OffsetBytes(x[i+1:i+k]))
+                i += k
+            end
+            @test XX.digest!(st) == ref
+        end
+    end
+    # the checksum helpers feed non-contiguous input to any implementation in chunks
+    x = pattern(20_000)
+    strided = view(x, 1:3:20_000)
+    for (name, impl) in XXH64_IMPLEMENTATIONS
+        Zstandard.with_xxh64_implementation(impl) do
+            @test XX.content_checksum(strided) == XX.xxh64(x[1:3:20_000]) % UInt32
+            @test XX.content_checksum(OffsetBytes(x)) == XX.xxh64(x) % UInt32
+            c = XX.ChecksumState()
+            XX.checksum_update!(c, view(x, 1:2:9_999))
+            XX.checksum_update!(c, OffsetBytes(x[10_000:end]))
+            @test XX.checksum_digest(c) == XX.xxh64(vcat(x[1:2:9_999], x[10_000:end])) % UInt32
+        end
+    end
+end
+
 @testset "XXH64 implementations agree" begin
     ref = LibXXH64()
     others = [(name, impl) for (name, impl) in XXH64_IMPLEMENTATIONS if !(impl isa LibXXH64)]
