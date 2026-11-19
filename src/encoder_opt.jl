@@ -396,8 +396,12 @@ end
             ml > match_end - midx && (match_end = midx + ml)
             best = ml
             nm += 1; mlens[nm] = ml; moffs[nm] = cur - midx
-            (ml > OPT_NUM || ip + ml == iend || nm == length(mlens)) && break
+            (ml > OPT_NUM || nm == length(mlens)) && break
         end
+        # Stop at the end of the block whether or not this match is a new best:
+        # ordering it by the byte past the end would break the tree (libzstd
+        # never gets here, as it returns once a repcode reaches the end).
+        ip + ml == iend && break
         if unsafe_load(m + ml) < unsafe_load(ip + ml)
             unsafe_store!(bt, midx % Int32, sm)
             cls = ml

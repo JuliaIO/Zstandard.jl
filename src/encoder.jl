@@ -669,6 +669,7 @@ function parse_lazy!(::Val{BT}, ss::SeqStore, htab::Vector{Int32}, hlog::Int, ct
 end
 
 include("encoder_opt.jl")
+include("presplit.jl")
 
 # ---------------------------------------------------------------------------
 # Backward bit writer (BIT_CStream)
@@ -1126,6 +1127,10 @@ mutable struct CompressionContext
     blk::Vector{UInt8}
     tmp::Vector{UInt8}
     opt::OptState
+    savings::Int              # input minus output bytes so far in the frame (block splitting)
+    fp_past::Vector{Int}      # block-splitter fingerprints
+    fp_new::Vector{Int}
+    fp_mid::Vector{Int}
 end
 
 function default_ctable(norm, al, tabsym, cumul)
@@ -1148,7 +1153,8 @@ function CompressionContext()
         HufCTable(), HufCTable(), false,
         zeros(UInt8, 256), zeros(Int, 256), zeros(Int, 512), zeros(Int, 512),
         zeros(Int16, 16), FSECTable(), zeros(Int, 16), zeros(UInt8, 256),
-        zeros(UInt8, 1024), zeros(UInt8, 1024), OptState())
+        zeros(UInt8, 1024), zeros(UInt8, 1024), OptState(), 0, zeros(Int, 1024), zeros(Int, 1024),
+        zeros(Int, 256))
 end
 
 function reset_context!(cc::CompressionContext, p::CParams, level::Int; clear::Bool=true)
@@ -1168,6 +1174,7 @@ function reset_context!(cc::CompressionContext, p::CParams, level::Int; clear::B
     cc.ll_prev_ok = cc.ml_prev_ok = cc.of_prev_ok = false
     cc.huf_prev_ok = false
     cc.opt.have_stats = false
+    cc.savings = 0
     return cc
 end
 
@@ -1655,6 +1662,14 @@ end
 function compress_block!(cc::CompressionContext, out::Vector{UInt8}, pos::Int, base::Ptr{UInt8},
                          bstart::Ptr{UInt8}, bend::Ptr{UInt8}, last::Bool,
                          ldm::Union{Nothing,LdmCursor}=nothing)
+    newpos = compress_block_body!(cc, out, pos, base, bstart, bend, last, ldm)
+    cc.savings += Int(bend - bstart) - (newpos - pos)
+    return newpos
+end
+
+function compress_block_body!(cc::CompressionContext, out::Vector{UInt8}, pos::Int, base::Ptr{UInt8},
+                              bstart::Ptr{UInt8}, bend::Ptr{UInt8}, last::Bool,
+                              ldm::Union{Nothing,LdmCursor})
     n = Int(bend - bstart)
     # RLE block
     if n > 0
@@ -1798,7 +1813,7 @@ function compress_frame!(cc::CompressionContext, data::AbstractVector{UInt8}, le
         else
             off = dlen
             while off < dlen + n
-                bn = min(bmax, dlen + n - off)
+                bn = next_block_size(cc, base + off, dlen + n - off, bmax)
                 last = off + bn == dlen + n
                 length(out) < pos + bn + 16 && resize!(out, pos + bn + 1024)
                 pos = compress_block!(cc, out, pos, base, base + off, base + off + bn, last, ldm)
@@ -1865,7 +1880,7 @@ function compress_job!(cc::CompressionContext, p::CParams, level::Integer, data:
         off = job_start - 1
         bmax = block_size(p)
         while off < job_end
-            bn = min(bmax, job_end - off)
+            bn = next_block_size(cc, base + off, job_end - off, bmax)
             lastb = last && off + bn == job_end
             length(out) < pos + bn + 16 && resize!(out, pos + bn + 1024)
             pos = compress_block!(cc, out, pos, base, base + off, base + off + bn, lastb)
@@ -1993,10 +2008,20 @@ end
 # Shift tables and buffer down by `d` bytes (a multiple of sc.gran).
 function rebase!(sc::StreamCompressor, d::Int)
     cc = sc.cc
+    dubt = cc.params.strategy == S_BTLAZY2
     for t in (is_row(cc.params) ? (cc.htab,) : (cc.htab, cc.ctab))   # row tags are not positions
+        marks = dubt && t === cc.ctab
         @inbounds for i in eachindex(t)
-            v = Int(t[i]) - d
-            t[i] = v < 1 ? Int32(0) : v % Int32
+            if marks && iseven(i)
+                # DUBT: keep the "unsorted" marks (second slot of each pair), and
+                # never turn a shifted position into one
+                t[i] == DUBT_UNSORTED && continue
+                v = Int(t[i]) - d
+                t[i] = v <= 1 ? Int32(0) : v % Int32
+            else
+                v = Int(t[i]) - d
+                t[i] = v < 1 ? Int32(0) : v % Int32
+            end
         end
     end
     cc.next_to_update = max(1, cc.next_to_update - d)
@@ -2020,6 +2045,12 @@ function make_input_room!(sc::StreamCompressor, n::Int)
     end
     sc.len + n > length(sc.buf) && resize!(sc.buf, sc.len + n)
     return sc
+end
+
+function stream_block_size(sc::StreamCompressor, pending::Int)
+    GC.@preserve sc begin
+        return next_block_size(sc.cc, pointer(sc.buf, sc.pend), pending, sc.bsize)
+    end
 end
 
 function emit_block!(sc::StreamCompressor, bn::Int, last::Bool)
@@ -2056,7 +2087,7 @@ function stream_write!(sc::StreamCompressor, data::AbstractVector{UInt8})
         i += k
         # keep the last (possibly full) block pending so it can be marked last
         while sc.len - sc.pend + 1 > sc.bsize
-            emit_block!(sc, sc.bsize, false)
+            emit_block!(sc, stream_block_size(sc, sc.len - sc.pend + 1), false)
         end
     end
     sc.checksum && checksum_update!(sc.xxh, data)
@@ -2066,8 +2097,10 @@ end
 """Compress all pending input into a non-final block, so that it can be decoded."""
 function stream_flush!(sc::StreamCompressor)
     sc.started || stream_begin!(sc)
-    n = sc.len - sc.pend + 1
-    n > 0 && !sc.finished && emit_block!(sc, n, false)
+    sc.finished && return sc
+    while (n = sc.len - sc.pend + 1) > 0
+        emit_block!(sc, stream_block_size(sc, n), false)
+    end
     return sc
 end
 
@@ -2080,7 +2113,11 @@ function stream_finish!(sc::StreamCompressor)
     end
     n = sc.len - sc.pend + 1
     if n > 0
-        emit_block!(sc, n, true)
+        while n > 0
+            bn = stream_block_size(sc, n)
+            emit_block!(sc, bn, bn == n)
+            n -= bn
+        end
     else
         out_reserve!(sc, 3)
         sc.olen = write_block_header!(sc.out, sc.olen + 1, true, 0, 0) - 1

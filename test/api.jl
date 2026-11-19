@@ -455,3 +455,64 @@ end
     @test_throws ArgumentError compress(text; strategy=:bogus)
     @test_throws ArgumentError compress(text; search_log=1.5)
 end
+
+# Block sizes in a frame (walks block headers).
+function frame_block_sizes(c)
+    h = frame_header(c)
+    pos = h.header_size + 1
+    sizes = Int[]
+    while true
+        b = Int(c[pos]) | Int(c[pos+1]) << 8 | Int(c[pos+2]) << 16
+        typ = (b >> 1) & 3; sz = b >> 3
+        push!(sizes, sz)                          # for RLE blocks: the decoded size
+        pos += 3 + (typ == 1 ? 1 : sz)
+        b & 1 == 1 && break
+    end
+    return sizes
+end
+
+@testset "Block splitting" begin
+    # data that changes character every 24 KiB: text, pseudo-random bytes, small integers
+    seg(i, n) = i % 3 == 0 ? make_text(n) : i % 3 == 1 ?
+        UInt8[UInt8((k * 2654435761 + i) >> 11 & 0xff) for k in 1:n] : UInt8[UInt8(k % 7) for k in 1:n]
+    data = reduce(vcat, [seg(i, 24 << 10)[1:24<<10] for i in 0:40])
+    for level in (-1, 1, 3, 5, 6, 9, 13, 16, 18, 19)
+        c = compress(data; level)
+        @test decompress(c) == data
+        @test transcode(CodecZstd.ZstdDecompressor, c) == data
+        level >= 3 && @test length(frame_block_sizes(c)) > cld(length(data), 128 << 10)   # some blocks were split
+        # streaming, with a small window so the stream buffer is rebased many times
+        for (w, chunk) in ((nothing, 100_003), (17, 30_001))
+            buf = IOBuffer()
+            s = Zstandard.ZstdCompressorStream(buf; level, close_io=false, window_log=w)
+            for part in Iterators.partition(data, chunk); write(s, part); end
+            close(s)
+            sc = take!(buf)
+            @test transcode(CodecZstd.ZstdDecompressor, sc) == data
+        end
+    end
+    # Real machine code: slices of libjulia-internal that exposed two bugs with
+    # split blocks (a binary-tree candidate ordered by the byte past the block
+    # end, at level 17; btlazy2 "unsorted" marks lost when the stream buffer is
+    # rebased, at level 13). The bytes differ between Julia versions; the test
+    # only needs varied real-world input.
+    libdir = joinpath(Sys.BINDIR, Base.LIBDIR, "julia")
+    libs = filter(f -> startswith(f, "libjulia-internal") && !islink(joinpath(libdir, f)), readdir(libdir))
+    if !isempty(libs)
+        lib = read(joinpath(libdir, first(libs)))
+        for frac in (0.151, 0.189, 0.529, 0.567)
+            off = (round(Int, frac * length(lib)) >> 19) << 19
+            x = lib[off+1:min(end, off + (1 << 20))]
+            @test decompress(compress(x; level=17)) == x
+            buf = IOBuffer()
+            s = Zstandard.ZstdCompressorStream(buf; level=13, close_io=false, window_log=17)
+            for part in Iterators.partition(x, 50_001); write(s, part); end
+            close(s)
+            @test decompress(take!(buf)) == x
+        end
+    end
+    # incompressible data is not split (it never saves 3 bytes)
+    x = UInt64(1)
+    rr = UInt8[(x ⊻= x << 13; x ⊻= x >> 7; x ⊻= x << 17; x % UInt8) for _ in 1:600_000]
+    @test all(==(128 << 10), frame_block_sizes(compress(rr; level=19))[1:end-1])
+end
