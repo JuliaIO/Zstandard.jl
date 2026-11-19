@@ -3,7 +3,7 @@
 
 """
     ZstdCompressionContext(; level=3, checksum=false, dict=nothing, long=false,
-                           content_size=true, dict_id=true, magicless=false,
+                           content_size=true, dict_id=true, magicless=false, prefix=nothing,
                            window_log, hash_log, chain_log, search_log, min_match,
                            target_length, strategy)
 
@@ -33,12 +33,14 @@ mutable struct ZstdCompressionContext
     long::Bool
     params::Encoder.ParameterOverrides
     frame::Encoder.FrameOptions
+    prefix::Union{Nothing,Vector{UInt8}}
 end
 
 function ZstdCompressionContext(; level::Union{Nothing,Integer}=nothing, checksum::Bool=false,
                                 dict::Union{Nothing,ZstdDictionary,PreparedDictionary}=nothing,
                                 long::Bool=false, content_size::Bool=true, dict_id::Bool=true,
-                                magicless::Bool=false, window_log=nothing, hash_log=nothing,
+                                magicless::Bool=false, prefix::Union{Nothing,AbstractVector{UInt8}}=nothing,
+                                window_log=nothing, hash_log=nothing,
                                 chain_log=nothing, search_log=nothing, min_match=nothing,
                                 target_length=nothing, strategy=nothing)
     params = Encoder.parameter_overrides(; window_log, hash_log, chain_log, search_log, min_match,
@@ -48,8 +50,10 @@ function ZstdCompressionContext(; level::Union{Nothing,Integer}=nothing, checksu
         level = dict.level
     end
     level = level === nothing ? 3 : Int(level)
+    dict = Encoder.prefix_dict(prefix, dict)
     return ZstdCompressionContext(CompressionContext(), level, checksum, dict, long, params,
-                                  Encoder.FrameOptions(; content_size, dict_id, magicless))
+                                  Encoder.FrameOptions(; content_size, dict_id, magicless),
+                                  prefix === nothing ? nothing : Vector{UInt8}(prefix))
 end
 
 function Base.show(io::IO, ctx::ZstdCompressionContext)
@@ -78,21 +82,22 @@ function compress!(ctx::ZstdCompressionContext, out::Vector{UInt8},
                    data::Union{AbstractVector{UInt8},AbstractString})
     src = _bytes(data)
     out === src && throw(ArgumentError("out must not be the input"))
+    params = Encoder.prefix_params(ctx.params, ctx.prefix, ctx.level, min(length(src), MAX_FRAME_INPUT))
     if length(src) <= MAX_FRAME_INPUT
         return compress_frame!(ctx.cc, src, ctx.level; checksum=ctx.checksum, dict=ctx.dict,
-                               long=ctx.long, params=ctx.params, dest=out, frame=ctx.frame)
+                               long=ctx.long, params, dest=out, frame=ctx.frame)
     end
     empty!(out)
     for off in 0:MAX_FRAME_INPUT:length(src)-1
         chunk = view(src, off+1:min(off + MAX_FRAME_INPUT, length(src)))
         append!(out, compress_frame!(ctx.cc, chunk, ctx.level; checksum=ctx.checksum, dict=ctx.dict,
-                                     long=ctx.long, params=ctx.params, frame=ctx.frame))
+                                     long=ctx.long, params, frame=ctx.frame))
     end
     return out
 end
 
 """
-    ZstdDecompressionContext(; dict=nothing, magicless=false)
+    ZstdDecompressionContext(; dict=nothing, magicless=false, prefix=nothing)
 
 A decompression context reused across calls (as a libzstd `ZSTD_DCtx`): its
 decoding tables persist. Use it with `decompress(ctx, data)`, or
@@ -107,8 +112,9 @@ mutable struct ZstdDecompressionContext
     dict::Union{Nothing,ZstdDictionary}
     magicless::Bool
 end
-ZstdDecompressionContext(; dict::Union{Nothing,ZstdDictionary}=nothing, magicless::Bool=false) =
-    ZstdDecompressionContext(DecoderState(), dict, magicless)
+ZstdDecompressionContext(; dict::Union{Nothing,ZstdDictionary}=nothing, magicless::Bool=false,
+                         prefix::Union{Nothing,AbstractVector{UInt8}}=nothing) =
+    ZstdDecompressionContext(DecoderState(), Encoder.prefix_dict(prefix, dict), magicless)
 
 Base.show(io::IO, ctx::ZstdDecompressionContext) =
     print(io, "ZstdDecompressionContext(", ctx.dict === nothing ? "" : "dict", ")")

@@ -6,6 +6,7 @@ import ..Decoder: DecoderState, ZstdDictionary, FrameInfo, read_frame_info, rese
                   decode_compressed_block!, memset!, zerr, ensure_capacity!,
                   MAGIC_NUMBER, SKIPPABLE_MAGIC_START, SKIPPABLE_MASK, BLOCK_SIZE_MAX, WILDCOPY_SLACK
 import ..Encoder: StreamCompressor, stream_write!, stream_flush!, stream_finish!, PreparedDictionary, FrameOptions,
+                  prefix_dict, prefix_params,
                   parameter_overrides
 using ..XXHash: ChecksumState, checksum_update!, checksum_digest
 
@@ -316,8 +317,9 @@ frame's window size plus one block. Frames declaring a window larger than
 `max_window_size` (default 128 MiB, as libzstd) are rejected with a
 `ZstdError`, so untrusted input cannot make the decoder allocate more; raise
 it to read frames written with a larger window (e.g. `zstd --long=30`).
-With `magicless=true`, frames are read without their magic number (see
-[`compress`](@ref Zstandard.compress)); skippable frames cannot occur then.
+With `magicless=true`, frames are read without their magic number, and
+`prefix` decodes frames written with that reference prefix (see
+[`compress`](@ref Zstandard.compress)).
 """
 mutable struct ZstdDecompressorStream <: IO
     io::IO
@@ -325,8 +327,9 @@ mutable struct ZstdDecompressorStream <: IO
 end
 
 ZstdDecompressorStream(io::IO, dict::Union{Nothing,ZstdDictionary}=nothing;
-                       max_window_size::Integer=DEFAULT_MAX_WINDOW_SIZE, magicless::Bool=false) =
-    ZstdDecompressorStream(io, StreamDecoder(dict; max_window_size, magicless))
+                       max_window_size::Integer=DEFAULT_MAX_WINDOW_SIZE, magicless::Bool=false,
+                       prefix::Union{Nothing,AbstractVector{UInt8}}=nothing) =
+    ZstdDecompressorStream(io, StreamDecoder(prefix_dict(prefix, dict); max_window_size, magicless))
 
 # Decode until at least one unread byte is available. Returns false at end of input.
 function fill_buffer!(s::ZstdDecompressorStream)
@@ -418,9 +421,10 @@ Without a pledge, `size_hint = n` sizes the parameters for about `n` bytes
 input.
 
 `window_log`, `hash_log`, `chain_log`, `search_log`, `min_match`,
-`target_length` and `strategy` override the level's parameters, and
-`content_size`, `dict_id` and `magicless` set frame header options, as for
-`compress`.
+`target_length` and `strategy` override the level's parameters,
+`content_size`, `dict_id` and `magicless` set frame header options, and
+`prefix` sets a reference prefix, as for `compress` (the window is sized for
+the prefix plus the pledged size or size hint).
 `close` finishes the frame and, if `close_io` is true, closes `io` (pass
 `close_io=false` to keep writing to `io`, e.g. an `IOBuffer` read afterwards).
 """
@@ -436,9 +440,14 @@ function ZstdCompressorStream(io::IO; level::Union{Nothing,Integer}=nothing, che
                               pledged_size::Union{Nothing,Integer}=nothing, close_io::Bool=true,
                               size_hint::Union{Nothing,Integer}=nothing,
                               content_size::Bool=true, dict_id::Bool=true, magicless::Bool=false,
+                              prefix::Union{Nothing,AbstractVector{UInt8}}=nothing,
                               window_log=nothing, hash_log=nothing, chain_log=nothing, search_log=nothing, min_match=nothing, target_length=nothing, strategy=nothing)
     params = parameter_overrides(; window_log, hash_log, chain_log, search_log, min_match, target_length, strategy)
     frame = FrameOptions(; content_size, dict_id, magicless)
+    dict = prefix_dict(prefix, dict)
+    expect = pledged_size !== nothing ? Int(pledged_size) : size_hint !== nothing ? Int(size_hint) :
+             prefix === nothing ? 0 : length(prefix)
+    params = prefix_params(params, prefix, level, expect)
     ZstdCompressorStream(io, StreamCompressor(; level, checksum, dict, pledged_size, params, frame, size_hint),
                          false, close_io)
 end

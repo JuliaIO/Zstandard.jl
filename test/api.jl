@@ -638,3 +638,44 @@ end
     @test decompress(c) == data
     @test_throws ArgumentError Zstandard.ZstdCompressorStream(IOBuffer(); size_hint=-1)
 end
+
+@testset "Reference prefix" begin
+    old = make_text(400_000)
+    new = copy(old)
+    x = UInt64(3)
+    for k in 1:100
+        x = x * 6364136223846793005 + 1442695040888963407
+        new[(x >> 33) % length(new) + 1] = UInt8('#')
+    end
+    new = vcat(new[1:200_000], codeunits("a fresh paragraph in the middle\n"), new[200_001:end])
+    fold = tempname(); write(fold, old)
+    for kw in ((; level=3), (; level=9), (; level=19), (; level=3, long=true), (; level=1, checksum=true))
+        c = compress(new; prefix=old, kw...)
+        @test length(c) < length(compress(new; kw...)) ÷ 20      # mostly references into the prefix
+        @test frame_dict_id(c) == 0
+        @test frame_header(c).window_size >= length(old)          # reaches back into the prefix
+        @test decompress(c; prefix=old) == new
+        @test decompress(ZstdDecompressionContext(prefix=old), c) == new
+        @test read(Zstandard.ZstdDecompressorStream(IOBuffer(c); prefix=old)) == new
+        f = tempname(); write(f, c)
+        @test read(`$(Zstd_jll.zstd()) -q -d --long=27 --patch-from=$fold -c $f`) == new   # libzstd agrees
+        @test compress(ZstdCompressionContext(; prefix=old, kw...), new) == c
+    end
+    # libzstd's patches decode here
+    fnew = tempname(); write(fnew, new)
+    z = read(`$(Zstd_jll.zstd()) -q -5 --patch-from=$fold -c $fnew`)
+    @test decompress(z; prefix=old) == new
+    # streaming compression with a prefix
+    buf = IOBuffer()
+    s = Zstandard.ZstdCompressorStream(buf; prefix=old, pledged_size=length(new), close_io=false)
+    for part in Iterators.partition(new, 70_001); write(s, part); end
+    close(s)
+    c = take!(buf)
+    @test length(c) < length(compress(new)) ÷ 20
+    @test decompress(c; prefix=old) == new
+    # an explicit window_log is kept; prefix and dict are exclusive
+    @test frame_header(compress(new; prefix=old, window_log=17)).window_size == 1 << 17
+    @test_throws ArgumentError compress(new; prefix=old, dict=ZstdDictionary(old))
+    @test decompress(compress(new; prefix=UInt8[]); prefix=UInt8[]) == new
+    @test decompress(compress(new; prefix=old[1:3]); prefix=old[1:3]) == new
+end

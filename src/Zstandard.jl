@@ -135,7 +135,7 @@ end
 
 """
     compress(data; level=3, checksum=false, dict=nothing, nthreads=1, long=false,
-             content_size=true, dict_id=true, magicless=false,
+             content_size=true, dict_id=true, magicless=false, prefix=nothing,
              window_log, hash_log, chain_log, search_log, min_match, target_length, strategy)
         -> Vector{UInt8}
 
@@ -166,6 +166,13 @@ With `long=true`, long-distance matching finds repetitions up to 128 MiB
 apart (as `zstd --long`); the frame then declares a window of up to 128 MiB,
 which decoders must be willing to allocate.
 
+With `prefix = bytes`, those bytes serve as history the data may refer to
+(libzstd's `ZSTD_CCtx_refPrefix`, as `zstd --patch-from`): the frame records
+nothing about them, and must be decoded with the same prefix
+(`decompress(frame; prefix=bytes)`). Unless `window_log` is given, the window
+is widened to reach back into the whole prefix (up to 128 MiB); combine with
+`long=true` for large inputs. Not combined with `dict`.
+
 Frame header options (libzstd's `ZSTD_c_contentSizeFlag`, `ZSTD_c_dictIDFlag`
 and `ZSTD_f_zstd1_magicless`): `content_size=false` leaves the content size
 out of the header, `dict_id=false` the dictionary ID (the decoder must then be
@@ -176,9 +183,12 @@ function compress(data::AbstractVector{UInt8}; level::Union{Nothing,Integer}=not
                   checksum::Bool=false, dict::Union{Nothing,ZstdDictionary,PreparedDictionary}=nothing,
                   nthreads::Integer=1, long::Bool=false,
                   content_size::Bool=true, dict_id::Bool=true, magicless::Bool=false,
+                  prefix::Union{Nothing,AbstractVector{UInt8}}=nothing,
                   window_log=nothing, hash_log=nothing, chain_log=nothing, search_log=nothing, min_match=nothing, target_length=nothing, strategy=nothing)
     nthreads < 1 && throw(ArgumentError("nthreads must be at least 1"))
     params = Encoder.parameter_overrides(; window_log, hash_log, chain_log, search_log, min_match, target_length, strategy)
+    dict = Encoder.prefix_dict(prefix, dict)
+    params = Encoder.prefix_params(params, prefix, level, min(length(data), MAX_FRAME_INPUT))
     frame = Encoder.FrameOptions(; content_size, dict_id, magicless)
     if dict isa PreparedDictionary
         Encoder.use_prepared(dict, 0, level, params)     # checks level and parameters
@@ -277,11 +287,15 @@ total), they are decoded in parallel on up to `nthreads` tasks; a single frame
 is always decoded on one thread. The result does not depend on `nthreads`.
 
 With `magicless=true`, frames are read without magic numbers (as written by
-`compress(data; magicless=true)`); skippable frames cannot occur then.
+`compress(data; magicless=true)`); skippable frames cannot occur then. With
+`prefix = bytes`, frames written with that reference prefix are decoded (see
+`compress`).
 """
 function decompress(data::AbstractVector{UInt8}, dict::Union{Nothing, ZstdDictionary}=nothing;
-                    nthreads::Integer=Threads.nthreads(), magicless::Bool=false)
+                    nthreads::Integer=Threads.nthreads(), magicless::Bool=false,
+                    prefix::Union{Nothing,AbstractVector{UInt8}}=nothing)
     nthreads < 1 && throw(ArgumentError("nthreads must be at least 1"))
+    dict = Encoder.prefix_dict(prefix, dict)
     magicless && return _with_state(st -> decompress_frames(data, st, dict; magicless))
     if nthreads > 1 && length(data) >= PARALLEL_DECODE_MIN
         src = data isa Vector{UInt8} ? data : Vector{UInt8}(data)

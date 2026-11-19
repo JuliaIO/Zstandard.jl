@@ -33,7 +33,8 @@ end
 
 Find long matches in positions `from:to` of the buffer at `base`.
 """
-function ldm_sequences(base::Ptr{UInt8}, from::Int, to::Int, window::Int, min_match::Int, hash_log::Int)
+function ldm_sequences(base::Ptr{UInt8}, from::Int, to::Int, window::Int, min_match::Int, hash_log::Int,
+                       hist::Int=from)
     blog = LDM_BUCKET_LOG
     bsize = 1 << blog
     nbuckets = 1 << (hash_log - blog)
@@ -48,11 +49,12 @@ function ldm_sequences(base::Ptr{UInt8}, from::Int, to::Int, window::Int, min_ma
     anchor = from
     ipos = from
     iend = base + to             # one past the last byte
-    @inbounds for q in from:to - HASH_READ_SIZE
+    # positions [hist, from) (a dictionary or prefix) are only indexed
+    @inbounds for q in hist:to - HASH_READ_SIZE
         h = (h << 1) + GEAR[Int(unsafe_load(base, q)) + 1]
         (h & stopmask) != 0 && continue
         ws = q - min_match + 1
-        ws < from && continue
+        ws < hist && continue
         xx = xxh64(base + ws - 1, min_match)   # internal hash: always the native XXH64
         bucket = Int(xx & UInt64(nbuckets - 1))
         chk = (xx >> 32) % UInt32

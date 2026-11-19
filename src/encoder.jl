@@ -178,6 +178,27 @@ end
 
 const NO_OVERRIDES = ParameterOverrides(-1, -1, -1, -1, -1, -1, -1)
 
+# Reference prefix (libzstd's ZSTD_CCtx_refPrefix): raw content serving as
+# history, recorded in the frame by nothing (no dictionary ID). As
+# `zstd --patch-from`, the window is widened (up to 128 MiB) to reach back into
+# the whole prefix, unless `window_log` is given.
+function prefix_dict(prefix, dict)
+    prefix === nothing && return dict
+    dict === nothing || throw(ArgumentError("prefix and dict cannot be combined"))
+    return ZstdDictionary(prefix)
+end
+
+function prefix_params(params::ParameterOverrides, prefix, level, n::Integer)
+    (prefix === nothing || params.window_log >= 0) && return params
+    need = 64 - leading_zeros(UInt64(max(length(prefix) + n - 1, 1)))
+    lvl = level === nothing ? 3 : Int(level)
+    have = compression_parameters(lvl, length(prefix) + n, params).window_log
+    need <= have && return params
+    o = params
+    return ParameterOverrides(min(need, 27), o.chain_log, o.hash_log, o.search_log, o.min_match,
+                                      o.target_length, o.strategy)
+end
+
 """
     FrameOptions(; content_size=true, dict_id=true, magicless=false)
 
@@ -2099,7 +2120,7 @@ function compress_frame!(cc::CompressionContext, data::AbstractVector{UInt8}, le
         if long && n >= 1 << 16
             mm = p.strategy >= S_BTULTRA ? 32 : 64
             ldm = ldm_sequences(base, dlen + 1, dlen + n, 1 << p.window_log, mm,
-                                max(6, min(20, p.window_log - 7)))
+                                max(6, min(20, p.window_log - 7)), 1)   # dictionary content indexed too
         end
         bmax = block_size(p)
         if n == 0
