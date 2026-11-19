@@ -39,6 +39,11 @@ Accepts the parameter and frame keywords of [`compress`](@ref) (`window_log`,
 ..., `content_size`, `dict_id`, `magicless`), and `size_hint` (see
 `ZstdCompressorStream`) for streams whose size is not pledged.
 
+TranscodingStreams does not pass `flush` on to codecs, so flushing a
+`TranscodingStream` does not make the data written so far decodable; write
+`TranscodingStreams.TOKEN_END` to end the frame, or use `ZstdCompressorStream`,
+whose `flush` emits a block that decoders can read before the frame ends.
+
 ```julia
 using Zstandard, TranscodingStreams
 compressed = transcode(ZstandardCompressor(level=5), data)

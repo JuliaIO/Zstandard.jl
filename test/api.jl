@@ -679,3 +679,41 @@ end
     @test decompress(compress(new; prefix=UInt8[]); prefix=UInt8[]) == new
     @test decompress(compress(new; prefix=old[1:3]); prefix=old[1:3]) == new
 end
+
+struct ZInBuf; src::Ptr{UInt8}; size::Csize_t; pos::Csize_t; end
+struct ZOutBuf; dst::Ptr{UInt8}; size::Csize_t; pos::Csize_t; end
+# Feed `src` to a libzstd streaming decoder; return what it produced so far.
+function lib_stream_decode(src::Vector{UInt8}, cap::Int)
+    ds = ccall((:ZSTD_createDStream, ZLIB), Ptr{Cvoid}, ())
+    out = zeros(UInt8, cap)
+    ib = Ref(ZInBuf(pointer(src), length(src), 0)); ob = Ref(ZOutBuf(pointer(out), cap, 0))
+    GC.@preserve src out while ib[].pos < length(src)
+        r = ccall((:ZSTD_decompressStream, ZLIB), Csize_t, (Ptr{Cvoid}, Ref{ZOutBuf}, Ref{ZInBuf}), ds, ob, ib)
+        ccall((:ZSTD_isError, ZLIB), Cuint, (Csize_t,), r) != 0 && error("libzstd error")
+        ob[].pos == cap && break
+    end
+    ccall((:ZSTD_freeDStream, ZLIB), Csize_t, (Ptr{Cvoid},), ds)
+    return out[1:ob[].pos]
+end
+
+@testset "Flush mid-frame" begin
+    parts = [make_text(n) for n in (5_000, 200_000, 17, 0, 90_000)]
+    for level in (1, 3, 9, 19), checksum in (false, true)
+        io = IOBuffer()
+        s = Zstandard.ZstdCompressorStream(io; level, checksum, close_io=false)
+        written = UInt8[]
+        for p in parts
+            write(s, p); append!(written, p)
+            flush(s); flush(s)                   # a second flush adds nothing
+            sofar = Vector{UInt8}(view(io.data, 1:io.size))
+            # everything written so far decodes from the unfinished frame
+            r = Zstandard.ZstdDecompressorStream(IOBuffer(sofar))
+            @test read(r, length(written)) == written
+            @test lib_stream_decode(sofar, length(written) + 1) == written
+        end
+        close(s)
+        c = take!(io)
+        @test decompress(c) == written
+        @test transcode(CodecZstd.ZstdDecompressor, c) == written
+    end
+end
