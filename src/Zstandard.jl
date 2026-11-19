@@ -115,15 +115,59 @@ end
 const MAX_FRAME_INPUT = 1 << 30
 
 # Compress one frame with jobs spread over up to `nthreads` tasks.
+# rsyncable job boundaries (libzstd's ZSTDMT findSynchronizationPoint): a job
+# ends after a byte where the rolling hash of the last 32 bytes hits a mask
+# sized for the target job size, but never within 128 KiB of its start, and
+# at the target size at the latest. Boundaries then depend only on nearby
+# content, so a local change leaves the rest of the output unchanged.
+const RSYNC_LENGTH = 32
+const RSYNC_MIN_BLOCK = 1 << 17
+const RSYNC_PRIME = 0xCF1BBCDCB7A56463
+const RSYNC_CHAR_OFFSET = 10
+
+function _rsync_jobs(data::Vector{UInt8}, job::Int)
+    n = length(data)
+    bits = 63 - leading_zeros(UInt64(max(job >> 10, 1))) + 10
+    mask = (UInt64(1) << bits) - 1
+    pp = UInt64(1)
+    for _ in 1:RSYNC_LENGTH-1; pp *= RSYNC_PRIME; end
+    ranges = UnitRange{Int}[]
+    s = 1
+    @inbounds while s <= n
+        e = min(s + job - 1, n)
+        if e - s + 1 > RSYNC_MIN_BLOCK
+            # hash of the 32 bytes ending at s + RSYNC_MIN_BLOCK - 1, then roll
+            q = s + RSYNC_MIN_BLOCK - 1
+            h = UInt64(0)
+            for i in q-RSYNC_LENGTH+1:q
+                h = h * RSYNC_PRIME + (data[i] + RSYNC_CHAR_OFFSET)
+            end
+            # libzstd tests positions after the first 128 KiB of the job
+            while q < e
+                q += 1
+                h -= (data[q - RSYNC_LENGTH] + RSYNC_CHAR_OFFSET) * pp
+                h = h * RSYNC_PRIME + (data[q] + RSYNC_CHAR_OFFSET)
+                if h & mask == mask
+                    e = q
+                    break
+                end
+            end
+        end
+        push!(ranges, s:e)
+        s = e + 1
+    end
+    return ranges
+end
+
 function _compress_mt(data::Vector{UInt8}, level::Integer, checksum::Bool, nthreads::Int,
-                      params=Encoder.NO_OVERRIDES, frame=Encoder.DEFAULT_FRAME)
+                      params=Encoder.NO_OVERRIDES, frame=Encoder.DEFAULT_FRAME, rsyncable::Bool=false)
     n = length(data)
     p, job, overlap = mt_layout(n, level, params)
-    njobs = cld(n, job)
+    ranges = rsyncable ? _rsync_jobs(data, job) : [((j - 1) * job + 1):min(j * job, n) for j in 1:cld(n, job)]
+    njobs = length(ranges)
     sem = Base.Semaphore(nthreads)
     tasks = map(1:njobs) do j
-        js = (j - 1) * job + 1
-        je = min(j * job, n)
+        js = first(ranges[j]); je = last(ranges[j])
         Threads.@spawn Base.acquire(sem) do
             _with_cctx(cc -> compress_job!(cc, p, level, data, js, je, overlap, j == njobs))
         end
@@ -143,7 +187,7 @@ end
 
 """
     compress(data; level=3, checksum=false, dict=nothing, nthreads=1, long=false,
-             content_size=true, dict_id=true, magicless=false, prefix=nothing,
+             content_size=true, dict_id=true, magicless=false, prefix=nothing, rsyncable=false,
              window_log, hash_log, chain_log, search_log, min_match, target_length, strategy)
         -> Vector{UInt8}
 
@@ -174,6 +218,13 @@ With `long=true`, long-distance matching finds repetitions up to 128 MiB
 apart (as `zstd --long`); the frame then declares a window of up to 128 MiB,
 which decoders must be willing to allocate.
 
+With `rsyncable=true` (as `zstd --rsyncable`), the input is cut into jobs at
+content-defined points (as libzstd's `ZSTD_c_rsyncable`): each job starts
+with fresh repeat offsets and entropy tables, so a local change to the input
+changes the output only near it, and rsync-style tools can transfer the
+difference efficiently. The ratio is slightly lower. Jobs run in parallel
+with `nthreads > 1`.
+
 With `prefix = bytes`, those bytes serve as history the data may refer to
 (libzstd's `ZSTD_CCtx_refPrefix`, as `zstd --patch-from`): the frame records
 nothing about them, and must be decoded with the same prefix
@@ -191,7 +242,7 @@ function compress(data::AbstractVector{UInt8}; level::Union{Nothing,Integer}=not
                   checksum::Bool=false, dict::Union{Nothing,ZstdDictionary,PreparedDictionary}=nothing,
                   nthreads::Integer=1, long::Bool=false,
                   content_size::Bool=true, dict_id::Bool=true, magicless::Bool=false,
-                  prefix::Union{Nothing,AbstractVector{UInt8}}=nothing,
+                  prefix::Union{Nothing,AbstractVector{UInt8}}=nothing, rsyncable::Bool=false,
                   window_log=nothing, hash_log=nothing, chain_log=nothing, search_log=nothing, min_match=nothing, target_length=nothing, strategy=nothing)
     nthreads < 1 && throw(ArgumentError("nthreads must be at least 1"))
     params = Encoder.parameter_overrides(; window_log, hash_log, chain_log, search_log, min_match, target_length, strategy)
@@ -203,6 +254,12 @@ function compress(data::AbstractVector{UInt8}; level::Union{Nothing,Integer}=not
         level = dict.level
     end
     level = level === nothing ? 3 : Int(level)
+    if rsyncable
+        (dict !== nothing || long) && throw(ArgumentError("rsyncable cannot be combined with dict, prefix or long"))
+        length(data) > MAX_FRAME_INPUT && throw(ArgumentError("rsyncable inputs are limited to 1 GiB"))
+        return _compress_mt(data isa Vector{UInt8} ? data : Vector{UInt8}(data), level, checksum,
+                            Int(nthreads), params, frame, true)
+    end
     if nthreads > 1 && dict === nothing && !long && length(data) <= MAX_FRAME_INPUT
         _, job, _ = mt_layout(length(data), level, params)
         if length(data) > job

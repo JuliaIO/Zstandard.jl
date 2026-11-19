@@ -857,3 +857,31 @@ end
     @test length(decompress(c)) == length(text) && decompress(c) != text
     @test sprint(show, ZstdSequence(1, 2, 3)) == "ZstdSequence(1, 2, 3)"
 end
+
+@testset "Window limit per position and rsyncable" begin
+    data = make_text(1_200_000)
+    # matches reach a full window back from each position, never further
+    for level in (1, 3, 5, 13, 16, 19), w in (10, 17)
+        s = generate_sequences(data; level, window_log=w)
+        @test maximum(x -> x.offset, s) <= 1 << w
+        c = compress(data; level, window_log=w)
+        @test read(Zstandard.ZstdDecompressorStream(IOBuffer(c); max_window_size=max(1 << w, 1024))) == data
+        @test transcode(CodecZstd.ZstdDecompressor, c) == data
+    end
+    # with a 128 KiB window, matches into the previous block are found
+    @test length(compress(data; level=9, window_log=17)) < 1.05 * length(compress(data; level=9, window_log=18))
+    # rsyncable: content-defined jobs resynchronize after a local change
+    big = make_text(5_000_000)
+    edited = vcat(big[1:1_000_000], codeunits("a local edit"), big[1_000_001:end])
+    common_suffix(x, y) = (k = 0; while k < min(length(x), length(y)) && x[end-k] == y[end-k]; k += 1; end; k)
+    a = compress(big; level=3, window_log=17, rsyncable=true)
+    b = compress(edited; level=3, window_log=17, rsyncable=true)
+    @test decompress(a) == big && decompress(b) == edited
+    @test transcode(CodecZstd.ZstdDecompressor, b) == edited
+    @test common_suffix(a, b) > length(b) ÷ 2
+    @test common_suffix(compress(big; level=3, window_log=17), compress(edited; level=3, window_log=17)) < 1000
+    @test compress(big; level=3, window_log=17, rsyncable=true, nthreads=3) == a
+    @test length(a) < 1.01 * length(compress(big; level=3, window_log=17))
+    @test decompress(compress(data[1:1000]; rsyncable=true, checksum=true)) == data[1:1000]
+    @test_throws ArgumentError compress(data; rsyncable=true, long=true)
+end
