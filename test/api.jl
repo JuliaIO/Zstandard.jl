@@ -717,3 +717,54 @@ end
         @test transcode(CodecZstd.ZstdDecompressor, c) == written
     end
 end
+
+@testset "Seekable format" begin
+    data = make_text(1_000_000)
+    for (fs, chk) in ((100_000, true), (1 << 20, false), (4093, true))
+        a = compress_seekable(data; frame_size=fs, checksum=chk, level=3)
+        @test decompress(a) == data                                   # a plain multi-frame stream
+        @test transcode(CodecZstd.ZstdDecompressor, a) == data
+        t = seek_table(a)
+        @test length(t) == cld(length(data), fs)
+        @test t.content_size == length(data)
+        @test (t.checksums !== nothing) == chk
+        @test sum(t.csize) + t.table_size == length(a)
+        @test t == t && occursin("frames", sprint(show, t))
+        @test t.dsize[1] == min(fs, length(data))
+        f = tempname(); write(f, a)
+        x = UInt64(7)
+        for _ in 1:20
+            x = x * 6364136223846793005 + 1442695040888963407
+            lo = Int(x >> 40) % length(data) + 1
+            hi = min(length(data), lo + Int(x >> 20) % 300_000)
+            @test decompress_range(a, lo:hi) == data[lo:hi]
+            @test decompress_range(IOBuffer(a), lo:hi) == data[lo:hi]
+            @test open(io -> decompress_range(io, lo:hi; table=t), f) == data[lo:hi]
+        end
+        @test decompress_range(a, 1:length(data)) == data
+        @test decompress_range(a, 5:4) == UInt8[]
+        @test_throws BoundsError decompress_range(a, 0:10)
+        @test_throws BoundsError decompress_range(a, length(data):length(data)+1)
+        @test open(seek_table, f).csize == t.csize
+    end
+    # identical output on several tasks; other compress keywords pass through
+    @test compress_seekable(data; frame_size=65536, nthreads=4) == compress_seekable(data; frame_size=65536)
+    a = compress_seekable(data; frame_size=200_000, level=19, window_log=16)
+    @test frame_header(a).window_size == 1 << 16
+    @test decompress_range(a, 199_990:200_010) == data[199_990:200_010]
+    # an empty frame (as libzstd's endStream writes) and a corrupt checksum
+    fr = [compress(data[1:1000]), compress(UInt8[]), compress(data[1001:3000])]
+    sums = [Zstandard.XXHash.content_checksum(d) for d in (data[1:1000], UInt8[], data[1001:3000])]
+    tab = Zstandard._seek_table([(length(fr[i]), (1000, 0, 2000)[i], Int(sums[i])) for i in 1:3], true)
+    a = vcat(fr..., tab)
+    @test length(seek_table(a)) == 3
+    @test decompress_range(a, 990:1010) == data[990:1010]
+    @test decompress_range(a, 1001:1001) == data[1001:1001]
+    bad = copy(a); bad[end - 9 - 12 + 8] ⊻= 0x01                    # last entry's checksum
+    @test_throws ZstdError decompress_range(bad, 1500:1600)
+    @test decompress_range(bad, 10:20) == data[10:20]               # other frames unaffected
+    @test_throws ZstdError seek_table(compress(data))               # not seekable
+    @test_throws ArgumentError compress_seekable(data; frame_size=0)
+    @test decompress(compress_seekable(UInt8[])) == UInt8[]
+    @test length(seek_table(compress_seekable(UInt8[]))) == 0
+end

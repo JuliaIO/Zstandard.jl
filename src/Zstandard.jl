@@ -5,7 +5,8 @@ export decompress, compress, ZstdDecompressorStream, ZstdCompressorStream, ZstdD
        ZstdFrameHeader, frame_header, frame_content_size, frame_compressed_size, frame_dict_id,
        decompressed_size, is_zstd_frame, is_skippable_frame, skippable_frame, read_skippable_frame,
        train_dictionary, finalize_dictionary, PreparedDictionary, prepare_dictionary,
-       ZstdCompressionContext, ZstdDecompressionContext, compress!, decompress!
+       ZstdCompressionContext, ZstdDecompressionContext, compress!, decompress!,
+       compress_seekable, ZstdSeekTable, seek_table, decompress_range
 
 # Swappable XXH64 implementation for frame checksums (see `Zstandard.XXHash`)
 public XXHash, AbstractXXH64, NativeXXH64, XXH64_IMPLEMENTATION, with_xxh64_implementation
@@ -312,6 +313,7 @@ function decompress(data::AbstractVector{UInt8}, dict::Union{Nothing, ZstdDictio
 end
 
 include("context.jl")
+include("seekable.jl")
 include("precompile.jl")
 
 end # module
