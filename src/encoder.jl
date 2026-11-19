@@ -1410,6 +1410,15 @@ function reset_context!(cc::CompressionContext, p::CParams, level::Int; clear::B
     cc.ll_prev_ok = cc.ml_prev_ok = cc.of_prev_ok = false
     cc.huf_prev_ok = false
     cc.opt.have_stats = false
+    # 3-byte hash table for the optimal parser with minMatch 3 (ZSTD_hashLog3)
+    o = cc.opt
+    if p.strategy >= S_BTOPT && p.min_match == 3
+        o.h3log = min(HASHLOG3_MAX, p.window_log)
+        length(o.h3) != 1 << o.h3log && resize!(o.h3, 1 << o.h3log)
+        fill!(o.h3, Int32(0))
+    else
+        empty!(o.h3); o.h3log = 0
+    end
     cc.savings = 0
     cc.target_block = 0
     return cc
@@ -1598,19 +1607,42 @@ function encode_literals!(cc::CompressionContext, dst::Vector{UInt8}, pos::Int, 
         largest = maximum(counts)
         largest == n && return write_rle_literals!(dst, pos, lit[1], n)
         largest <= (n >> 7) + 4 && return write_raw_literals!(dst, pos, lp, n)
-        min_gain = (n >> 6) + 2
+        # ZSTD_minGain: compressed literals must save this much (less for btultra/btultra2)
+        strat = Int(cc.params.strategy) + 1                 # libzstd's numbering
+        min_gain = (n >> (strat >= 8 ? strat - 1 : 6)) + 2
         single = n < 256
         hs = single || n < 1024 ? 3 : (n < 16384 ? 4 : 5)
         # Option A: reuse previous table (treeless)
         reuse_cost = cc.huf_prev_ok ? huf_cost(counts, maxsym, cc.huf_prev) : typemax(Int)
-        # Option B: new table
-        tl = huf_lengths!(cc.lens, counts, maxsym, HUF_MAX_BITS, cc.hsyms, cc.hfreq, cc.hparent)
+        # Option B: new table. For btultra and stronger, as libzstd's
+        # HUF_flags_optimalDepth, try each maximum code length and keep the one
+        # with the smallest description plus encoded size.
+        tmp = cc.tmp
+        maxbits = HUF_MAX_BITS
+        if cc.params.strategy >= S_BTULTRA
+            nsym = count(>(0), view(counts, 1:maxsym+1))
+            best_total = typemax(Int)
+            for mb in max(highbit(max(nsym - 1, 1)) + 1, 5):HUF_MAX_BITS
+                t0 = huf_lengths!(cc.lens, counts, maxsym, mb, cc.hsyms, cc.hfreq, cc.hparent)
+                huf_codes!(cc.huf, cc.lens, maxsym, t0)
+                hdr = write_huf_tree!(cc, tmp, 1, cc.huf) - 1
+                hdr < 0 && continue
+                total = huf_cost(counts, maxsym, cc.huf) + hdr
+                if total < best_total
+                    best_total = total; maxbits = mb
+                end
+            end
+        end
+        tl = huf_lengths!(cc.lens, counts, maxsym, maxbits, cc.hsyms, cc.hfreq, cc.hparent)
         huf_codes!(cc.huf, cc.lens, maxsym, tl)
         new_cost = huf_cost(counts, maxsym, cc.huf)
-        tmp = cc.tmp
         # Huffman output can exceed n (codes up to 11 bits) before the raw fallback.
         length(tmp) < (11n >> 3) + 1024 && resize!(tmp, (11n >> 3) + 1024)
-        treeless = reuse_cost < typemax(Int) && reuse_cost <= new_cost + 40 + (maxsym >> 1)
+        # reuse the previous table when it costs no more than a new one with its
+        # description (HUF_compress_internal: oldSize <= hSize + newSize)
+        hdr = write_huf_tree!(cc, tmp, 1, cc.huf) - 1
+        hdr < 0 && (hdr = typemax(Int) >> 2)
+        treeless = reuse_cost < typemax(Int) && (reuse_cost <= new_cost + hdr || hdr + 12 >= n)
         t = treeless ? cc.huf_prev : cc.huf
         tpos = 1
         if !treeless
@@ -1893,7 +1925,7 @@ function seed_stats_ultra!(cc::CompressionContext, base::Ptr{UInt8}, bstart::Ptr
        bend - bstart > PREDEF_THRESHOLD
         parse_range!(cc, base, bstart, bend, true)
         cc.ss.nlit = 0; cc.ss.nseq = 0
-        fill!(cc.htab, Int32(0)); fill!(cc.ctab, Int32(0))
+        fill!(cc.htab, Int32(0)); fill!(cc.ctab, Int32(0)); fill!(cc.opt.h3, Int32(0))
         cc.next_to_update = 1
     end
     return
@@ -2365,6 +2397,12 @@ function rebase!(sc::StreamCompressor, d::Int)
             end
         end
     end
+    h3 = cc.opt.h3
+    @inbounds for i in eachindex(h3)
+        v = Int(h3[i]) - d
+        h3[i] = v < 1 ? Int32(0) : v % Int32
+    end
+    cc.opt.h3next = max(1, cc.opt.h3next - d)
     cc.next_to_update = max(1, cc.next_to_update - d)
     copyto!(sc.buf, 1, sc.buf, d + 1, sc.len - d)
     sc.len -= d

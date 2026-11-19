@@ -35,6 +35,10 @@ mutable struct OptState
     have_stats::Bool
     # backtracking
     bt_start::Vector{Int}; bt_ml::Vector{Int}; bt_off::Vector{Int}
+    # 3-byte match finder for minMatch 3 (libzstd's hashTable3); empty when unused
+    h3::Vector{Int32}
+    h3log::Int
+    h3next::Int          # next position to insert in h3 (per block, as nextToUpdate3)
 end
 
 function OptState()
@@ -43,7 +47,22 @@ function OptState()
              zeros(Int, n), zeros(Int, 1024), zeros(Int, 1024),
              zeros(Int, 256), zeros(Int, 36), zeros(Int, 53), zeros(Int, 32),
              zeros(Int, 256), zeros(Int, 36), zeros(Int, 53), zeros(Int, 32), false,
-             zeros(Int, n), zeros(Int, n), zeros(Int, n))
+             zeros(Int, n), zeros(Int, n), zeros(Int, n), Int32[], 0, 1)
+end
+
+# ZSTD_HASHLOG3_MAX
+const HASHLOG3_MAX = 17
+
+"""Insert positions [o.h3next, cur) into the 3-byte table; return its entry for cur."""
+@inline function h3_find!(o::OptState, base::Ptr{UInt8}, cur::Int)
+    h3 = o.h3; hl = o.h3log
+    i = o.h3next
+    @inbounds while i < cur
+        h3[zhash(ptr_of(i, base), hl, 3) + 1] = i % Int32
+        i += 1
+    end
+    o.h3next = max(o.h3next, cur)
+    return @inbounds Int(h3[zhash(ptr_of(cur, base), hl, 3) + 1])
 end
 
 # Statistics and prices follow ZSTD_rescaleFreqs / ZSTD_setBasePrices: the
@@ -357,7 +376,8 @@ end
 @inline function collect_matches!(o::OptState, ht::Ptr{Int32}, bt::Ptr{Int32}, hlog::Int, clog::Int,
                                   mls::Int, attempts::Int, base::Ptr{UInt8}, ip::Ptr{UInt8},
                                   iend::Ptr{UInt8}, lowlimit::Int, next::Int,
-                                  r1::Int, r2::Int, r3::Int, ll0::Bool, window::Int=typemax(Int) >> 2)
+                                  r1::Int, r2::Int, r3::Int, ll0::Bool, window::Int=typemax(Int) >> 2,
+                                  sufficient::Int=OPT_NUM)
     cur = pos_of(ip, base)
     cur < next && return 0, next            # inside a region skipped by the tree update
     btlog = clog - 1
@@ -376,6 +396,19 @@ end
         l = zcount(ip, ip - dist, iend)
         if l >= mls && l > best
             nm += 1; mlens[nm] = l; moffs[nm] = dist; best = l
+        end
+    end
+    # 3-byte matches (libzstd's HC3 finder): the most recent position with the
+    # same 3-byte hash, at short distances only, when no repcode was found
+    if mls == 3 && best < 3 && !isempty(o.h3)
+        m3 = h3_find!(o, base, cur)
+        if m3 >= max(lowlimit, 1) && m3 < cur && cur - m3 < 1 << 18
+            l = zcount(ip, ptr_of(m3, base), iend)
+            if l >= 3
+                nm = 1; mlens[1] = l; moffs[1] = cur - m3; best = l
+                # best possible: skip the tree for this position (as libzstd)
+                (l > sufficient || ip + l == iend) && return 1, cur + 1
+            end
         end
     end
     # insert ip into the tree while collecting longer matches
@@ -454,6 +487,7 @@ function parse_opt!(ss::SeqStore, o::OptState, htab::Vector{Int32}, hlog::Int, c
     r1, r2, r3 = rep
     sufficient = min(sufficient, OPT_NUM - 1)
     (first || !o.have_stats) && init_stats!(o, istart, Int(iend - istart), ultra)
+    o.h3next = next                      # libzstd: nextToUpdate3 = ms->nextToUpdate
     price = o.price; mlen = o.mlen; offv = o.off; litlen = o.litlen
     GC.@preserve htab ctab o begin
         ht = pointer(htab); ch = pointer(ctab)
@@ -461,7 +495,7 @@ function parse_opt!(ss::SeqStore, o::OptState, htab::Vector{Int32}, hlog::Int, c
             litlen0 = Int(ip - anchor)
             ll0 = litlen0 == 0
             nm, next = collect_matches!(o, ht, ch, hlog, clog, mls, attempts, base, ip, iend,
-                                        lowlimit, next, r1, r2, r3, ll0, window)
+                                        lowlimit, next, r1, r2, r3, ll0, window, sufficient)
             if nm == 0
                 ip += 1
                 continue
@@ -532,7 +566,7 @@ function parse_opt!(ss::SeqStore, o::OptState, htab::Vector{Int32}, hlog::Int, c
                     sll0 = litlen[cur + 1] == 0
                     s1 = o.r1[cur + 1]; s2 = o.r2[cur + 1]; s3 = o.r3[cur + 1]
                     nm2, next = collect_matches!(o, ht, ch, hlog, clog, mls, attempts, base, inr,
-                                                 iend, lowlimit, next, s1, s2, s3, sll0, window)
+                                                 iend, lowlimit, next, s1, s2, s3, sll0, window, sufficient)
                     if nm2 == 0
                         cur += 1
                         continue

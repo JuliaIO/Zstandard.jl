@@ -4,7 +4,7 @@ A pure Julia implementation of the [Zstandard](https://facebook.github.io/zstd/)
 
 ## Features
 
-- **Compression** at levels -7 to 22 with libzstd 1.5.7's strategies and parameter tables (fast, dfast, greedy/lazy/lazy2 with the row-based match finder, btlazy2, btopt, btultra, btultra2), block pre- and post-splitting, and repeat-offset aware parsing; ratios match or beat libzstd's at nearly every level
+- **Compression** at levels -7 to 22 with libzstd 1.5.7's strategies and parameter tables (fast, dfast, greedy/lazy/lazy2 with the row-based match finder, btlazy2, btopt, btultra, btultra2), block pre- and post-splitting, and repeat-offset aware parsing; ratios match or beat libzstd's at nearly every level (3-byte match finder for levels 18-22 included)
 - Huffman literals (direct or FSE-compressed weights, 1 or 4 streams, table reuse across blocks) and FSE sequence coding with predefined/RLE/compressed/repeat table selection
 - **Decompression** of all standard frames, including concatenated and skippable frames (decoded in parallel with `nthreads`), raw and formatted dictionaries
 - Streaming compression and decompression (`ZstdCompressorStream`, `ZstdDecompressorStream`, implementing `IO`): pledged sizes, size hints, mid-frame `flush`, a window limit for untrusted input, and progress counters (`stream_progress`)
@@ -149,13 +149,14 @@ TranscodingStreams overhead. Scripts: `test/benchmark/compress_compare.jl` and
 | text   | 19 | 4.87 / 4.87 | 3.2 / 3.0 |
 | binary |  1 | 2.68 / 2.67 | 292 / 382 |
 | binary |  3 | 3.01 / 2.99 | 155 / 183 |
-| binary |  9 | 3.27 / 3.22 |  42 /  52 |
+| binary |  9 | 3.27 / 3.22 |  41 /  58 |
 | binary | 13 | 3.28 / 3.24 |  14 /  13 |
-| binary | 16 | 3.53 / 3.46 | 4.1 / 5.8 |
-| binary | 19 | 3.71 / 3.72 | 2.6 / 3.0 |
+| binary | 16 | 3.53 / 3.46 | 5.9 / 8.1 |
+| binary | 19 | 3.72 / 3.72 | 3.1 / 3.9 |
+| binary | 22 | 3.73 / 3.72 | 3.1 / 3.4 |
 
-Ratios match or beat libzstd at every level except binary level 19 (-0.2%); speed is
-within about 1.0-1.4x of libzstd's. Timings on this machine vary by about 10% between runs.
+Ratios match or beat libzstd at every level measured (text level -5 is 0.1% behind); speed
+is within about 1.0-1.4x of libzstd's. Timings on this machine vary by about 10% between runs.
 
 ### Decompression (MB/s of output)
 
