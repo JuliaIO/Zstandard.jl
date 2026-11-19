@@ -2252,6 +2252,7 @@ mutable struct StreamCompressor
     bsize::Int           # block size of the current frame
     frame::FrameOptions
     size_hint::Int       # expected input size when none is pledged (-1: none)
+    consumed::Int        # input bytes of the current frame compressed so far
 end
 
 function StreamCompressor(; level::Union{Nothing,Integer}=nothing, checksum::Bool=false,
@@ -2268,7 +2269,7 @@ function StreamCompressor(; level::Union{Nothing,Integer}=nothing, checksum::Boo
     level = level === nothing ? 3 : Int(level)
     sc = StreamCompressor(CompressionContext(), level, checksum, dict, UInt8[], 0, 1, 0, 0,
                           UInt8[], 0, false, false, ChecksumState(), -1, 0, params, BLOCK_SIZE_MAX,
-                          frame, size_hint === nothing ? -1 : Int(size_hint))
+                          frame, size_hint === nothing ? -1 : Int(size_hint), 0)
     pledged_size === nothing || stream_pledge!(sc, pledged_size)
     return sc
 end
@@ -2324,6 +2325,7 @@ function stream_begin!(sc::StreamCompressor)
                                   dict === nothing ? UInt32(0) : dict.id, sc.frame) - 1
     sc.xxh = ChecksumState()
     sc.total = 0
+    sc.consumed = 0
     sc.started = true
     sc.finished = false
     return sc
@@ -2356,10 +2358,18 @@ function rebase!(sc::StreamCompressor, d::Int)
 end
 
 # Make room for n more input bytes (n <= BLOCK_SIZE_MAX).
+# Grow a buffer to exactly `n` bytes, keeping its first `keep` bytes (resize!
+# over-allocates, which would make stream memory up to twice the window).
+function grow_exact(v::Vector{UInt8}, n::Int, keep::Int)
+    w = Vector{UInt8}(undef, n)
+    copyto!(w, 1, v, 1, keep)
+    return w
+end
+
 function make_input_room!(sc::StreamCompressor, n::Int)
     sc.len + n <= length(sc.buf) && return sc
     if length(sc.buf) < sc.cap
-        resize!(sc.buf, min(sc.cap, max(2 * length(sc.buf), sc.len + n)))
+        sc.buf = grow_exact(sc.buf, min(sc.cap, max(2 * length(sc.buf), sc.len + n)), sc.len)
         sc.len + n <= length(sc.buf) && return sc
     end
     window = 1 << sc.cc.params.window_log
@@ -2385,6 +2395,7 @@ function emit_block!(sc::StreamCompressor, bn::Int, last::Bool)
                                   base + sc.pend - 1 + bn, last) - 1
     end
     sc.pend += bn
+    sc.consumed += bn
     return sc
 end
 

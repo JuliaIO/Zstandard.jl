@@ -6,7 +6,8 @@ export decompress, compress, ZstdDecompressorStream, ZstdCompressorStream, ZstdD
        decompressed_size, is_zstd_frame, is_skippable_frame, skippable_frame, read_skippable_frame,
        train_dictionary, finalize_dictionary, PreparedDictionary, prepare_dictionary,
        ZstdCompressionContext, ZstdDecompressionContext, compress!, decompress!,
-       compress_seekable, ZstdSeekTable, seek_table, decompress_range
+       compress_seekable, ZstdSeekTable, seek_table, decompress_range,
+       estimate_compression_memory, estimate_decompression_memory, stream_progress
 
 # Swappable XXH64 implementation for frame checksums (see `Zstandard.XXHash`)
 public XXHash, AbstractXXH64, NativeXXH64, XXH64_IMPLEMENTATION, with_xxh64_implementation
@@ -28,7 +29,7 @@ using .Encoder: CompressionContext, compress_frame!, mt_layout, compress_job!, f
 using .XXHash: content_checksum, AbstractXXH64, NativeXXH64, XXH64_IMPLEMENTATION, with_xxh64_implementation
 
 include("streaming.jl")
-using .Streaming: ZstdDecompressorStream, ZstdCompressorStream
+using .Streaming: ZstdDecompressorStream, ZstdCompressorStream, stream_progress
 
 """
     ZstandardCompressor(; level=3, checksum=false, dict=nothing, window_log=nothing, ...)
@@ -314,6 +315,7 @@ end
 
 include("context.jl")
 include("seekable.jl")
+include("estimate.jl")
 include("precompile.jl")
 
 end # module

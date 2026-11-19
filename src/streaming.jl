@@ -56,6 +56,8 @@ mutable struct StreamDecoder
     xxh::Union{Nothing,ChecksumState}
     max_window::Int      # largest window size accepted
     magicless::Bool      # frames have no magic number (libzstd's ZSTD_f_zstd1_magicless)
+    consumed::Int        # input bytes fed
+    produced::Int        # bytes decoded (all frames)
 end
 
 """
@@ -71,7 +73,7 @@ function StreamDecoder(dict::Union{Nothing,ZstdDictionary}=nothing;
     StreamDecoder(dict, DecoderState(), Vector{UInt8}(undef, 64), 0, magicless ? 1 : 4,
         magicless ? U_FHDR1 : U_MAGIC, 0, 0, false,
         UInt8[], 1, 0, 0, false, 0, FrameInfo(0, 0, -1, 0, false, false), 0, nothing,
-        Int(max_window_size), magicless)
+        Int(max_window_size), magicless, 0, 0)
 end
 
 # Expect the start of the next frame.
@@ -110,7 +112,16 @@ function make_room!(d::StreamDecoder, n::Int)
     need = d.wpos + n + WILDCOPY_SLACK
     if length(d.out) < need
         compact!(d)
-        ensure_capacity!(d.out, d.wpos + n + WILDCOPY_SLACK)
+        need = d.wpos + n + WILDCOPY_SLACK
+        if length(d.out) < need
+            # grow exactly (resize! over-allocates): doubling, but not past
+            # what a frame needs, a window plus two blocks
+            full = d.fi.window_size + 2 * BLOCK_SIZE_MAX + WILDCOPY_SLACK
+            newlen = max(need, min(2 * length(d.out), full))
+            w = Vector{UInt8}(undef, newlen)
+            copyto!(w, 1, d.out, 1, d.wpos)
+            d.out = w
+        end
     end
 end
 
@@ -185,6 +196,7 @@ function decode_body!(d::StreamDecoder)
         end
     end
     d.frame_produced += d.wpos - start
+    d.produced += d.wpos - start
     if d.xxh !== nothing && d.wpos > start
         checksum_update!(d.xxh, view(d.out, start+1:d.wpos))
     end
@@ -269,12 +281,14 @@ function feed!(d::StreamDecoder, p::Ptr{UInt8}, n::Int)
     if d.ustage == U_SKIP
         k = min(n, d.skip_left)
         d.skip_left -= k
+        d.consumed += k
         d.skip_left == 0 && set_unit!(d, U_MAGIC, 4)
         return k
     end
     k = min(n, d.want - d.have)
     GC.@preserve d unsafe_copyto!(pointer(d.unit, d.have + 1), p, k)
     d.have += k
+    d.consumed += k
     d.have == d.want && process_unit!(d)
     return k
 end
@@ -339,10 +353,25 @@ function fill_buffer!(s::ZstdDecompressorStream)
             at_boundary(d) && return false
             zerr("truncated input")
         end
-        feed_from!(d, s.io) == 0 && zerr("truncated input")
+        got = feed_from!(d, s.io)
+        got == 0 && zerr("truncated input")
+        d.consumed += got
     end
     return true
 end
+
+"""
+    stream_progress(s::ZstdDecompressorStream) -> (; consumed, produced, frames)
+    stream_progress(s::ZstdCompressorStream) -> (; ingested, consumed, produced, flushed)
+
+Progress of a streaming (de)compressor, as libzstd's `ZSTD_getFrameProgression`.
+For a decompressor: compressed bytes read from the source, bytes decoded so far
+(read or still buffered) and frames completed. For a compressor: bytes written
+to the stream, bytes of those compressed so far, compressed bytes produced and
+compressed bytes written to the underlying IO.
+"""
+stream_progress(s::ZstdDecompressorStream) =
+    (; consumed=s.d.consumed, produced=s.d.produced, frames=s.d.frames_done)
 
 Base.bytesavailable(s::ZstdDecompressorStream) = available(s.d)
 Base.eof(s::ZstdDecompressorStream) = available(s.d) <= 0 && !fill_buffer!(s)
@@ -433,6 +462,7 @@ mutable struct ZstdCompressorStream <: IO
     sc::StreamCompressor
     closed::Bool
     close_io::Bool
+    flushed::Int         # compressed bytes written to io
 end
 
 function ZstdCompressorStream(io::IO; level::Union{Nothing,Integer}=nothing, checksum::Bool=false,
@@ -449,15 +479,21 @@ function ZstdCompressorStream(io::IO; level::Union{Nothing,Integer}=nothing, che
              prefix === nothing ? 0 : length(prefix)
     params = prefix_params(params, prefix, level, expect)
     ZstdCompressorStream(io, StreamCompressor(; level, checksum, dict, pledged_size, params, frame, size_hint),
-                         false, close_io)
+                         false, close_io, 0)
 end
 
 function drain!(s::ZstdCompressorStream)
     sc = s.sc
     if sc.olen > 0
         GC.@preserve sc unsafe_write(s.io, pointer(sc.out), sc.olen)
+        s.flushed += sc.olen
         sc.olen = 0
     end
+end
+
+function stream_progress(s::ZstdCompressorStream)
+    sc = s.sc
+    return (; ingested=sc.total, consumed=sc.consumed, produced=s.flushed + sc.olen, flushed=s.flushed)
 end
 
 function Base.unsafe_write(s::ZstdCompressorStream, p::Ptr{UInt8}, n::UInt)

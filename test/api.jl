@@ -768,3 +768,48 @@ end
     @test decompress(compress_seekable(UInt8[])) == UInt8[]
     @test length(seek_table(compress_seekable(UInt8[]))) == 0
 end
+
+@testset "Memory estimates and stream progress" begin
+    data = make_text(3_000_000)
+    E = Zstandard.Encoder
+    for level in (-3, 1, 3, 7, 13, 16, 19)
+        cc = E.CompressionContext()
+        E.compress_frame!(cc, data, level)
+        est = estimate_compression_memory(; level, src_size=length(data))
+        @test 0.9 < est / Base.summarysize(cc) < 1.1
+    end
+    @test estimate_compression_memory(level=19) > estimate_compression_memory(level=1)
+    @test estimate_compression_memory(level=3, src_size=1000) < estimate_compression_memory(level=3)
+    @test estimate_compression_memory(level=3, src_size=10^8, nthreads=4) >
+          3 * estimate_compression_memory(level=3, src_size=10^8)
+    @test estimate_compression_memory(level=3, long=true) > estimate_compression_memory(level=3)
+    for level in (1, 3, 9)
+        buf = IOBuffer()
+        s = Zstandard.ZstdCompressorStream(buf; level, close_io=false)
+        for p in Iterators.partition(data, 100_000); write(s, p); end
+        @test Base.summarysize(s.sc) < 1.1 * estimate_compression_memory(; level, streaming=true)
+        pr = stream_progress(s)
+        @test pr.ingested == length(data)
+        @test 0 < pr.consumed <= pr.ingested
+        @test pr.flushed <= pr.produced
+        close(s)
+        c = take!(buf)
+        pr = stream_progress(s)
+        @test pr.consumed == pr.ingested == length(data)
+        @test pr.flushed == pr.produced == length(c)
+        # decoder side
+        c2 = vcat(c, skippable_frame(UInt8[1, 2, 3]), compress(data[1:1000]))
+        r = Zstandard.ZstdDecompressorStream(IOBuffer(c2))
+        @test stream_progress(r) == (; consumed=0, produced=0, frames=0)
+        read(r, 10)
+        @test stream_progress(r).produced >= 10
+        rest = read(r)
+        pr = stream_progress(r)
+        @test pr.consumed == length(c2)
+        @test pr.produced == length(data) + 1000 == 10 + length(rest)
+        @test pr.frames == 2
+        w = frame_header(c).window_size
+        @test Base.summarysize(r.d) < 1.2 * estimate_decompression_memory(window_size=w)
+    end
+    @test estimate_decompression_memory(streaming=false) < estimate_decompression_memory(window_size=1 << 20)
+end
