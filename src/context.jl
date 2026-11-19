@@ -40,6 +40,7 @@ function ZstdCompressionContext(; level::Union{Nothing,Integer}=nothing, checksu
                                 dict::Union{Nothing,ZstdDictionary,PreparedDictionary}=nothing,
                                 long::Bool=false, content_size::Bool=true, dict_id::Bool=true,
                                 magicless::Bool=false, prefix::Union{Nothing,AbstractVector{UInt8}}=nothing,
+                                target_block_size::Union{Nothing,Integer}=nothing,
                                 window_log=nothing, hash_log=nothing,
                                 chain_log=nothing, search_log=nothing, min_match=nothing,
                                 target_length=nothing, strategy=nothing)
@@ -52,7 +53,7 @@ function ZstdCompressionContext(; level::Union{Nothing,Integer}=nothing, checksu
     level = level === nothing ? 3 : Int(level)
     dict = Encoder.prefix_dict(prefix, dict)
     return ZstdCompressionContext(CompressionContext(), level, checksum, dict, long, params,
-                                  Encoder.FrameOptions(; content_size, dict_id, magicless),
+                                  Encoder.FrameOptions(; content_size, dict_id, magicless, target_block_size),
                                   prefix === nothing ? nothing : Vector{UInt8}(prefix))
 end
 

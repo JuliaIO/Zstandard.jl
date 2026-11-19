@@ -188,6 +188,7 @@ end
 """
     compress(data; level=3, checksum=false, dict=nothing, nthreads=1, long=false,
              content_size=true, dict_id=true, magicless=false, prefix=nothing, rsyncable=false,
+             target_block_size=nothing,
              window_log, hash_log, chain_log, search_log, min_match, target_length, strategy)
         -> Vector{UInt8}
 
@@ -218,6 +219,11 @@ With `long=true`, long-distance matching finds repetitions up to 128 MiB
 apart (as `zstd --long`); the frame then declares a window of up to 128 MiB,
 which decoders must be willing to allocate.
 
+With `target_block_size = n` (1340 to 131072; libzstd's
+`ZSTD_c_targetCBlockSize`), blocks are split so that each compressed block is
+about `n` bytes, which lets a streaming decoder start on each sooner (lower
+latency, slightly lower ratio). Not applied to multithreaded jobs.
+
 With `rsyncable=true` (as `zstd --rsyncable`), the input is cut into jobs at
 content-defined points (as libzstd's `ZSTD_c_rsyncable`): each job starts
 with fresh repeat offsets and entropy tables, so a local change to the input
@@ -243,12 +249,13 @@ function compress(data::AbstractVector{UInt8}; level::Union{Nothing,Integer}=not
                   nthreads::Integer=1, long::Bool=false,
                   content_size::Bool=true, dict_id::Bool=true, magicless::Bool=false,
                   prefix::Union{Nothing,AbstractVector{UInt8}}=nothing, rsyncable::Bool=false,
+                  target_block_size::Union{Nothing,Integer}=nothing,
                   window_log=nothing, hash_log=nothing, chain_log=nothing, search_log=nothing, min_match=nothing, target_length=nothing, strategy=nothing)
     nthreads < 1 && throw(ArgumentError("nthreads must be at least 1"))
     params = Encoder.parameter_overrides(; window_log, hash_log, chain_log, search_log, min_match, target_length, strategy)
     dict = Encoder.prefix_dict(prefix, dict)
     params = Encoder.prefix_params(params, prefix, level, min(length(data), MAX_FRAME_INPUT))
-    frame = Encoder.FrameOptions(; content_size, dict_id, magicless)
+    frame = Encoder.FrameOptions(; content_size, dict_id, magicless, target_block_size)
     if dict isa PreparedDictionary
         Encoder.use_prepared(dict, 0, level, params)     # checks level and parameters
         level = dict.level

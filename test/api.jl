@@ -456,6 +456,8 @@ end
     @test_throws ArgumentError compress(text; search_log=1.5)
 end
 
+median_(v) = sort(v)[cld(length(v), 2)]
+
 # Block sizes in a frame (walks block headers).
 function frame_block_sizes(c)
     h = frame_header(c)
@@ -884,4 +886,23 @@ end
     @test length(a) < 1.01 * length(compress(big; level=3, window_log=17))
     @test decompress(compress(data[1:1000]; rsyncable=true, checksum=true)) == data[1:1000]
     @test_throws ArgumentError compress(data; rsyncable=true, long=true)
+end
+
+@testset "Target compressed block size" begin
+    data = make_text(1_000_000)
+    for level in (1, 3, 9, 19), target in (2000, 8000)
+        c = compress(data; level, target_block_size=target)
+        @test transcode(CodecZstd.ZstdDecompressor, c) == data
+        b = filter(>(1), frame_block_sizes(c))
+        @test median_(b) < 1.3 * target
+        @test length(c) < 1.08 * length(compress(data; level))
+        buf = IOBuffer()
+        s = Zstandard.ZstdCompressorStream(buf; level, target_block_size=target, close_io=false)
+        write(s, data); close(s)
+        @test decompress(take!(buf)) == data
+    end
+    @test compress(ZstdCompressionContext(level=3, target_block_size=4000), data) == compress(data; level=3, target_block_size=4000)
+    @test transcode(ZstandardDecompressor(), transcode(ZstandardCompressor(target_block_size=4000), data)) == data
+    @test_throws ArgumentError compress(data; target_block_size=100)
+    @test_throws ArgumentError compress(data; target_block_size=1 << 20)
 end

@@ -112,3 +112,53 @@ function emit_split_block!(cc, out::Vector{UInt8}, pos::Int,
     end
     return pos
 end
+
+"""
+Split the parsed block so each part encodes to about `target` bytes (libzstd's
+ZSTD_c_targetCBlockSize, without its super-block encoding): parts of equal
+input size, as many as the block's trial cost needs. Returns the new output
+position, or 0 when the block already fits.
+"""
+function emit_target_blocks!(cc, out::Vector{UInt8}, pos::Int, bstart::Ptr{UInt8}, n::Int,
+                             last::Bool, target::Int)
+    ss = cc.ss
+    nseq = ss.nseq
+    nseq < 2 && return 0
+    cc.split === nothing && (cc.split = SplitState())
+    st = cc.split
+    resize!(st.litstart, nseq + 1); resize!(st.srcstart, nseq + 1)
+    l = 0; s = 0
+    @inbounds for i in 1:nseq
+        st.litstart[i] = l; st.srcstart[i] = s
+        l += Int(ss.ll[i]); s += Int(ss.ll[i]) + Int(ss.ml[i])
+    end
+    st.litstart[nseq + 1] = l; st.srcstart[nseq + 1] = s
+    whole = trial_cost(cc, st, 1, nseq + 1, true)
+    whole <= target && return 0
+    k = min(cld(whole, target), nseq)
+    empty!(st.splits)
+    i = 1
+    for part in 1:k-1
+        goal = n * part ÷ k
+        while i <= nseq && st.srcstart[i] < goal; i += 1; end
+        (i > 1 && (isempty(st.splits) || i > st.splits[end]) && i <= nseq) && push!(st.splits, i)
+    end
+    isempty(st.splits) && return 0
+    push!(st.splits, nseq + 1)
+    full = ss
+    a = 1
+    for (j, b) in enumerate(st.splits)
+        tail = j == length(st.splits)
+        sub = sub_seqstore!(st.sub, full, st, a, b, tail)
+        src0 = st.srcstart[a]
+        src1 = tail ? n : st.srcstart[b]
+        cc.ss = sub
+        try
+            pos = emit_parsed_block!(cc, out, pos, bstart + src0, src1 - src0, last && tail)
+        finally
+            cc.ss = full
+        end
+        a = b
+    end
+    return pos
+end

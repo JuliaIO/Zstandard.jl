@@ -26,9 +26,10 @@ function Zstandard.ZstandardCompressor(; level::Union{Nothing,Integer}=nothing, 
                                        dict::Union{Nothing,ZstdDictionary,Zstandard.PreparedDictionary}=nothing,
                                        content_size::Bool=true, dict_id::Bool=true, magicless::Bool=false,
                                        size_hint::Union{Nothing,Integer}=nothing,
+                                       target_block_size::Union{Nothing,Integer}=nothing,
                                        window_log=nothing, hash_log=nothing, chain_log=nothing, search_log=nothing, min_match=nothing, target_length=nothing, strategy=nothing)
     params = Zstandard.Encoder.parameter_overrides(; window_log, hash_log, chain_log, search_log, min_match, target_length, strategy)
-    frame = Zstandard.Encoder.FrameOptions(; content_size, dict_id, magicless)
+    frame = Zstandard.Encoder.FrameOptions(; content_size, dict_id, magicless, target_block_size)
     hint = size_hint === nothing ? nothing : Int(size_hint)
     sc = StreamCompressor(; level, checksum, dict, params, frame, size_hint=hint)
     ZstandardCompressorCodec(sc.level, checksum, dict, params, frame, hint, sc, 1)

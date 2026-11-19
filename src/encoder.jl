@@ -212,9 +212,15 @@ struct FrameOptions
     content_size::Bool
     dict_id::Bool
     magicless::Bool
+    target_block_size::Int      # aim for compressed blocks of about this size (0: off)
 end
-FrameOptions(; content_size::Bool=true, dict_id::Bool=true, magicless::Bool=false) =
-    FrameOptions(content_size, dict_id, magicless)
+function FrameOptions(; content_size::Bool=true, dict_id::Bool=true, magicless::Bool=false,
+                      target_block_size::Union{Nothing,Integer}=nothing)
+    t = target_block_size === nothing ? 0 : Int(target_block_size)
+    (t == 0 || 1340 <= t <= BLOCK_SIZE_MAX) ||
+        throw(ArgumentError("target_block_size must be in 1340:$(BLOCK_SIZE_MAX) (as libzstd)"))
+    return FrameOptions(content_size, dict_id, magicless, t)
+end
 const DEFAULT_FRAME = FrameOptions()
 
 # libzstd strategy names
@@ -1358,6 +1364,7 @@ mutable struct CompressionContext
     fp_new::Vector{Int}
     fp_mid::Vector{Int}
     split::Union{Nothing,SplitState}   # post-splitting scratch, created on first use
+    target_block::Int         # target compressed block size (0: none)
     counts4::Vector{Int32}    # interleaved histogram scratch
     outbuf::Vector{UInt8}     # one-shot output scratch (see OUT_SCRATCH_MAX)
 end
@@ -1383,7 +1390,7 @@ function CompressionContext()
         zeros(UInt8, 256), zeros(Int, 256), zeros(Int, 512), zeros(Int, 512),
         zeros(Int16, 16), FSECTable(), zeros(Int, 16), zeros(UInt8, 256),
         zeros(UInt8, 1024), zeros(UInt8, 1024), OptState(), 0, zeros(Int, 1024), zeros(Int, 1024),
-        zeros(Int, 256), nothing, zeros(Int32, 4 * 64), UInt8[])
+        zeros(Int, 256), nothing, 0, zeros(Int32, 4 * 64), UInt8[])
 end
 
 function reset_context!(cc::CompressionContext, p::CParams, level::Int; clear::Bool=true)
@@ -1404,6 +1411,7 @@ function reset_context!(cc::CompressionContext, p::CParams, level::Int; clear::B
     cc.huf_prev_ok = false
     cc.opt.have_stats = false
     cc.savings = 0
+    cc.target_block = 0
     return cc
 end
 
@@ -1977,7 +1985,10 @@ function compress_block_body!(cc::CompressionContext, out::Vector{UInt8}, pos::I
         end
     end
     ldm === nothing ? parse_block!(cc, base, bstart, bend) : parse_block_ldm!(cc, base, bstart, bend, ldm)
-    if cc.params.strategy >= S_BTOPT && cc.params.window_log >= 17
+    if cc.target_block > 0
+        p2 = emit_target_blocks!(cc, out, pos, bstart, n, last, cc.target_block)
+        p2 != 0 && return p2
+    elseif cc.params.strategy >= S_BTOPT && cc.params.window_log >= 17
         cc.split === nothing && (cc.split = SplitState())
         p2 = emit_split_block!(cc, out, pos, bstart, n, last)
         p2 != 0 && return p2
@@ -2115,6 +2126,7 @@ function compress_frame!(cc::CompressionContext, data::AbstractVector{UInt8}, le
         out = Vector{UInt8}(undef, bound)
     end
     pos = write_frame_header!(out, 1, n, p.window_log, checksum, dict === nothing ? UInt32(0) : dict.id, frame)
+    cc.target_block = frame.target_block_size
     GC.@preserve src begin
         base = pointer(src)
         dlen > 0 && prepared === nothing && load_dict!(cc, base, dlen)
@@ -2325,6 +2337,7 @@ function stream_begin!(sc::StreamCompressor)
     out_reserve!(sc, 32)
     sc.olen = write_frame_header!(sc.out, sc.olen + 1, sc.pledged, p.window_log, sc.checksum,
                                   dict === nothing ? UInt32(0) : dict.id, sc.frame) - 1
+    cc.target_block = sc.frame.target_block_size
     sc.xxh = ChecksumState()
     sc.total = 0
     sc.consumed = 0

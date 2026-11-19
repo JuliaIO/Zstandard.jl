@@ -451,7 +451,8 @@ input.
 
 `window_log`, `hash_log`, `chain_log`, `search_log`, `min_match`,
 `target_length` and `strategy` override the level's parameters,
-`content_size`, `dict_id` and `magicless` set frame header options, and
+`content_size`, `dict_id`, `magicless` and `target_block_size` set frame
+options, and
 `prefix` sets a reference prefix, as for `compress` (the window is sized for
 the prefix plus the pledged size or size hint).
 `close` finishes the frame and, if `close_io` is true, closes `io` (pass
@@ -471,9 +472,10 @@ function ZstdCompressorStream(io::IO; level::Union{Nothing,Integer}=nothing, che
                               size_hint::Union{Nothing,Integer}=nothing,
                               content_size::Bool=true, dict_id::Bool=true, magicless::Bool=false,
                               prefix::Union{Nothing,AbstractVector{UInt8}}=nothing,
+                              target_block_size::Union{Nothing,Integer}=nothing,
                               window_log=nothing, hash_log=nothing, chain_log=nothing, search_log=nothing, min_match=nothing, target_length=nothing, strategy=nothing)
     params = parameter_overrides(; window_log, hash_log, chain_log, search_log, min_match, target_length, strategy)
-    frame = FrameOptions(; content_size, dict_id, magicless)
+    frame = FrameOptions(; content_size, dict_id, magicless, target_block_size)
     dict = prefix_dict(prefix, dict)
     expect = pledged_size !== nothing ? Int(pledged_size) : size_hint !== nothing ? Int(size_hint) :
              prefix === nothing ? 0 : length(prefix)
