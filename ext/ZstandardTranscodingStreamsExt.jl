@@ -12,16 +12,18 @@ using TranscodingStreams: Codec, Memory, Error
 # ---------------------------------------------------------------------------
 
 mutable struct ZstandardCompressorCodec <: Codec
-    level::Int
+    level::Union{Nothing,Int}
     checksum::Bool
-    dict::Union{Nothing,ZstdDictionary}
+    dict::Union{Nothing,ZstdDictionary,Zstandard.PreparedDictionary}
     sc::StreamCompressor
     opos::Int            # next byte of sc.out to emit
 end
 
-Zstandard.ZstandardCompressor(; level::Integer=3, checksum::Bool=false,
-                              dict::Union{Nothing,ZstdDictionary}=nothing) =
-    ZstandardCompressorCodec(Int(level), checksum, dict, StreamCompressor(; level, checksum, dict), 1)
+function Zstandard.ZstandardCompressor(; level::Union{Nothing,Integer}=nothing, checksum::Bool=false,
+                                       dict::Union{Nothing,ZstdDictionary,Zstandard.PreparedDictionary}=nothing)
+    sc = StreamCompressor(; level, checksum, dict)
+    ZstandardCompressorCodec(sc.level, checksum, dict, sc, 1)
+end
 
 Base.show(io::IO, c::ZstandardCompressorCodec) = print(io, "ZstandardCompressor(level=$(c.level))")
 

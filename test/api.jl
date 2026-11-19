@@ -286,3 +286,52 @@ end
     @test frame_content_size(c2) === nothing
     @test decompress(c2) == data
 end
+
+@testset "Prepared dictionary" begin
+    samples = [make_text(1200 + 37i)[(13i % 200) + 1:end] for i in 1:400]
+    fd = parse_dictionary(train_dictionary(samples[1:300]; dict_size=16384))
+    dpath = tempname(); write(dpath, Zstandard.Encoder.finalize_dictionary(fd.content, samples[1:300];
+                                                                          dict_size=16384, dict_id=fd.id))
+    fd = parse_dictionary(read(dpath))
+    for level in (1, 3, 5, 9, 16, 19)
+        pd = prepare_dictionary(fd; level)
+        @test pd.level == level
+        htab0 = copy(pd.htab); ctab0 = copy(pd.ctab)
+        plain = 0; prepared = 0
+        for s in samples[301:340]
+            c = compress(s; dict=pd)
+            @test decompress(c, fd) == s
+            @test frame_dict_id(c) == fd.id
+            plain += length(compress(s; level, dict=fd)); prepared += length(c)
+        end
+        @test prepared <= 1.02 * plain
+        @test pd.htab == htab0 && pd.ctab == ctab0         # never modified
+        @test compress(samples[350]; level, dict=pd) == compress(samples[350]; dict=pd)
+        @test_throws ArgumentError compress(samples[350]; level=level + 1, dict=pd)
+        # the reference decoder accepts the frames
+        f = tempname(); write(f, compress(samples[360]; dict=pd, checksum=true))
+        @test read(`$(Zstd_jll.zstd()) -q -d -c -D $dpath $f`) == samples[360]
+        # inputs too large for the prepared window take the regular path
+        big = make_text(600_000)
+        @test compress(big; dict=pd) == compress(big; level, dict=fd)
+    end
+    pd = prepare_dictionary(fd; level=3)
+    # streams: prepared tables with a small pledged size, regular path otherwise
+    for pledged in (nothing, length(samples[370]))
+        buf = IOBuffer()
+        s = ZCS(buf; dict=pd, pledged_size=pledged, close_io=false)
+        write(s, samples[370]); close(s)
+        c = take!(buf)
+        @test decompress(c, fd) == samples[370]
+        pledged === nothing && @test c == (b2 = IOBuffer(); s2 = ZCS(b2; dict=fd, close_io=false);
+                                          write(s2, samples[370]); close(s2); take!(b2))
+    end
+    @test_throws ArgumentError ZCS(IOBuffer(); dict=pd, level=5)
+    # TranscodingStreams codec
+    c = transcode(ZstandardCompressor(dict=pd), samples[371])
+    @test transcode(ZstandardDecompressor(dict=fd), c) == samples[371]
+    # shared between tasks
+    results = fetch.([Threads.@spawn(compress(samples[i]; dict=pd)) for i in 301:400])
+    @test all(decompress(results[k], fd) == samples[300 + k] for k in 1:100)
+    @test occursin("PreparedDictionary", sprint(show, pd))
+end

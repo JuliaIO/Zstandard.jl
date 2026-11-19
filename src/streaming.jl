@@ -5,7 +5,7 @@ module Streaming
 import ..Decoder: DecoderState, ZstdDictionary, FrameInfo, read_frame_info, reset_frame!,
                   decode_compressed_block!, memset!, zerr, ensure_capacity!,
                   MAGIC_NUMBER, SKIPPABLE_MAGIC_START, SKIPPABLE_MASK, BLOCK_SIZE_MAX, WILDCOPY_SLACK
-import ..Encoder: StreamCompressor, stream_write!, stream_flush!, stream_finish!
+import ..Encoder: StreamCompressor, stream_write!, stream_flush!, stream_finish!, PreparedDictionary
 using ..XXHash: ChecksumState, checksum_update!, checksum_digest
 
 export ZstdDecompressorStream, ZstdCompressorStream, StreamDecoder
@@ -391,8 +391,8 @@ mutable struct ZstdCompressorStream <: IO
     close_io::Bool
 end
 
-function ZstdCompressorStream(io::IO; level::Integer=3, checksum::Bool=false,
-                              dict::Union{Nothing,ZstdDictionary}=nothing,
+function ZstdCompressorStream(io::IO; level::Union{Nothing,Integer}=nothing, checksum::Bool=false,
+                              dict::Union{Nothing,ZstdDictionary,PreparedDictionary}=nothing,
                               pledged_size::Union{Nothing,Integer}=nothing, close_io::Bool=true)
     ZstdCompressorStream(io, StreamCompressor(; level, checksum, dict, pledged_size), false, close_io)
 end

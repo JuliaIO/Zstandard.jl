@@ -31,6 +31,7 @@ function _precompile_workload()
 
     dict = ZstdDictionary(text[1:8192])
     decompress(compress(text; dict), dict)
+    decompress(compress(text[1:2000]; dict=prepare_dictionary(dict)), dict)
     return nothing
 end
 

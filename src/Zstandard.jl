@@ -4,7 +4,7 @@ export decompress, compress, ZstdDecompressorStream, ZstdCompressorStream, ZstdD
        parse_dictionary, ZstdError, ZstandardCompressor, ZstandardDecompressor,
        ZstdFrameHeader, frame_header, frame_content_size, frame_compressed_size, frame_dict_id,
        decompressed_size, is_zstd_frame, is_skippable_frame, skippable_frame, read_skippable_frame,
-       train_dictionary, finalize_dictionary
+       train_dictionary, finalize_dictionary, PreparedDictionary, prepare_dictionary
 
 # Swappable XXH64 implementation for frame checksums (see `Zstandard.XXHash`)
 public XXHash, AbstractXXH64, NativeXXH64, XXH64_IMPLEMENTATION, with_xxh64_implementation
@@ -22,7 +22,7 @@ include("frameinfo.jl")
 
 include("encoder.jl")
 using .Encoder: CompressionContext, compress_frame!, mt_layout, compress_job!, frame_header_bytes,
-                train_dictionary, finalize_dictionary
+                train_dictionary, finalize_dictionary, PreparedDictionary, prepare_dictionary
 using .XXHash: content_checksum, AbstractXXH64, NativeXXH64, XXH64_IMPLEMENTATION, with_xxh64_implementation
 
 include("streaming.jl")
@@ -134,8 +134,11 @@ Compress `data` (a byte vector or string) into a Zstandard frame.
 `0` selects the default level 3, as in libzstd. With `checksum=true` an XXH64
 content checksum is appended. With a `ZstdDictionary`, its content serves as
 history and, for formatted dictionaries, its entropy tables and repeat offsets
-are used; the frame records the dictionary ID. Inputs larger than 1 GiB are
-written as several concatenated frames.
+are used; the frame records the dictionary ID. When compressing many small
+inputs with one dictionary, pass a [`PreparedDictionary`](@ref) from
+[`prepare_dictionary`](@ref) instead: it is much faster, and its level is then
+used (a conflicting `level` throws an `ArgumentError`). Inputs larger than
+1 GiB are written as several concatenated frames.
 
 With `nthreads > 1`, inputs larger than a few window sizes are split into
 jobs compressed in parallel tasks (within a single frame, as libzstd's
@@ -147,9 +150,15 @@ With `long=true`, long-distance matching finds repetitions up to 128 MiB
 apart (as `zstd --long`); the frame then declares a window of up to 128 MiB,
 which decoders must be willing to allocate.
 """
-function compress(data::AbstractVector{UInt8}; level::Integer=3, checksum::Bool=false,
-                  dict::Union{Nothing,ZstdDictionary}=nothing, nthreads::Integer=1, long::Bool=false)
+function compress(data::AbstractVector{UInt8}; level::Union{Nothing,Integer}=nothing,
+                  checksum::Bool=false, dict::Union{Nothing,ZstdDictionary,PreparedDictionary}=nothing,
+                  nthreads::Integer=1, long::Bool=false)
     nthreads < 1 && throw(ArgumentError("nthreads must be at least 1"))
+    if dict isa PreparedDictionary
+        Encoder.use_prepared(dict, 0, level)     # checks the level
+        level = dict.level
+    end
+    level = level === nothing ? 3 : Int(level)
     if nthreads > 1 && dict === nothing && !long && length(data) <= MAX_FRAME_INPUT
         _, job, _ = mt_layout(length(data), level)
         if length(data) > job

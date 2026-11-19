@@ -61,6 +61,10 @@ dict = parse_dictionary(read("my.dict"))      # formatted (zstd --train) or raw 
 compressed = compress(data; dict)
 decompress(compressed, dict)
 
+# Many small messages with one dictionary: prepare it once (much faster per message)
+pdict = prepare_dictionary(dict; level=3)
+compressed = compress(message; dict=pdict)      # decompress with `dict` as usual
+
 # Train a dictionary from many small samples
 dict_bytes = train_dictionary(samples; dict_size=16384)
 dict = parse_dictionary(dict_bytes)

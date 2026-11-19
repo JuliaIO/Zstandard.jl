@@ -17,7 +17,8 @@ import ..Decoder: LL_BASE, LL_BITS, ML_BASE, ML_BITS, LL_DEFAULT_NORM, ML_DEFAUL
                   OF_DEFAULT_NORM, MAGIC_NUMBER, BLOCK_SIZE_MAX, ZstdDictionary, has_entropy
 
 export CompressionContext, compress_frame!, compression_parameters, MIN_LEVEL, MAX_LEVEL,
-       StreamCompressor, stream_write!, stream_flush!, stream_finish!, stream_pledge!
+       StreamCompressor, stream_write!, stream_flush!, stream_finish!, stream_pledge!,
+       PreparedDictionary, prepare_dictionary
 
 const MIN_LEVEL = -7
 const MAX_LEVEL = 22
@@ -963,16 +964,16 @@ function CompressionContext()
         zeros(UInt8, 1024), zeros(UInt8, 1024), OptState())
 end
 
-function reset_context!(cc::CompressionContext, p::CParams, level::Int)
+function reset_context!(cc::CompressionContext, p::CParams, level::Int; clear::Bool=true)
     cc.params = p
     cc.level = level
     hsize = 1 << p.hash_log
     length(cc.htab) != hsize && resize!(cc.htab, hsize)
-    fill!(cc.htab, Int32(0))
+    clear && fill!(cc.htab, Int32(0))
     if p.strategy == S_DFAST || p.strategy >= S_GREEDY
         csize = 1 << p.chain_log
         length(cc.ctab) != csize && resize!(cc.ctab, csize)
-        fill!(cc.ctab, Int32(0))
+        clear && fill!(cc.ctab, Int32(0))
     end
     cc.next_to_update = 1
     cc.prep1, cc.prep2 = 1, 4
@@ -1527,14 +1528,23 @@ function write_frame_header!(out::Vector{UInt8}, pos::Int, src_size::Int, window
     return pos
 end
 
+include("prepared.jl")
+
 """
     compress_frame!(cc, data, level; checksum=false) -> Vector{UInt8}
 
 Compress `data` as a single Zstandard frame.
 """
 function compress_frame!(cc::CompressionContext, data::AbstractVector{UInt8}, level::Integer;
-                         checksum::Bool=false, dict::Union{Nothing,ZstdDictionary}=nothing,
+                         checksum::Bool=false,
+                         dict::Union{Nothing,ZstdDictionary,PreparedDictionary}=nothing,
                          long::Bool=false)
+    prepared = nothing
+    if dict isa PreparedDictionary
+        level = dict.level
+        prepared = (!long && use_prepared(dict, length(data), level)) ? dict : nothing
+        dict = dict.dict
+    end
     n = length(data)
     dlen = dict === nothing ? 0 : length(dict.content)
     if dlen > 0
@@ -1552,14 +1562,19 @@ function compress_frame!(cc::CompressionContext, data::AbstractVector{UInt8}, le
         wlog = max(p.window_log, min(LDM_WINDOW_LOG, src_log))
         p = CParams(wlog, p.chain_log, p.hash_log, p.search_log, p.min_match, p.target_length, p.strategy)
     end
-    reset_context!(cc, p, Int(level))
-    dict === nothing || apply_dict_entropy!(cc, dict)
+    if prepared !== nothing
+        p = prepared.params
+        use_prepared!(cc, prepared)
+    else
+        reset_context!(cc, p, Int(level))
+        dict === nothing || apply_dict_entropy!(cc, dict)
+    end
     bound = n + (n >> 7) + 64 + 3 * (n ÷ BLOCK_SIZE_MAX + 1)
     out = Vector{UInt8}(undef, bound)
     pos = write_frame_header!(out, 1, n, p.window_log, checksum, dict === nothing ? UInt32(0) : dict.id)
     GC.@preserve src begin
         base = pointer(src)
-        dlen > 0 && load_dict!(cc, base, dlen)
+        dlen > 0 && prepared === nothing && load_dict!(cc, base, dlen)
         ldm = nothing
         if long && n >= 1 << 16
             mm = p.strategy >= S_BTULTRA ? 32 : 64
@@ -1673,7 +1688,7 @@ mutable struct StreamCompressor
     cc::CompressionContext
     level::Int
     checksum::Bool
-    dict::Union{Nothing,ZstdDictionary}
+    dict::Union{Nothing,ZstdDictionary,PreparedDictionary}
     buf::Vector{UInt8}   # [history | pending input]
     len::Int             # valid bytes in buf
     pend::Int            # first byte not yet compressed (1-based)
@@ -1688,10 +1703,15 @@ mutable struct StreamCompressor
     total::Int           # bytes written to the current frame
 end
 
-function StreamCompressor(; level::Integer=3, checksum::Bool=false,
-                          dict::Union{Nothing,ZstdDictionary}=nothing,
+function StreamCompressor(; level::Union{Nothing,Integer}=nothing, checksum::Bool=false,
+                          dict::Union{Nothing,ZstdDictionary,PreparedDictionary}=nothing,
                           pledged_size::Union{Nothing,Integer}=nothing)
-    sc = StreamCompressor(CompressionContext(), Int(level), checksum, dict, UInt8[], 0, 1, 0, 0,
+    if dict isa PreparedDictionary
+        use_prepared(dict, 0, level)        # checks the level
+        level = dict.level
+    end
+    level = level === nothing ? 3 : Int(level)
+    sc = StreamCompressor(CompressionContext(), level, checksum, dict, UInt8[], 0, 1, 0, 0,
                           UInt8[], 0, false, false, ChecksumState(), -1, 0)
     pledged_size === nothing || stream_pledge!(sc, pledged_size)
     return sc
@@ -1717,24 +1737,32 @@ end
 
 function stream_begin!(sc::StreamCompressor)
     cc = sc.cc
-    dlen = sc.dict === nothing ? 0 : length(sc.dict.content)
-    p = compression_parameters(sc.level, sc.pledged < 0 ? -1 : sc.pledged + dlen)
-    reset_context!(cc, p, sc.level)
-    sc.dict === nothing || apply_dict_entropy!(cc, sc.dict)
+    pd = sc.dict isa PreparedDictionary && sc.pledged >= 0 && use_prepared(sc.dict, sc.pledged, nothing) ?
+         sc.dict : nothing
+    dict = sc.dict isa PreparedDictionary ? sc.dict.dict : sc.dict
+    dlen = dict === nothing ? 0 : length(dict.content)
+    if pd !== nothing
+        p = pd.params
+        use_prepared!(cc, pd)
+    else
+        p = compression_parameters(sc.level, sc.pledged < 0 ? -1 : sc.pledged + dlen)
+        reset_context!(cc, p, sc.level)
+        dict === nothing || apply_dict_entropy!(cc, dict)
+    end
     window = 1 << p.window_log
     sc.gran = 1 << max(p.chain_log, 17)
     sc.cap = window + dlen + sc.gran + 2 * BLOCK_SIZE_MAX
     resize!(sc.buf, min(sc.cap, max(dlen + 2 * BLOCK_SIZE_MAX, 1 << 18)))
     sc.len = 0
     if dlen > 0
-        copyto!(sc.buf, 1, sc.dict.content, 1, dlen)
+        copyto!(sc.buf, 1, dict.content, 1, dlen)
         sc.len = dlen
-        GC.@preserve sc load_dict!(cc, pointer(sc.buf), dlen)
+        pd === nothing && GC.@preserve sc load_dict!(cc, pointer(sc.buf), dlen)
     end
     sc.pend = sc.len + 1
     out_reserve!(sc, 32)
     sc.olen = write_frame_header!(sc.out, sc.olen + 1, sc.pledged, p.window_log, sc.checksum,
-                                  sc.dict === nothing ? UInt32(0) : sc.dict.id) - 1
+                                  dict === nothing ? UInt32(0) : dict.id) - 1
     sc.xxh = ChecksumState()
     sc.total = 0
     sc.started = true
