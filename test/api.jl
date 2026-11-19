@@ -813,3 +813,47 @@ end
     end
     @test estimate_decompression_memory(streaming=false) < estimate_decompression_memory(window_size=1 << 20)
 end
+
+@testset "Sequence API" begin
+    nodelim(s) = begin
+        out = ZstdSequence[]; carry = 0
+        for x in s
+            if x.match_length == 0
+                carry += x.literal_length
+            else
+                push!(out, ZstdSequence(x.offset, x.literal_length + carry, x.match_length)); carry = 0
+            end
+        end
+        out
+    end
+    text = make_text(600_000)
+    x = UInt64(11)
+    rnd(n) = UInt8[(x = x * 6364136223846793005 + 1442695040888963407; (x >> 56) % UInt8) for _ in 1:n]
+    mixed = vcat(rnd(150_000), repeat(text[1:1000], 200), rnd(70_001))
+    for d in (text, mixed, UInt8[], UInt8[1, 2, 3], fill(0x07, 300_000)), level in (1, 9, 19)
+        s = generate_sequences(d; level)
+        @test all(z -> z.match_length == 0 || (z.offset >= 1 && z.match_length >= 3), s)
+        @test sum(z -> z.literal_length + z.match_length, s; init=0) == length(d)
+        @test count(z -> z.offset == 0 && z.match_length == 0, s) >= cld(length(d), 128 << 10)
+        c = compress_sequences(d, s; level)
+        @test transcode(CodecZstd.ZstdDecompressor, c) == d
+        level < 16 && @test length(c) <= length(compress(d; level)) + 8
+        c2 = compress_sequences(d, nodelim(s); level, checksum=true)
+        @test decompress(c2) == d
+    end
+    # matches and literal runs longer than a block, implied trailing literals
+    d = repeat(UInt8[1, 2, 3, 4, 5], 100_000)
+    @test decompress(compress_sequences(d, [ZstdSequence(5, 5, length(d) - 5)])) == d
+    @test decompress(compress_sequences(text, ZstdSequence[])) == text
+    @test decompress(compress_sequences(text, [ZstdSequence(0, length(text) - 100, 0)][1:0])) == text
+    # validation
+    @test_throws ArgumentError compress_sequences(text, [ZstdSequence(3, 10, 2)])           # match too short
+    @test_throws ArgumentError compress_sequences(text, [ZstdSequence(50, 10, 20)])          # reaches before the data
+    @test_throws ArgumentError compress_sequences(text, [ZstdSequence(1, 10, 20)])           # does not match
+    @test_throws ArgumentError compress_sequences(text, [ZstdSequence(0, length(text) + 1, 0)])
+    @test_throws ArgumentError compress_sequences(text, [ZstdSequence(0, 200_000, 0)])        # block too large
+    @test_throws ArgumentError compress_sequences(text, [ZstdSequence(0, 1000, 0), ZstdSequence(3, 1, 5)])
+    c = compress_sequences(text, [ZstdSequence(1, 10, 20)]; validate=false)                   # unchecked: decodes to other bytes
+    @test length(decompress(c)) == length(text) && decompress(c) != text
+    @test sprint(show, ZstdSequence(1, 2, 3)) == "ZstdSequence(1, 2, 3)"
+end

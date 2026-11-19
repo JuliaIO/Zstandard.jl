@@ -7,7 +7,8 @@ export decompress, compress, ZstdDecompressorStream, ZstdCompressorStream, ZstdD
        train_dictionary, finalize_dictionary, PreparedDictionary, prepare_dictionary,
        ZstdCompressionContext, ZstdDecompressionContext, compress!, decompress!,
        compress_seekable, ZstdSeekTable, seek_table, decompress_range,
-       estimate_compression_memory, estimate_decompression_memory, stream_progress
+       estimate_compression_memory, estimate_decompression_memory, stream_progress,
+       ZstdSequence, generate_sequences, compress_sequences
 
 # Swappable XXH64 implementation for frame checksums (see `Zstandard.XXHash`)
 public XXHash, AbstractXXH64, NativeXXH64, XXH64_IMPLEMENTATION, with_xxh64_implementation
@@ -316,6 +317,7 @@ end
 include("context.jl")
 include("seekable.jl")
 include("estimate.jl")
+include("sequences.jl")
 include("precompile.jl")
 
 end # module
