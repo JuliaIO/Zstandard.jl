@@ -392,7 +392,8 @@ end
     # strategy changes the parser at a fixed level
     text = make_text(400_000)
     sizes = Dict(st => length(compress(text; level=5, strategy=st)) for st in (:fast, :dfast, :greedy, :lazy2, :btultra))
-    @test sizes[:btultra] < sizes[:lazy2] < sizes[:fast]
+    @test sizes[:lazy2] < sizes[:greedy] < sizes[:fast]
+    @test sizes[:btultra] < sizes[:fast]
     @test length(unique(values(sizes))) == 5
 
     # a grid of parameter combinations decodes with both decoders

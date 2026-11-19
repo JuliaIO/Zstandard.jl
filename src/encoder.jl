@@ -125,8 +125,8 @@ with the meaning of libzstd's `ZSTD_c_*` parameters:
 - `min_match` (3-7): minimum match length searched for (the match finders
   use 4-7 for fast/dfast, 4-6 for greedy/lazy, 3-4 for btopt/btultra)
 - `target_length` (0-131072): for fast, a step size (acceleration); for
-  lazy, a length beyond which no better match is sought; for btopt/btultra,
-  a length taken without optimizing
+  btopt/btultra, a length taken without optimizing (unused by greedy/lazy,
+  as in libzstd)
 - `strategy`: `:fast`, `:dfast`, `:greedy`, `:lazy`, `:lazy2`, `:btopt`,
   `:btultra` (libzstd's `:btlazy2` and `:btultra2` are accepted and use
   `:lazy2` and `:btultra`)
@@ -523,6 +523,18 @@ end
     best = 3
     bestoff = 0
     lowl = max(lowlimit, 1)
+    # first pass: prefetch the candidates' data, so the comparisons below
+    # overlap their cache misses (as libzstd's match buffer does)
+    mm = m; k = attempts
+    while mm != 0 && k > 0
+        j = trailing_zeros(mm)
+        mm &= mm - 1
+        midx = Int(unsafe_load(pos, rows + ((hd + j) & (nent - 1)) + 1))
+        if lowl <= midx < cur
+            prefetch(ptr_of(midx, base))
+            k -= 1
+        end
+    end
     while m != 0 && attempts > 0
         j = trailing_zeros(m)
         m &= m - 1
@@ -542,8 +554,10 @@ end
     return (bestoff == 0 ? 0 : best), bestoff, cur
 end
 
+const K_LAZY_SKIPPING_STEP = 8
+
 function parse_lazy!(ss::SeqStore, htab::Vector{Int32}, hlog::Int, ctab::Vector{Int32}, rlog::Int,
-                     mls::Int, attempts::Int, depth::Int, target_len::Int, base::Ptr{UInt8},
+                     mls::Int, attempts::Int, depth::Int, base::Ptr{UInt8},
                      istart::Ptr{UInt8}, iend::Ptr{UInt8}, lowlimit::Int, rep1::Int, rep2::Int,
                      next::Int)
     ilimit = iend - HASH_READ_SIZE
@@ -555,7 +569,7 @@ function parse_lazy!(ss::SeqStore, htab::Vector{Int32}, hlog::Int, ctab::Vector{
     GC.@preserve htab ctab begin
         ht = pointer(htab); ch = Ptr{UInt8}(pointer(ctab))
         while ip < ilimit
-            ml = 0; offset = 0; start = ip + 1
+            ml = 0; offset = 0; start = ip + 1; isrep = true
             cur = pos_of(ip, base)
             # repcode at ip+1
             if rep1 > 0 && cur + 1 - rep1 >= lowlimit && load32(ip + 1 - rep1) == load32(ip + 1)
@@ -567,41 +581,48 @@ function parse_lazy!(ss::SeqStore, htab::Vector{Int32}, hlog::Int, ctab::Vector{
                 l2, o2, nxt = row_find_best(ht, ch, rbits, rlog, mls, attempts, base, ip, iend, lowlimit, next)
                 next = nxt
                 if l2 > ml
-                    ml = l2; offset = o2; start = ip
+                    ml = l2; offset = o2; start = ip; isrep = false
                 end
             end
             if ml < 4
-                ip += ((Int(ip - anchor) >> K_SEARCH_STRENGTH) + 1)
+                step = (Int(ip - anchor) >> K_SEARCH_STRENGTH) + 1
+                ip += step
+                # long literal runs: stop inserting the skipped positions
+                # (libzstd's lazySkipping)
+                step > K_LAZY_SKIPPING_STEP && (next = pos_of(ip, base))
                 continue
             end
             # lazy evaluation
-            if depth >= 1 && ml < target_len
+            if depth >= 1
                 while ip < ilimit
                     ip += 1
                     cur2 = pos_of(ip, base)
+                    ocost = isrep ? 0 : highbit(offset + 3)
                     if rep1 > 0 && cur2 - rep1 >= lowlimit && load32(ip) == load32(ip - rep1)
                         mlr = zcount(ip + 4, ip + 4 - rep1, iend) + 4
                         gain2 = mlr * 3
-                        gain1 = ml * 3 - highbit(offset + 3) + 1
+                        gain1 = ml * 3 - ocost + 1
                         if gain2 > gain1
-                            ml = mlr; offset = rep1; start = ip
+                            ml = mlr; offset = rep1; start = ip; isrep = true
                         end
                     end
                     l2, o2, nxt = row_find_best(ht, ch, rbits, rlog, mls, attempts, base, ip, iend, lowlimit, next)
                     next = nxt
                     gain2 = l2 * 4 - highbit(o2 + 3)
-                    gain1 = ml * 4 - highbit(offset + 3) + 4
+                    ocost = isrep ? 0 : highbit(offset + 3)
+                    gain1 = ml * 4 - ocost + 4
                     if l2 >= 4 && gain2 > gain1
-                        ml = l2; offset = o2; start = ip
+                        ml = l2; offset = o2; start = ip; isrep = false
                         continue
                     end
                     if depth == 2 && ip < ilimit
                         ip += 1
                         cur2 = pos_of(ip, base)
+                        ocost = isrep ? 0 : highbit(offset + 3)
                         if rep1 > 0 && cur2 - rep1 >= lowlimit && load32(ip) == load32(ip - rep1)
                             mlr = zcount(ip + 4, ip + 4 - rep1, iend) + 4
                             gain2 = mlr * 4
-                            gain1 = ml * 4 - highbit(offset + 3) + 1
+                            gain1 = ml * 4 - ocost + 1
                             if gain2 > gain1
                                 ml = mlr; offset = rep1; start = ip
                             end
@@ -609,9 +630,10 @@ function parse_lazy!(ss::SeqStore, htab::Vector{Int32}, hlog::Int, ctab::Vector{
                         l2, o2, nxt = row_find_best(ht, ch, rbits, rlog, mls, attempts, base, ip, iend, lowlimit, next)
                         next = nxt
                         gain2 = l2 * 4 - highbit(o2 + 3)
-                        gain1 = ml * 4 - highbit(offset + 3) + 7
+                        ocost = isrep ? 0 : highbit(offset + 3)
+                        gain1 = ml * 4 - ocost + 7
                         if l2 >= 4 && gain2 > gain1
-                            ml = l2; offset = o2; start = ip
+                            ml = l2; offset = o2; start = ip; isrep = false
                             continue
                         end
                     end
@@ -619,7 +641,7 @@ function parse_lazy!(ss::SeqStore, htab::Vector{Int32}, hlog::Int, ctab::Vector{
                 end
             end
             # catch up: extend the match backwards
-            if offset != rep1
+            if !isrep
                 m = start - offset
                 while start > anchor && m > lowp && unsafe_load(start - 1) == unsafe_load(m - 1)
                     start -= 1; m -= 1; ml += 1
@@ -1598,7 +1620,7 @@ function parse_range!(cc::CompressionContext, base::Ptr{UInt8}, bstart::Ptr{UInt
         mls = clamp(p.min_match, 4, 6)
         cc.next_to_update = max(cc.next_to_update, lowlimit)
         cc.prep1, cc.prep2, cc.next_to_update = parse_lazy!(ss, cc.htab, p.hash_log, cc.ctab,
-            row_log(p), mls, 1 << min(p.search_log, row_log(p)), depth, max(p.target_length, 4), base, bstart, bend,
+            row_log(p), mls, 1 << min(p.search_log, row_log(p)), depth, base, bstart, bend,
             lowlimit, cc.prep1, cc.prep2, cc.next_to_update)
     end
     return
