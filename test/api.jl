@@ -335,3 +335,32 @@ end
     @test all(decompress(results[k], fd) == samples[300 + k] for k in 1:100)
     @test occursin("PreparedDictionary", sprint(show, pd))
 end
+
+@testset "Decoder window size limit" begin
+    data = make_text(300_000)
+    f = tempname(); write(f, data)
+    for wlog in (28, 30)
+        # from a pipe the CLI cannot shrink the window to the input size
+        c = read(pipeline(`cat $f`, `$(Zstd_jll.zstd()) -q -3 --long=$wlog -c`))
+        @test frame_header(c).window_size == 1 << wlog
+        @test_throws ZstdError read(ZDS(IOBuffer(c)))
+        @test read(ZDS(IOBuffer(c); max_window_size=1 << wlog)) == data
+        @test_throws Exception transcode(ZstandardDecompressor(), c)
+        @test transcode(ZstandardDecompressor(max_window_size=1 << wlog), c) == data
+        @test decompress(c) == data            # in memory: no window buffer, no limit needed
+    end
+    err = try read(ZDS(IOBuffer(read(pipeline(`cat $f`, `$(Zstd_jll.zstd()) -q --long=30 -c`))))) catch e; e end
+    @test err isa ZstdError && occursin("max_window_size", sprint(showerror, err))
+    # a lower limit rejects ordinary frames too
+    c = transcode(CodecZstd.ZstdCompressor(level=19), data)
+    @test frame_header(c).window_size > 1 << 16
+    @test_throws ZstdError read(ZDS(IOBuffer(c); max_window_size=1 << 16))
+    @test_throws ArgumentError ZDS(IOBuffer(c); max_window_size=100)
+    # everything Zstandard.jl writes fits the default limit
+    big = repeat(data, 20)
+    for c in (compress(big; level=22), compress(big; long=true, level=19), compress(big; nthreads=2),
+              (b = IOBuffer(); s = ZCS(b; level=22, close_io=false); write(s, data); close(s); take!(b)))
+        @test frame_header(c).window_size <= Zstandard.Streaming.DEFAULT_MAX_WINDOW_SIZE
+        @test length(read(ZDS(IOBuffer(c)))) > 0
+    end
+end

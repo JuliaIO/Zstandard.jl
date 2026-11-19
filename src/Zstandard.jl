@@ -44,10 +44,12 @@ stream = TranscodingStream(ZstandardCompressor(), open("out.zst", "w"))
 function ZstandardCompressor end
 
 """
-    ZstandardDecompressor(; dict=nothing)
+    ZstandardDecompressor(; dict=nothing, max_window_size=128 MiB)
 
 A [TranscodingStreams.jl](https://github.com/JuliaIO/TranscodingStreams.jl) codec
-decoding Zstandard data (concatenated and skippable frames included).
+decoding Zstandard data (concatenated and skippable frames included). Frames
+with a window larger than `max_window_size` are rejected (see
+`ZstdDecompressorStream`).
 Available once `TranscodingStreams` is loaded.
 """
 function ZstandardDecompressor end

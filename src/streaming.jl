@@ -52,11 +52,22 @@ mutable struct StreamDecoder
     fi::FrameInfo
     frame_produced::Int
     xxh::Union{Nothing,ChecksumState}
+    max_window::Int      # largest window size accepted
 end
 
-function StreamDecoder(dict::Union{Nothing,ZstdDictionary}=nothing)
+"""
+Default largest window a streaming decoder accepts: 128 MiB, as libzstd's
+default `windowLogMax` of 27. Every frame Zstandard.jl writes (`long=true`
+included) stays within it.
+"""
+const DEFAULT_MAX_WINDOW_SIZE = 1 << 27
+
+function StreamDecoder(dict::Union{Nothing,ZstdDictionary}=nothing;
+                       max_window_size::Integer=DEFAULT_MAX_WINDOW_SIZE)
+    max_window_size >= 1 << 10 || throw(ArgumentError("max_window_size must be at least 1 KiB"))
     StreamDecoder(dict, DecoderState(), Vector{UInt8}(undef, 64), 0, 4, U_MAGIC, 0, 0, false,
-        UInt8[], 1, 0, 0, false, 0, FrameInfo(0, 0, -1, 0, false, false), 0, nothing)
+        UInt8[], 1, 0, 0, false, 0, FrameInfo(0, 0, -1, 0, false, false), 0, nothing,
+        Int(max_window_size))
 end
 
 """Number of input bytes the decoder wants next (0 never happens)."""
@@ -101,6 +112,12 @@ end
 function begin_frame!(d::StreamDecoder, hdr::AbstractVector{UInt8})
     h = Vector{UInt8}(hdr)
     fi = GC.@preserve h read_frame_info(pointer(h), length(h))
+    # Decoding keeps up to one window of history in memory, so refuse windows
+    # above the limit (libzstd: frameParameter_windowTooLarge).
+    if fi.window_size > d.max_window
+        zerr("frame requires a window of $(fi.window_size) bytes, more than the limit of " *
+             "$(d.max_window) bytes (raise it with the `max_window_size` keyword)")
+    end
     dict = d.dict
     if fi.dict_id != 0
         dict === nothing && zerr("frame requires dictionary ID $(fi.dict_id)")
@@ -284,19 +301,24 @@ end
 # ---------------------------------------------------------------------------
 
 """
-    ZstdDecompressorStream(io::IO, dict::Union{Nothing, ZstdDictionary}=nothing)
+    ZstdDecompressorStream(io::IO, dict::Union{Nothing, ZstdDictionary}=nothing;
+                           max_window_size=128 MiB)
 
 A streaming Zstandard decompressor that implements the `IO` interface.
 Decoded data is produced one block at a time; memory use is bounded by the
-frame's window size plus one block.
+frame's window size plus one block. Frames declaring a window larger than
+`max_window_size` (default 128 MiB, as libzstd) are rejected with a
+`ZstdError`, so untrusted input cannot make the decoder allocate more; raise
+it to read frames written with a larger window (e.g. `zstd --long=30`).
 """
 mutable struct ZstdDecompressorStream <: IO
     io::IO
     d::StreamDecoder
 end
 
-ZstdDecompressorStream(io::IO, dict::Union{Nothing,ZstdDictionary}=nothing) =
-    ZstdDecompressorStream(io, StreamDecoder(dict))
+ZstdDecompressorStream(io::IO, dict::Union{Nothing,ZstdDictionary}=nothing;
+                       max_window_size::Integer=DEFAULT_MAX_WINDOW_SIZE) =
+    ZstdDecompressorStream(io, StreamDecoder(dict; max_window_size))
 
 # Decode until at least one unread byte is available. Returns false at end of input.
 function fill_buffer!(s::ZstdDecompressorStream)

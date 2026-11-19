@@ -84,12 +84,14 @@ end
 
 mutable struct ZstandardDecompressorCodec <: Codec
     dict::Union{Nothing,ZstdDictionary}
+    max_window_size::Int
     d::StreamDecoder
     frames_reported::Int
 end
 
-Zstandard.ZstandardDecompressor(; dict::Union{Nothing,ZstdDictionary}=nothing) =
-    ZstandardDecompressorCodec(dict, StreamDecoder(dict), 0)
+Zstandard.ZstandardDecompressor(; dict::Union{Nothing,ZstdDictionary}=nothing,
+                                max_window_size::Integer=Zstandard.Streaming.DEFAULT_MAX_WINDOW_SIZE) =
+    ZstandardDecompressorCodec(dict, Int(max_window_size), StreamDecoder(dict; max_window_size), 0)
 
 Base.show(io::IO, ::ZstandardDecompressorCodec) = print(io, "ZstandardDecompressor()")
 
@@ -108,7 +110,7 @@ end
 
 function TranscodingStreams.startproc(c::ZstandardDecompressorCodec, mode::Symbol, err::Error)
     if !at_boundary(c.d)
-        c.d = StreamDecoder(c.dict)
+        c.d = StreamDecoder(c.dict; max_window_size=c.max_window_size)
         c.frames_reported = 0
     end
     return :ok

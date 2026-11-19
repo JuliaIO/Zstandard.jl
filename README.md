@@ -8,7 +8,7 @@ A pure Julia implementation of the [Zstandard](https://facebook.github.io/zstd/)
 - Huffman literals (direct or FSE-compressed weights, 1 or 4 streams, table reuse across blocks) and FSE sequence coding with predefined/RLE/compressed/repeat table selection
 - Frame content size recorded in the header; optional XXH64 content checksum
 - **Decompression** of all standard frames, including concatenated and skippable frames (decoded in parallel with `nthreads`), raw and formatted dictionaries
-- Streaming decompression via `ZstdDecompressorStream` (implements `IO`, memory bounded by the window size)
+- Streaming decompression via `ZstdDecompressorStream` (implements `IO`, memory bounded by the window size; frames with windows above `max_window_size`, default 128 MiB as in libzstd, are rejected)
 - Streaming compression via `ZstdCompressorStream` (implements `IO`, with `flush` support)
 - Dictionary compression (raw content or formatted dictionaries) and dictionary training (`train_dictionary`, fastCover as `zstd --train`)
 - Long-distance matching (`long=true`, as `zstd --long`) and multithreaded compression (`nthreads`)
