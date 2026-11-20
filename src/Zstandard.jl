@@ -50,7 +50,8 @@ function ZstandardDecompressor end
 function __init__()
     if isdefined(Base.Experimental, :register_error_hint)
         Base.Experimental.register_error_hint(MethodError) do io, exc, argtypes, kwargs
-            if exc.f === ZstandardCompressor || exc.f === ZstandardDecompressor
+            if (exc.f === ZstandardCompressor || exc.f === ZstandardDecompressor) &&
+               Base.get_extension(@__MODULE__, :ZstandardTranscodingStreamsExt) === nothing
                 print(io, "\n$(exc.f) requires TranscodingStreams.jl; run `using TranscodingStreams` first.")
             end
         end
