@@ -205,3 +205,15 @@ xxh64_digest(::ZeroXXH64, st) = UInt64(0)
     end
     @test_throws ZstdError decompress(Zstandard.with_xxh64_implementation(() -> compress(data; checksum=true), ZeroXXH64()))
 end
+
+# XXH64's four lanes are serial multiply chains: packing them into one vector
+# (vpmullq) roughly halves throughput, and LLVM's SLP vectorizer does that on
+# its own unless each lane passes the `opaque` barrier. Guard against new
+# Julia/LLVM versions seeing through it.
+@testset "XXH64 stripe loop stays scalar" begin
+    using InteractiveUtils: code_llvm
+    vecmul(f, T) = occursin(r"mul <\d+ x i64>", sprint(io -> code_llvm(io, f, T; debuginfo=:none)))
+    @test !vecmul(XX.xxh64, Tuple{Vector{UInt8}})
+    @test !vecmul(XX.xxh64, Tuple{SubArray{UInt8,1,Vector{UInt8},Tuple{UnitRange{Int}},true}})
+    @test !vecmul(XX.xxh64, Tuple{Ptr{UInt8}, Int, UInt64})
+end
