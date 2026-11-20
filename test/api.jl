@@ -938,3 +938,58 @@ end
     @test decompress_bound(UInt8[]) == 0
     @test_throws ZstdError decompress_bound(c[1:end-10])
 end
+
+@testset "Streaming long-distance matching and threads" begin
+    a = make_text(1_500_000)
+    x = UInt64(5)
+    noise = UInt8[(x = x * 6364136223846793005 + 1442695040888963407; (x >> 56) % UInt8) for _ in 1:3_000_000]
+    data = vcat(a, noise, a)                      # the second copy is beyond the default window
+    function streamed(d; chunk=100_003, kw...)
+        buf = IOBuffer()
+        s = Zstandard.ZstdCompressorStream(buf; close_io=false, kw...)
+        for p in Iterators.partition(d, chunk); write(s, p); end
+        close(s)
+        return take!(buf)
+    end
+    for level in (1, 3, 9, 19)
+        plain = streamed(data; level)
+        cl = streamed(data; level, long=true)
+        @test decompress(cl) == data
+        @test transcode(CodecZstd.ZstdDecompressor, cl) == data
+        if 1 << Zstandard.Encoder.compression_parameters(level, -1).window_log < length(data)
+            @test length(cl) < length(plain) - length(compress(a; level)) ÷ 2   # the long match was found
+        end
+        @test length(cl) < 1.01 * length(compress(data; level, long=true))
+    end
+    # long with a pledged size, a small window override, and a prefix
+    @test decompress(streamed(data; level=3, long=true, pledged_size=length(data))) == data
+    @test decompress(streamed(data; level=3, long=true, window_log=20)) == data
+    @test decompress(streamed(a; level=3, long=true, prefix=a[1:500_000]); prefix=a[1:500_000]) == a
+    # threads: same frame as one-shot multithreading when the size is pledged
+    big = repeat(data, 3)
+    for level in (1, 3)
+        c = streamed(big; level, nthreads=3, pledged_size=length(big))
+        @test c == compress(big; level, nthreads=3)
+        cu = streamed(big; level, nthreads=3, checksum=true, chunk=1 << 20)
+        @test transcode(CodecZstd.ZstdDecompressor, cu) == big
+        @test streamed(big; level, nthreads=2, checksum=true, chunk=1 << 20) == cu   # independent of thread count
+    end
+    # flush mid-stream with threads: everything so far decodes
+    buf = IOBuffer()
+    s = Zstandard.ZstdCompressorStream(buf; level=3, nthreads=2, close_io=false)
+    write(s, big[1:5_000_000]); flush(s)
+    sofar = Vector{UInt8}(view(buf.data, 1:buf.size))
+    @test read(Zstandard.ZstdDecompressorStream(IOBuffer(sofar)), 5_000_000) == big[1:5_000_000]
+    write(s, big[5_000_001:end]); close(s)
+    @test decompress(take!(buf)) == big
+    # empty and tiny streams
+    @test decompress(streamed(UInt8[]; nthreads=4)) == UInt8[]
+    @test decompress(streamed(a[1:10]; nthreads=4, long=false)) == a[1:10]
+    @test decompress(streamed(UInt8[]; long=true)) == UInt8[]
+    # the TranscodingStreams codec takes the same keywords
+    @test transcode(ZstandardDecompressor(), transcode(ZstandardCompressor(long=true), data)) == data
+    @test transcode(ZstandardDecompressor(), transcode(ZstandardCompressor(nthreads=2), big)) == big
+    @test_throws ArgumentError Zstandard.ZstdCompressorStream(IOBuffer(); nthreads=2, long=true)
+    @test_throws ArgumentError Zstandard.ZstdCompressorStream(IOBuffer(); nthreads=2, dict=ZstdDictionary(a[1:1000]))
+    @test_throws ArgumentError Zstandard.ZstdCompressorStream(IOBuffer(); nthreads=0)
+end

@@ -2173,9 +2173,8 @@ function compress_frame!(cc::CompressionContext, data::AbstractVector{UInt8}, le
         dlen > 0 && prepared === nothing && load_dict!(cc, base, dlen)
         ldm = nothing
         if long && n >= 1 << 16
-            mm = p.strategy >= S_BTULTRA ? 32 : 64
-            ldm = ldm_sequences(base, dlen + 1, dlen + n, 1 << p.window_log, mm,
-                                max(6, min(20, p.window_log - 7)), 1)   # dictionary content indexed too
+            ldm = ldm_sequences(base, dlen + 1, dlen + n, 1 << p.window_log, ldm_min_match(p),
+                                ldm_hash_log(p), 1)   # dictionary content indexed too
         end
         bmax = block_size(p)
         if n == 0
@@ -2217,6 +2216,14 @@ preceding data as history (libzstd's overlapLog: window/8 for fast..lazy,
 window/4 for lazy2 and btlazy2, window/2 for btopt and btultra, the whole
 window for btultra2).
 """
+function mt_job_layout(p::CParams)
+    window = 1 << p.window_log
+    job = max(1 << 20, 4window)          # libzstd: jobLog = max(20, windowLog + 2)
+    overlap = window >> (p.strategy >= S_BTULTRA2 ? 0 : p.strategy >= S_BTOPT ? 1 :
+                         p.strategy >= S_LAZY2 ? 2 : 3)
+    return job, overlap
+end
+
 function mt_layout(n::Int, level::Integer, ov::ParameterOverrides=NO_OVERRIDES)
     p = compression_parameters(level, n, ov)
     window = 1 << p.window_log
@@ -2308,14 +2315,28 @@ mutable struct StreamCompressor
     frame::FrameOptions
     size_hint::Int       # expected input size when none is pledged (-1: none)
     consumed::Int        # input bytes of the current frame compressed so far
+    long::Bool           # long-distance matching
+    ldm::Union{Nothing,LdmState}
+    nthreads::Int        # > 1: input is compressed in parallel jobs
+    p::CParams           # parameters of the current frame
+    job::Int             # job size and overlap (nthreads > 1)
+    overlap::Int
+    jobs::Vector{Task}   # jobs in flight, in output order
+    pool::Vector{CompressionContext}
+    pool_lock::ReentrantLock
 end
 
 function StreamCompressor(; level::Union{Nothing,Integer}=nothing, checksum::Bool=false,
                           dict::Union{Nothing,ZstdDictionary,PreparedDictionary}=nothing,
                           pledged_size::Union{Nothing,Integer}=nothing,
                           params::ParameterOverrides=NO_OVERRIDES, frame::FrameOptions=DEFAULT_FRAME,
-                          size_hint::Union{Nothing,Integer}=nothing)
+                          size_hint::Union{Nothing,Integer}=nothing, long::Bool=false,
+                          nthreads::Integer=1)
     size_hint === nothing || size_hint >= 0 || throw(ArgumentError("size_hint must be non-negative"))
+    nthreads >= 1 || throw(ArgumentError("nthreads must be at least 1"))
+    if nthreads > 1 && (dict !== nothing || long)
+        throw(ArgumentError("multithreaded streaming cannot be combined with dict, prefix or long"))
+    end
     if dict isa PreparedDictionary
         use_prepared(dict, 0, level, params)    # checks level and parameters
         level = dict.level
@@ -2324,7 +2345,8 @@ function StreamCompressor(; level::Union{Nothing,Integer}=nothing, checksum::Boo
     level = level === nothing ? 3 : Int(level)
     sc = StreamCompressor(CompressionContext(), level, checksum, dict, UInt8[], 0, 1, 0, 0,
                           UInt8[], 0, false, false, ChecksumState(), -1, 0, params, BLOCK_SIZE_MAX,
-                          frame, size_hint === nothing ? -1 : Int(size_hint), 0)
+                          frame, size_hint === nothing ? -1 : Int(size_hint), 0, long, nothing,
+                          Int(nthreads), LEVEL_TABLE[4], 0, 0, Task[], CompressionContext[], ReentrantLock())
     pledged_size === nothing || stream_pledge!(sc, pledged_size)
     return sc
 end
@@ -2360,13 +2382,27 @@ function stream_begin!(sc::StreamCompressor)
         # parameters for the pledged size, else the size hint (ZSTD_c_srcSizeHint)
         expect = sc.pledged >= 0 ? sc.pledged : sc.size_hint
         p = compression_parameters(sc.level, expect < 0 ? -1 : expect + dlen, sc.params)
+        if sc.long && sc.params.window_log < 0
+            # long-distance matching uses a window of up to 128 MiB (as zstd --long)
+            src_log = expect < 0 ? LDM_WINDOW_LOG : max(10, 64 - leading_zeros(UInt64(max(expect + dlen - 1, 1))))
+            wlog = max(p.window_log, min(LDM_WINDOW_LOG, src_log))
+            p = CParams(wlog, p.chain_log, p.hash_log, p.search_log, p.min_match, p.target_length, p.strategy)
+        end
         reset_context!(cc, p, sc.level)
         dict === nothing || apply_dict_entropy!(cc, dict)
+    end
+    sc.p = p
+    sc.ldm = sc.long ? LdmState(1 << p.window_log, ldm_min_match(p), ldm_hash_log(p), 1, dlen + 1) : nothing
+    if sc.nthreads > 1
+        sc.job, sc.overlap = mt_job_layout(p)
+        empty!(sc.jobs)
     end
     window = 1 << p.window_log
     sc.bsize = block_size(p)
     sc.gran = 1 << max(p.chain_log, 17)
     sc.cap = window + dlen + sc.gran + 2 * BLOCK_SIZE_MAX
+    # multithreaded: a whole job (four windows) plus its overlap must fit
+    sc.nthreads > 1 && (sc.cap = max(sc.cap, window + sc.job + sc.gran + 2 * BLOCK_SIZE_MAX))
     resize!(sc.buf, min(sc.cap, max(dlen + 2 * BLOCK_SIZE_MAX, 1 << 18)))
     sc.len = 0
     if dlen > 0
@@ -2413,6 +2449,7 @@ function rebase!(sc::StreamCompressor, d::Int)
     end
     cc.opt.h3next = max(1, cc.opt.h3next - d)
     cc.next_to_update = max(1, cc.next_to_update - d)
+    sc.ldm === nothing || ldm_rebase!(sc.ldm, d)
     copyto!(sc.buf, 1, sc.buf, d + 1, sc.len - d)
     sc.len -= d
     sc.pend -= d
@@ -2453,11 +2490,56 @@ function emit_block!(sc::StreamCompressor, bn::Int, last::Bool)
     out_reserve!(sc, bn + 64)
     GC.@preserve sc begin
         base = pointer(sc.buf)
+        ldm = nothing
+        if sc.ldm !== nothing
+            ldm_scan!(sc.ldm, base, sc.len)        # long matches over everything buffered
+            ldm = sc.ldm.cur
+        end
         sc.olen = compress_block!(sc.cc, sc.out, sc.olen + 1, base, base + sc.pend - 1,
-                                  base + sc.pend - 1 + bn, last) - 1
+                                  base + sc.pend - 1 + bn, last, ldm) - 1
     end
     sc.pend += bn
     sc.consumed += bn
+    return sc
+end
+
+# ---- multithreaded streaming: jobs as in one-shot multithreaded compression
+
+function append_out!(sc::StreamCompressor, part::Vector{UInt8})
+    out_reserve!(sc, length(part))
+    copyto!(sc.out, sc.olen + 1, part, 1, length(part))
+    sc.olen += length(part)
+    return sc
+end
+
+# Move finished jobs' output to sc.out, in order; wait for the oldest while
+# more than `keep` are in flight.
+function collect_jobs!(sc::StreamCompressor, keep::Int)
+    while !isempty(sc.jobs) && (length(sc.jobs) > keep || istaskdone(sc.jobs[1]))
+        append_out!(sc, fetch(popfirst!(sc.jobs)))
+    end
+    return sc
+end
+
+# Compress the next `n` pending bytes as a job on another task.
+function dispatch_job!(sc::StreamCompressor, n::Int, last::Bool)
+    first_job = sc.pend == 1
+    hist = first_job ? 0 : min(sc.overlap, sc.pend - 1)
+    jd = sc.buf[sc.pend - hist:sc.pend + n - 1]          # own copy: the buffer moves on
+    p = sc.p; level = sc.level
+    collect_jobs!(sc, sc.nthreads - 1)
+    t = Threads.@spawn begin
+        cc = lock(() -> isempty(sc.pool) ? CompressionContext() : pop!(sc.pool), sc.pool_lock)
+        try
+            compress_job!(cc, p, level, jd, hist + 1, length(jd), hist, last)
+        finally
+            lock(() -> push!(sc.pool, cc), sc.pool_lock)
+        end
+    end
+    push!(sc.jobs, t)
+    sc.pend += n
+    sc.consumed += n
+    collect_jobs!(sc, sc.nthreads)
     return sc
 end
 
@@ -2482,9 +2564,15 @@ function stream_write!(sc::StreamCompressor, data::AbstractVector{UInt8})
         copyto!(sc.buf, sc.len + 1, data, i, k)
         sc.len += k
         i += k
-        # keep the last (possibly full) block pending so it can be marked last
-        while sc.len - sc.pend + 1 > sc.bsize
-            emit_block!(sc, stream_block_size(sc, sc.len - sc.pend + 1), false)
+        # keep the last (possibly full) block or job pending so it can be marked last
+        if sc.nthreads > 1
+            while sc.len - sc.pend + 1 > sc.job
+                dispatch_job!(sc, sc.job, false)
+            end
+        else
+            while sc.len - sc.pend + 1 > sc.bsize
+                emit_block!(sc, stream_block_size(sc, sc.len - sc.pend + 1), false)
+            end
         end
     end
     sc.checksum && checksum_update!(sc.xxh, data)
@@ -2495,6 +2583,12 @@ end
 function stream_flush!(sc::StreamCompressor)
     sc.started || stream_begin!(sc)
     sc.finished && return sc
+    if sc.nthreads > 1
+        n = sc.len - sc.pend + 1
+        n > 0 && dispatch_job!(sc, n, false)
+        collect_jobs!(sc, 0)
+        return sc
+    end
     while (n = sc.len - sc.pend + 1) > 0
         emit_block!(sc, stream_block_size(sc, n), false)
     end
@@ -2509,7 +2603,13 @@ function stream_finish!(sc::StreamCompressor)
         throw(ArgumentError("frame finished after $(sc.total) bytes, but $(sc.pledged) were pledged"))
     end
     n = sc.len - sc.pend + 1
-    if n > 0
+    if sc.nthreads > 1
+        n > 0 && dispatch_job!(sc, n, true)
+        collect_jobs!(sc, 0)
+    end
+    if sc.nthreads > 1 && n > 0
+        # the last job ended the frame
+    elseif n > 0
         while n > 0
             bn = stream_block_size(sc, n)
             emit_block!(sc, bn, bn == n)
