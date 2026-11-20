@@ -34,6 +34,25 @@ end
     @test decompress(compress(big; level=1)) == big
 end
 
+using TranscodingStreams
+
+@testset "Reused decompressor codec" begin
+    codec = ZstandardDecompressor()
+    TranscodingStreams.initialize(codec)
+    c1 = compress(fill(0x61, 100_000)); c2 = compress(fill(0x62, 10))
+    s = TranscodingStream(codec, IOBuffer(c1)); read(s, 10)     # abandoned mid-output
+    @test transcode(codec, c2) == fill(0x62, 10)
+    @test transcode(codec, c1) == fill(0x61, 100_000)
+    TranscodingStreams.finalize(codec)
+end
+
+@testset "Codec error hint" begin
+    # with the extension loaded, a wrong call gets no misleading hint
+    e = try ZstandardCompressor(3) catch e; e end
+    @test e isa MethodError
+    @test !occursin("requires TranscodingStreams", sprint(showerror, e))
+end
+
 # an io whose first eof check throws once
 mutable struct FlakyIO <: IO
     io::IOBuffer

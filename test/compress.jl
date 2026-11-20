@@ -431,7 +431,7 @@ end
         append!(out, view(buf, 1:n))
     end
     @test out == data
-    @test length(stream.out) < length(data)  # bounded by window + block, not by output size
+    @test length(stream.d.out) < length(data)  # bounded by window + block, not by output size
 end
 
 @testset "Corrupted input fuzz" begin
