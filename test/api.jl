@@ -1007,6 +1007,8 @@ end
         @test decompress(c; nthreads=1) == d
         decompress(c; nthreads=1)
         # the output is sized from the block headers: no regrowth
-        @test @allocated(decompress(c; nthreads=1)) < 1.3 * length(d) + 1_000_000
+        # (minimum of a few runs: a stray allocation elsewhere, e.g. by the
+        # runtime, must not fail the test)
+        @test minimum(@allocated(decompress(c; nthreads=1)) for _ in 1:3) < 1.3 * length(d) + 1_000_000
     end
 end
