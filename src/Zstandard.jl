@@ -11,7 +11,10 @@ export decompress, compress, ZstdDecompressorStream, ZstdCompressorStream, ZstdD
        ZstdSequence, generate_sequences, compress_sequences
 
 # Swappable XXH64 implementation for frame checksums (see `Zstandard.XXHash`)
-public XXHash, AbstractXXH64, NativeXXH64, XXH64_IMPLEMENTATION, with_xxh64_implementation
+# (`public` is Julia 1.11 syntax; on 1.10 these are simply unexported)
+@static if VERSION >= v"1.11.0-DEV.469"
+    eval(Expr(:public, :XXHash, :AbstractXXH64, :NativeXXH64, :XXH64_IMPLEMENTATION, :with_xxh64_implementation))
+end
 
 const MAGIC_NUMBER = 0xFD2FB528
 const SKIPPABLE_MAGIC_START = 0x184D2A50

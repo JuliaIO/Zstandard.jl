@@ -661,11 +661,20 @@ end
 @inline row_tab_len(p) = ((1 << p.hash_log) + (1 << (p.hash_log - row_log(p)))) >> 2 + 1
 @inline is_row(p) = S_GREEDY <= p.strategy <= S_LAZY2
 
-const PREFETCH_IR = """
+# llvm.prefetch; Julia 1.11+ (LLVM 16+) uses opaque pointers, 1.10 typed ones
+const PREFETCH_IR = VERSION >= v"1.11" ? """
 declare void @llvm.prefetch.p0(ptr, i32, i32, i32)
 define void @entry(i64 %a) #0 {
   %p = inttoptr i64 %a to ptr
   call void @llvm.prefetch.p0(ptr %p, i32 0, i32 3, i32 1)
+  ret void
+}
+attributes #0 = { alwaysinline }
+""" : """
+declare void @llvm.prefetch(i8*, i32, i32, i32)
+define void @entry(i64 %a) #0 {
+  %p = inttoptr i64 %a to i8*
+  call void @llvm.prefetch(i8* %p, i32 0, i32 3, i32 1)
   ret void
 }
 attributes #0 = { alwaysinline }
