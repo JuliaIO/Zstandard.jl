@@ -3,7 +3,7 @@
 # ZSTD_isFrame, ZSTD_isSkippableFrame, ZSTD_writeSkippableFrame, ZSTD_readSkippableFrame).
 # Included in module Zstandard.
 
-using .Decoder: read_frame_info, zerr, SKIPPABLE_MASK
+using .Decoder: read_frame_info, zerr, SKIPPABLE_MASK, BLOCK_SIZE_MAX
 
 """
     ZstdFrameHeader
@@ -138,6 +138,61 @@ function decompressed_size(data::AbstractVector{UInt8})
         pos += frame_compressed_size(data; offset=pos)
     end
     return total
+end
+
+"""
+    decompress_bound(data; magicless=false) -> Int64
+
+Upper bound on the decompressed size of all frames in `data` (as libzstd's
+`ZSTD_decompressBound`): a frame's recorded content size, or for frames that
+do not record it, its number of blocks times the largest block size its
+window allows. Skippable frames count as 0. Throws a `ZstdError` for
+malformed or truncated data.
+"""
+function decompress_bound(data::AbstractVector{UInt8}; magicless::Bool=false)
+    total = Int64(0)
+    pos = firstindex(data)
+    while pos <= lastindex(data)
+        if !magicless && is_skippable_frame(data; offset=pos)
+            pos += frame_compressed_size(data; offset=pos)
+            continue
+        end
+        fh = frame_header(data; offset=pos, magicless)
+        if fh.content_size !== nothing
+            total += fh.content_size
+        else
+            # count blocks
+            bmax = min(fh.window_size, BLOCK_SIZE_MAX)
+            p = pos + fh.header_size
+            nb = 0
+            while true
+                lastindex(data) - p + 1 < 3 && zerr("truncated block header")
+                bh = Int(data[p]) | (Int(data[p+1]) << 8) | (Int(data[p+2]) << 16)
+                btype = (bh >> 1) & 3
+                btype == 3 && zerr("reserved block type")
+                p += 3 + (btype == 1 ? 1 : bh >> 3)
+                nb += 1
+                bh & 1 == 1 && break
+            end
+            total += Int64(nb) * bmax
+        end
+        pos += frame_compressed_size(data; offset=pos, magicless)
+    end
+    return total
+end
+
+"""
+    compress_bound(n) -> Int
+
+Largest possible size of the frame `compress` produces for `n` bytes of input
+(libzstd's `ZSTD_COMPRESSBOUND`): `n + n÷256`, plus a little for inputs under
+128 KiB. Useful to preallocate the output vector of `compress!`. (Seekable
+archives add their seek table on top.)
+"""
+function compress_bound(n::Integer)
+    n < 0 && throw(ArgumentError("n must be non-negative"))
+    n = Int(n)
+    return n + (n >> 8) + (n < BLOCK_SIZE_MAX ? (BLOCK_SIZE_MAX - n) >> 11 : 0)
 end
 
 """

@@ -885,6 +885,8 @@ end
     @test compress(big; level=3, window_log=17, rsyncable=true, nthreads=3) == a
     @test length(a) < 1.01 * length(compress(big; level=3, window_log=17))
     @test decompress(compress(data[1:1000]; rsyncable=true, checksum=true)) == data[1:1000]
+    @test decompress(compress(UInt8[]; rsyncable=true, checksum=true)) == UInt8[]
+    @test transcode(CodecZstd.ZstdDecompressor, compress(UInt8[]; rsyncable=true)) == UInt8[]
     @test_throws ArgumentError compress(data; rsyncable=true, long=true)
 end
 
@@ -905,4 +907,34 @@ end
     @test transcode(ZstandardDecompressor(), transcode(ZstandardCompressor(target_block_size=4000), data)) == data
     @test_throws ArgumentError compress(data; target_block_size=100)
     @test_throws ArgumentError compress(data; target_block_size=1 << 20)
+end
+
+@testset "compress_bound and decompress_bound" begin
+    x = UInt64(9)
+    rnd(n) = UInt8[(x = x * 6364136223846793005 + 1442695040888963407; (x >> 56) % UInt8) for _ in 1:n]
+    for n in (0, 1, 7, 100, 1000, 131071, 131072, 131073, 400_000)
+        d = rnd(n)
+        for kw in ((; level=1, checksum=true), (; level=19, checksum=true), (; level=-7),
+                   (; level=3, target_block_size=1340, checksum=true), (; level=3, rsyncable=true, checksum=true))
+            @test length(compress(d; kw...)) <= compress_bound(n)
+        end
+        out = Vector{UInt8}(undef, compress_bound(n))
+        @test length(compress!(ZstdCompressionContext(), out, d)) <= compress_bound(n)
+    end
+    @test compress_bound(0) == 64
+    @test compress_bound(1 << 20) == (1 << 20) + (1 << 12)
+    @test_throws ArgumentError compress_bound(-1)
+    t = make_text(300_000)
+    c = compress(t)
+    @test decompress_bound(c) == length(t)
+    buf = IOBuffer()
+    s = Zstandard.ZstdCompressorStream(buf; close_io=false)
+    write(s, t); close(s)
+    u = take!(buf)                                           # no content size recorded
+    @test decompress_bound(u) >= length(t)
+    @test decompress_bound(u) == cld(length(t), 128 << 10) * (128 << 10)
+    @test decompress_bound(vcat(u, skippable_frame(UInt8[1, 2]), c)) == decompress_bound(u) + length(t)
+    @test decompress_bound(compress(t; magicless=true); magicless=true) == length(t)
+    @test decompress_bound(UInt8[]) == 0
+    @test_throws ZstdError decompress_bound(c[1:end-10])
 end
