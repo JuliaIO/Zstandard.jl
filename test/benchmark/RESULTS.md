@@ -1,5 +1,58 @@
 # Benchmark Results Log
 
+## 2026-11-19 — XXH64 implementations compared
+
+Script: `test/benchmark/xxhash_compare.jl` (adapters in `test/xxhash_impls.jl`; ZstdInflate.jl is
+included when installed). Julia 1.11, 4-core Xeon VM.
+
+```
+XXH64 one-shot (MB/s)
+                                16 bytes  100 bytes 1024 bytes 64.000 KiB 16.000 MiB
+Zstandard.jl (native)                381       1734       7398      10967      10718
+XXHashNative.jl                      193        782       2625       3478       3359
+xxHash C library (xxHash_jll)        381       1766       7398      10969      10748
+ZstdInflate.jl                       272       1109       3742       5176       5066
+
+XXH64 streaming, 16 MiB in pieces of the given size (MB/s)
+                               4.000 KiB 128.000 KiB
+Zstandard.jl (native)              10765      10794
+XXHashNative.jl                     3239       3298
+xxHash C library (xxHash_jll)      10789      10833
+ZstdInflate.jl                     10438      10759
+
+Zstandard.jl with each implementation, 4 MiB checksummed frame (MB/s)
+                                decompress  stream read  compress L1
+Zstandard.jl (native)                 5251         1710         5145
+XXHashNative.jl                       2526         1211         2525
+xxHash C library (xxHash_jll)         5185         1673         5134
+ZstdInflate.jl                        3360         2048         3334
+```
+
+Zstandard.jl's native XXH64 matches the C reference library. ZstdInflate.jl's one-shot hash packs the
+four lanes into a SIMD.jl vector and is about half as fast as its own scalar streaming code.
+
+---
+
+## 2026-11-18 — XXH64 rewrite, parallel decoding of concatenated frames
+
+XXH64, 16 MB (MB/s): XXHashNative 3,522; ZstdInflate (SIMD.jl, 4 lanes in one vector) 5,209;
+new scalar implementation 11,167 (one-shot) / 11,010 (streaming, 128 KB updates).
+The four XXH64 lanes are serial multiply/rotate chains, so packing them into one vector does not
+help: `vpmullq` has much higher latency than scalar `imul`. LLVM's SLP vectorizer packed the
+streaming loop on its own (halving its speed); an empty inline-asm barrier per lane prevents that.
+
+Concatenated frames, 4 threads, `decompress` vs `inflate_zstd(...; nthreads=4)` (MB/s):
+
+| Input | Zstandard.jl | ZstdInflate |
+|---|--:|--:|
+| 4 MB in 4 frames | 2,330 | 1,074 |
+| 16 MB in 16 frames | 1,708 | 423 |
+| 16 MB in 256 frames | 1,887 | 1,192 |
+
+Checksummed 4 MB frame: 642 MB/s (was 548), the same as without a checksum.
+
+---
+
 ## 2026-11-17 — Optimal parser for levels 16-22
 
 Script: `test/benchmark/compress_compare.jl` (now also level 16). Same machine and corpora.

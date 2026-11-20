@@ -71,8 +71,12 @@ function frame_header(data::AbstractVector{UInt8}; offset::Integer=1)
     m = _u32le(data, offset)
     m & SKIPPABLE_MASK == SKIPPABLE_MAGIC_START && zerr("skippable frame has no frame header")
     m != MAGIC_NUMBER && zerr("unknown frame magic number 0x$(string(m, base=16))")
-    hdr = Vector{UInt8}(data[offset+4:min(end, offset + 4 + 17)])
-    fi = GC.@preserve hdr read_frame_info(pointer(hdr), length(hdr))
+    fi = if data isa DenseVector{UInt8}           # read in place: no copy per frame
+        GC.@preserve data read_frame_info(pointer(data, offset + 4), length(data) - offset - 4 + 1)
+    else
+        hdr = Vector{UInt8}(data[offset+4:min(end, offset + 4 + 17)])
+        GC.@preserve hdr read_frame_info(pointer(hdr), length(hdr))
+    end
     cs = fi.content_size >= 0 ? fi.content_size : nothing
     return ZstdFrameHeader(cs, fi.window_size, fi.dict_id, fi.checksum, fi.single_segment, 4 + fi.header_size)
 end

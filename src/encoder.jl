@@ -12,7 +12,7 @@
 
 module Encoder
 
-using XXHashNative: xxh64, XXH64State, update!, digest!
+using ..XXHash: xxh64, content_checksum, ChecksumState, checksum_update!, checksum_digest
 import ..Decoder: LL_BASE, LL_BITS, ML_BASE, ML_BITS, LL_DEFAULT_NORM, ML_DEFAULT_NORM,
                   OF_DEFAULT_NORM, MAGIC_NUMBER, BLOCK_SIZE_MAX, ZstdDictionary, has_entropy
 
@@ -1580,7 +1580,7 @@ function compress_frame!(cc::CompressionContext, data::AbstractVector{UInt8}, le
         end
     end
     if checksum
-        h = (dlen > 0 ? xxh64(view(src, dlen+1:dlen+n)) : xxh64(src)) % UInt32
+        h = dlen > 0 ? content_checksum(view(src, dlen+1:dlen+n)) : content_checksum(src)
         length(out) < pos + 4 && resize!(out, pos + 4)
         for k in 0:3
             out[pos + k] = (h >> (8k)) % UInt8
@@ -1679,13 +1679,13 @@ mutable struct StreamCompressor
     olen::Int
     started::Bool
     finished::Bool
-    xxh::XXH64State
+    xxh::ChecksumState
 end
 
 function StreamCompressor(; level::Integer=3, checksum::Bool=false,
                           dict::Union{Nothing,ZstdDictionary}=nothing)
     StreamCompressor(CompressionContext(), Int(level), checksum, dict, UInt8[], 0, 1, 0, 0,
-                     UInt8[], 0, false, false, XXH64State())
+                     UInt8[], 0, false, false, ChecksumState())
 end
 
 function out_reserve!(sc::StreamCompressor, n::Int)
@@ -1714,7 +1714,7 @@ function stream_begin!(sc::StreamCompressor)
     out_reserve!(sc, 32)
     sc.olen = write_frame_header!(sc.out, sc.olen + 1, -1, p.window_log, sc.checksum,
                                   sc.dict === nothing ? UInt32(0) : sc.dict.id) - 1
-    sc.xxh = XXH64State()
+    sc.xxh = ChecksumState()
     sc.started = true
     sc.finished = false
     return sc
@@ -1784,7 +1784,7 @@ function stream_write!(sc::StreamCompressor, data::AbstractVector{UInt8})
             emit_block!(sc, BLOCK_SIZE_MAX, false)
         end
     end
-    sc.checksum && update!(sc.xxh, data)
+    sc.checksum && checksum_update!(sc.xxh, data)
     return sc
 end
 
@@ -1809,7 +1809,7 @@ function stream_finish!(sc::StreamCompressor)
     end
     if sc.checksum
         out_reserve!(sc, 4)
-        h = digest!(sc.xxh) % UInt32
+        h = checksum_digest(sc.xxh)
         for k in 0:3
             sc.out[sc.olen + 1 + k] = (h >> (8k)) % UInt8
         end

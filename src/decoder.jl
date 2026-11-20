@@ -14,7 +14,7 @@
 
 module Decoder
 
-using XXHashNative: xxh64
+using ..XXHash: content_checksum
 
 export ZstdError, ZstdDictionary, parse_dictionary, DecoderState, decompress_frames,
        FrameInfo, read_frame_info
@@ -1016,17 +1016,20 @@ end
 end
 
 """
-    decompress_frames(data, st, dict) -> Vector{UInt8}
+    decompress_frames(data, st, dict; range=1:length(data)) -> Vector{UInt8}
 
-Decode all (concatenated) frames in `data` in memory.
+Decode all (concatenated) frames in `data[range]` in memory. `range` must
+start and end on frame boundaries.
 """
 function decompress_frames(data::AbstractVector{UInt8}, st::DecoderState=DecoderState(),
-                           dict::Union{Nothing,ZstdDictionary}=nothing)
+                           dict::Union{Nothing,ZstdDictionary}=nothing;
+                           range::UnitRange{Int}=1:length(data))
     src = data isa Vector{UInt8} ? data : Vector{UInt8}(data)
-    n = length(src)
+    checkbounds(src, range)
+    n = range.stop            # last valid input index
     out = Vector{UInt8}(undef, 0)
     produced = 0
-    pos = 1
+    pos = range.start
     first = true
     GC.@preserve src begin
         p = pointer(src)
@@ -1112,7 +1115,7 @@ function decompress_frames(data::AbstractVector{UInt8}, st::DecoderState=Decoder
                 n - pos + 1 < 4 && zerr("truncated frame checksum")
                 expected = load32(p + pos - 1)
                 pos += 4
-                actual = (xxh64(view(out, frame_start+1:produced)) % UInt32)
+                actual = content_checksum(view(out, frame_start+1:produced))
                 actual != expected && zerr("checksum mismatch")
             end
         end

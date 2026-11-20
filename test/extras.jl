@@ -150,3 +150,43 @@ end
     # small inputs: long mode is harmless
     @test decompress(compress(a[1:1000]; long=true)) == a[1:1000]
 end
+
+@testset "Parallel frame decoding" begin
+    words = ["red", "green", "blue", "\n", " ", "#", "0xff"]
+    x = UInt64(3)
+    text = UInt8[]
+    while length(text) < 1_500_000
+        x = x * 6364136223846793005 + 1442695040888963407
+        append!(text, codeunits(words[(x >> 33) % length(words) + 1]))
+    end
+    pieces = [text[i:min(end, i + 99_999)] for i in 1:100_000:length(text)]
+    frames = Vector{UInt8}[]
+    for (k, p) in enumerate(pieces)
+        push!(frames, k % 3 == 0 ? transcode(CodecZstd.ZstdCompressor, p) :     # no content size
+                      compress(p; checksum=isodd(k)))
+        k == 5 && push!(frames, skippable_frame("between frames"))
+    end
+    mf = reduce(vcat, frames)
+    @test decompress(mf; nthreads=1) == text
+    for nt in (2, 4, 8)
+        @test decompress(mf; nthreads=nt) == text
+    end
+    @test decompress(view(mf, 1:length(mf)); nthreads=4) == text
+
+    # with a dictionary
+    d = ZstdDictionary(text[1:50_000])
+    mfd = reduce(vcat, [compress(p; dict=d) for p in pieces])
+    @test decompress(mfd, d; nthreads=4) == text
+
+    # errors surface as ZstdError, not TaskFailedException
+    bad = copy(mf)
+    mid = sum(length, frames[1:7]) + 200
+    bad[mid] ⊻= 0xff
+    bad[mid + 1] ⊻= 0x5a
+    @test_throws ZstdError decompress(bad; nthreads=4)
+    # cut inside the second-to-last frame
+    @test_throws ZstdError decompress(mf[1:end-length(frames[end])-5]; nthreads=4)
+    # dropping whole trailing frames leaves valid input
+    @test decompress(mf[1:end-length(frames[end])]; nthreads=4) == text[1:end-length(pieces[end])]
+    @test_throws ArgumentError decompress(mf; nthreads=0)
+end

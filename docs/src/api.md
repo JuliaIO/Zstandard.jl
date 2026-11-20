@@ -20,5 +20,5 @@ Modules = [Zstandard.Streaming]
 These are implementation details and may change without notice.
 
 ```@autodocs
-Modules = [Zstandard.Decoder, Zstandard.Encoder]
+Modules = [Zstandard.Decoder, Zstandard.Encoder, Zstandard.XXHash]
 ```
