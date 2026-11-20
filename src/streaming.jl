@@ -3,7 +3,7 @@
 module Streaming
 
 import ..Decoder: DecoderState, ZstdDictionary, FrameInfo, read_frame_info, reset_frame!,
-                  decode_compressed_block!, memset!, zerr, ensure_capacity!,
+                  decode_compressed_block!, memset!, zerr, ensure_capacity!, ZstdError,
                   MAGIC_NUMBER, SKIPPABLE_MAGIC_START, SKIPPABLE_MASK, BLOCK_SIZE_MAX, WILDCOPY_SLACK
 using XXHashNative: XXH64State, update!, digest!
 
@@ -18,6 +18,10 @@ const STAGE_BLOCK = 1   # inside a frame, expecting a block header
 A streaming Zstandard decompressor that implements the `IO` interface.
 Decoded data is produced one block at a time; memory use is bounded by the
 frame's window size plus one block.
+
+After a decoding error (a `ZstdError`), the stream is unusable: later reads
+rethrow the same error (bytes decoded before it can still be read). Other
+exceptions, such as an interrupt or an error from `io`, are not sticky.
 """
 mutable struct ZstdDecompressorStream <: IO
     io::IO
@@ -32,11 +36,12 @@ mutable struct ZstdDecompressorStream <: IO
     fi::FrameInfo
     frame_produced::Int
     xxh::Union{Nothing,XXH64State}
+    err::Union{Nothing,ZstdError}   # sticky decoding error
 end
 
 function ZstdDecompressorStream(io::IO, dict::Union{Nothing,ZstdDictionary}=nothing)
     return ZstdDecompressorStream(io, dict, DecoderState(), Vector{UInt8}(undef, 64),
-        UInt8[], 1, 0, 0, STAGE_FRAME, FrameInfo(0, 0, -1, 0, false, false), 0, nothing)
+        UInt8[], 1, 0, 0, STAGE_FRAME, FrameInfo(0, 0, -1, 0, false, false), 0, nothing, nothing)
 end
 
 function read_exact!(s::ZstdDecompressorStream, n::Int, what::String)
@@ -179,6 +184,17 @@ end
 
 # Decode until at least one unread byte is available. Returns false at end of input.
 function fill_buffer!(s::ZstdDecompressorStream)
+    s.err === nothing || throw(s.err)
+    try
+        return fill_buffer_unchecked!(s)
+    catch e
+        # after a decoding error the position in the input is lost: stay failed
+        e isa ZstdError && (s.err = e)
+        rethrow()
+    end
+end
+
+function fill_buffer_unchecked!(s::ZstdDecompressorStream)
     while s.rpos > s.wpos
         if s.stage == STAGE_FRAME
             begin_frame!(s) || return false
