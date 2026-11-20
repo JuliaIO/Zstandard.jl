@@ -80,7 +80,7 @@ include("compress.jl")
 include("api.jl")
 include("extras.jl")
 include("xxhash.jl")
-include("fixes.jl")
+include("regressions.jl")
 include("robustness.jl")
 
 @testset "Aqua.jl" begin
