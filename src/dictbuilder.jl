@@ -174,6 +174,8 @@ function finalize_dictionary(content::AbstractVector{UInt8}, samples::AbstractVe
     length(content) > room && (content = content[end-room+1:end])
     length(content) < 8 && throw(ArgumentError("dictionary content must be at least 8 bytes"))
     # dictionary IDs use the native XXH64 (an ID, not a format checksum)
+    dict_id === nothing || 0 <= dict_id <= typemax(UInt32) ||
+        throw(ArgumentError("dict_id must be in 0:$(typemax(UInt32)), got $dict_id"))
     id = dict_id === nothing ? UInt32(xxh64(content) % UInt64((1 << 31) - 32768) + 32768) : UInt32(dict_id)
     for k in 0:3
         hdr[5 + k] = (id >> (8k)) % UInt8
@@ -182,17 +184,21 @@ function finalize_dictionary(content::AbstractVector{UInt8}, samples::AbstractVe
 end
 
 """
-    train_dictionary(samples; dict_size=112640, level=3, k=nothing, d=8) -> Vector{UInt8}
+    train_dictionary(samples; dict_size=112640, level=3, k=nothing, d=8, f=20) -> Vector{UInt8}
 
 Train a formatted Zstandard dictionary from `samples` (a vector of byte
 vectors) with the fastCover algorithm and entropy finalization, as
 `zstd --train`. When `k` (segment size) is not given, several values are
 tried and scored by compressing a held-out quarter of the samples.
+dmers of `d` bytes are hashed into `2^f` buckets (`f` in 1:31).
 Use the result with `parse_dictionary`.
 """
 function train_dictionary(samples::AbstractVector{<:AbstractVector{UInt8}}; dict_size::Integer=112640,
                           level::Integer=3, k::Union{Nothing,Integer}=nothing, d::Integer=8, f::Integer=20)
     d in (6, 8) || throw(ArgumentError("d must be 6 or 8"))
+    # as libzstd: 0 < f <= 31, and d <= k
+    1 <= f <= 31 || throw(ArgumentError("f must be in 1:31, got $f"))
+    k === nothing || k >= d || throw(ArgumentError("k must be at least d ($d), got $k"))
     ns = length(samples)
     ns == 0 && throw(ArgumentError("no samples"))
     total = sum(length, samples)

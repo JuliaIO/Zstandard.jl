@@ -191,7 +191,10 @@ function update_src!(st::XXH64State, src, n::Int)
     return st
 end
 
-update!(st::XXH64State, p::Ptr{UInt8}, n::Integer) = update_src!(st, PtrSrc(p), Int(n))
+function update!(st::XXH64State, p::Ptr{UInt8}, n::Integer)
+    n >= 0 || throw(ArgumentError("n must be non-negative, got $n"))   # before touching the state
+    return update_src!(st, PtrSrc(p), Int(n))
+end
 update!(st::XXH64State, data::AbstractVector{UInt8}) = with_source((src, n) -> update_src!(st, src, n), data)
 update!(st::XXH64State, s::AbstractString) = update!(st, codeunits(s))
 
