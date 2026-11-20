@@ -6,7 +6,7 @@ A pure Julia implementation of the [Zstandard](https://facebook.github.io/zstd/)
 
 - **Compression** at levels -7 to 22 with libzstd 1.5.7's strategies and parameter tables (fast, dfast, greedy/lazy/lazy2 with the row-based match finder, btlazy2, btopt, btultra, btultra2), block pre- and post-splitting, and repeat-offset aware parsing; ratios match or beat libzstd's at nearly every level (3-byte match finder for levels 18-22 included)
 - Huffman literals (direct or FSE-compressed weights, 1 or 4 streams, table reuse across blocks) and FSE sequence coding with predefined/RLE/compressed/repeat table selection
-- **Decompression** of all standard frames, including concatenated and skippable frames (decoded in parallel with `nthreads`), raw and formatted dictionaries
+- **Decompression** of all standard frames, including concatenated and skippable frames (decoded in parallel with `nthreads`), raw and formatted dictionaries (several at once with `ZstdDictionarySet`, chosen per frame by dictionary ID)
 - Streaming compression and decompression (`ZstdCompressorStream`, `ZstdDecompressorStream`, implementing `IO`): pledged sizes, size hints, long-distance matching and multithreading on streams, mid-frame `flush`, a window limit for untrusted input, and progress counters (`stream_progress`)
 - Reusable contexts (`ZstdCompressionContext`, `ZstdDecompressionContext`) with `compress!` / `decompress!` into your own buffers
 - Dictionaries: compression with raw or formatted dictionaries, prepared dictionaries for many small inputs, training (`train_dictionary`: fastCover or exact COVER, with parameter search on several threads)
@@ -72,6 +72,9 @@ decompress(compressed, dict)
 # Many small messages with one dictionary: prepare it once (much faster per message)
 pdict = prepare_dictionary(dict; level=3)
 compressed = compress(message; dict=pdict)      # decompress with `dict` as usual
+
+# Frames using different dictionaries: each frame's dictionary ID picks one
+decompress(vcat(compress(a; dict=dict_a), compress(b; dict=dict_b)), ZstdDictionarySet(dict_a, dict_b))
 
 # Train a dictionary from many small samples
 dict_bytes = train_dictionary(samples; dict_size=16384)

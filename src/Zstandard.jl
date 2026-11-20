@@ -1,6 +1,6 @@
 module Zstandard
 
-export decompress, compress, ZstdDecompressorStream, ZstdCompressorStream, ZstdDictionary,
+export decompress, compress, ZstdDecompressorStream, ZstdCompressorStream, ZstdDictionary, ZstdDictionarySet,
        parse_dictionary, ZstdError, ZstandardCompressor, ZstandardDecompressor,
        ZstdFrameHeader, frame_header, frame_content_size, frame_compressed_size, frame_dict_id,
        decompressed_size, is_zstd_frame, is_skippable_frame, skippable_frame, read_skippable_frame,
@@ -19,7 +19,8 @@ end
 include("xxhash.jl")
 
 include("decoder.jl")
-using .Decoder: ZstdError, ZstdDictionary, parse_dictionary, DecoderState, decompress_frames
+using .Decoder: ZstdError, ZstdDictionary, ZstdDictionarySet, parse_dictionary, DecoderState, decompress_frames,
+                DecodeDict, decode_dict
 
 include("frameinfo.jl")
 

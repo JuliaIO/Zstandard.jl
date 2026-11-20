@@ -97,18 +97,19 @@ end
 # ---------------------------------------------------------------------------
 
 mutable struct ZstandardDecompressorCodec <: Codec
-    dict::Union{Nothing,ZstdDictionary}
+    dict::Zstandard.Decoder.DecodeDict
     max_window_size::Int
     magicless::Bool
     d::StreamDecoder
     frames_reported::Int
 end
 
-Zstandard.ZstandardDecompressor(; dict::Union{Nothing,ZstdDictionary}=nothing,
+Zstandard.ZstandardDecompressor(; dict::Union{Zstandard.Decoder.DecodeDict,AbstractVector{ZstdDictionary}}=nothing,
                                 max_window_size::Integer=Zstandard.Streaming.DEFAULT_MAX_WINDOW_SIZE,
                                 magicless::Bool=false) =
-    ZstandardDecompressorCodec(dict, Int(max_window_size), magicless,
-                               StreamDecoder(dict; max_window_size, magicless), 0)
+    (d = Zstandard.Decoder.decode_dict(dict);
+     ZstandardDecompressorCodec(d, Int(max_window_size), magicless,
+                                StreamDecoder(d; max_window_size, magicless), 0))
 
 Base.show(io::IO, ::ZstandardDecompressorCodec) = print(io, "ZstandardDecompressor()")
 

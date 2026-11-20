@@ -32,7 +32,8 @@ A [TranscodingStreams.jl](https://github.com/JuliaIO/TranscodingStreams.jl) code
 decoding Zstandard data (concatenated and skippable frames included). Frames
 with a window larger than `max_window_size` are rejected (see
 `ZstdDecompressorStream`). With `magicless=true`, frames have no magic
-numbers (see `compress`).
+numbers (see `compress`). `dict` may be a `ZstdDictionary` or several (a
+`ZstdDictionarySet` or a vector), chosen per frame by dictionary ID.
 Available once `TranscodingStreams` is loaded.
 """
 function ZstandardDecompressor end

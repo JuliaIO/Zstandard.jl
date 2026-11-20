@@ -16,7 +16,8 @@ module Decoder
 
 using ..XXHash: content_checksum
 
-export ZstdError, ZstdDictionary, parse_dictionary, DecoderState, decompress_frames,
+export ZstdError, ZstdDictionary, ZstdDictionarySet, parse_dictionary, DecoderState, decompress_frames,
+       DecodeDict, decode_dict, frame_dict,
        FrameInfo, read_frame_info
 
 const MAGIC_NUMBER = 0xFD2FB528
@@ -605,6 +606,94 @@ function parse_dictionary(data::AbstractVector{UInt8})
     return ZstdDictionary(d)
 end
 
+"""
+    ZstdDictionarySet(dicts; default=nothing)
+    ZstdDictionarySet(dicts::ZstdDictionary...; default=nothing)
+
+Several dictionaries for decoding data whose frames use different dictionaries
+(as libzstd's `ZSTD_d_refMultipleDDicts`). Each frame's dictionary is chosen
+by the dictionary ID in its header:
+
+- A frame with a nonzero ID uses the dictionary with that ID; if the set has
+  none, decoding throws a [`ZstdError`](@ref).
+- A frame with ID 0 (written without a dictionary, with a raw-content
+  dictionary, or with `dict_id=false`) uses `default`, or no dictionary when
+  `default` is `nothing`.
+
+A dictionary with ID 0 (raw content) among `dicts` becomes the default; at
+most one default can be given. Two different dictionaries with the same ID
+throw an `ArgumentError`. A `default` with a nonzero ID is also selected by
+its ID.
+
+Anywhere a decoder accepts a `ZstdDictionary` (`decompress`,
+`ZstdDecompressionContext`, `ZstdDecompressorStream`, `ZstandardDecompressor`,
+`decompress_range`), it also accepts a `ZstdDictionarySet` or a vector of
+`ZstdDictionary`.
+
+```julia
+d1 = parse_dictionary(train_dictionary(samples1))
+d2 = parse_dictionary(train_dictionary(samples2))
+data = vcat(compress(a; dict=d1), compress(b; dict=d2))
+decompress(data, ZstdDictionarySet(d1, d2)) == vcat(a, b)
+```
+"""
+struct ZstdDictionarySet
+    dicts::Dict{UInt32,ZstdDictionary}
+    default::Union{Nothing,ZstdDictionary}
+    function ZstdDictionarySet(dicts::Union{AbstractVector,Tuple}; default::Union{Nothing,ZstdDictionary}=nothing)
+        byid = Dict{UInt32,ZstdDictionary}()
+        function add!(d)
+            get(byid, d.id, d) === d ||
+                throw(ArgumentError("duplicate dictionary ID $(d.id) in dictionary set"))
+            byid[d.id] = d
+        end
+        def = default
+        def === nothing || def.id == 0 || add!(def)
+        for d in dicts
+            d isa ZstdDictionary ||
+                throw(ArgumentError("dictionary set elements must be ZstdDictionary, got $(typeof(d))"))
+            if d.id == 0
+                def === nothing ||
+                    throw(ArgumentError("dictionary set has more than one default (ID 0) dictionary"))
+                def = d
+            else
+                add!(d)
+            end
+        end
+        return new(byid, def)
+    end
+end
+ZstdDictionarySet(dicts::ZstdDictionary...; default::Union{Nothing,ZstdDictionary}=nothing) =
+    ZstdDictionarySet(dicts; default)
+
+Base.length(s::ZstdDictionarySet) = length(s.dicts) + (s.default === nothing || s.default.id != 0 ? 0 : 1)
+Base.haskey(s::ZstdDictionarySet, id::Integer) = id == 0 ? s.default !== nothing : haskey(s.dicts, UInt32(id))
+Base.show(io::IO, s::ZstdDictionarySet) =
+    print(io, "ZstdDictionarySet(", join(sort!(collect(keys(s.dicts))), ", "),
+          s.default === nothing ? "" : "; default=$(s.default.id)", ")")
+
+# What a decoder accepts as its dictionary argument
+const DecodeDict = Union{Nothing,ZstdDictionary,ZstdDictionarySet}
+decode_dict(d::DecodeDict) = d
+decode_dict(v::AbstractVector{ZstdDictionary}) = ZstdDictionarySet(v)
+
+# The dictionary for a frame whose header has dictionary ID `id`
+function frame_dict(dict::Nothing, id::UInt32)
+    id != 0 && zerr("frame requires dictionary ID $id")
+    return nothing
+end
+function frame_dict(dict::ZstdDictionary, id::UInt32)
+    (id != 0 && dict.id != 0 && dict.id != id) &&
+        zerr("dictionary ID mismatch: frame requires $id, got $(dict.id)")
+    return dict
+end
+function frame_dict(s::ZstdDictionarySet, id::UInt32)
+    id == 0 && return s.default
+    d = get(s.dicts, id, nothing)
+    d === nothing && zerr("frame requires dictionary ID $id, which is not in the dictionary set")
+    return d
+end
+
 # ---------------------------------------------------------------------------
 # Decoder state (reusable scratch)
 # ---------------------------------------------------------------------------
@@ -1021,13 +1110,13 @@ end
 end
 
 """
-    decompress_frames(data, st, dict; range=1:length(data)) -> Vector{UInt8}
+    decompress_frames(data, st, dicts; range=1:length(data)) -> Vector{UInt8}
 
 Decode all (concatenated) frames in `data[range]` in memory. `range` must
 start and end on frame boundaries.
 """
 function decompress_frames(data::AbstractVector{UInt8}, st::DecoderState=DecoderState(),
-                           dict::Union{Nothing,ZstdDictionary}=nothing;
+                           dicts::DecodeDict=nothing;
                            range::UnitRange{Int}=1:length(data),
                            out::Vector{UInt8}=Vector{UInt8}(undef, 0), magicless::Bool=false,
                            release::Bool=true)
@@ -1057,11 +1146,7 @@ function decompress_frames(data::AbstractVector{UInt8}, st::DecoderState=Decoder
             magic != MAGIC_NUMBER && zerr("unknown frame magic number 0x$(string(magic, base=16))")
             fi = read_frame_info(p + pos - 1, n - pos + 1)
             pos += fi.header_size
-            if fi.dict_id != 0
-                dict === nothing && zerr("frame requires dictionary ID $(fi.dict_id)")
-                (dict.id != 0 && dict.id != fi.dict_id) &&
-                    zerr("dictionary ID mismatch: frame requires $(fi.dict_id), got $(dict.id)")
-            end
+            dict = frame_dict(dicts, fi.dict_id)
             reset_frame!(st, dict)
             frame_start = produced
             # Pre-size the output from the block headers, and from the
