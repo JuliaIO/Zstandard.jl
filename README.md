@@ -4,7 +4,7 @@ A pure Julia implementation of the [Zstandard](https://facebook.github.io/zstd/)
 
 ## Features
 
-- **Compression** at levels -7 to 22 using libzstd-style strategies (fast, dfast, greedy, lazy, lazy2) with repeat-offset aware parsing
+- **Compression** at levels -7 to 22 using libzstd-style strategies (fast, dfast, greedy, lazy, lazy2, and binary-tree optimal parsing for levels 16-22) with repeat-offset aware parsing
 - Huffman literals (direct or FSE-compressed weights, 1 or 4 streams, table reuse across blocks) and FSE sequence coding with predefined/RLE/compressed/repeat table selection
 - Frame content size recorded in the header; optional XXH64 content checksum
 - **Decompression** of all standard frames, including concatenated and skippable frames, raw and formatted dictionaries
@@ -76,13 +76,15 @@ TranscodingStreams overhead. Scripts: `test/benchmark/compress_compare.jl` and
 |------|------:|-------------------------------:|------------------------------:|
 | text   |  1 | 3.35 / 3.42 | 255 / 247 |
 | text   |  3 | 3.77 / 3.78 | 151 / 157 |
-| text   |  9 | 4.33 / 4.35 |  25 /  45 |
-| text   | 19 | 4.43 / 4.87 | 2.3 / 2.0 |
-| binary |  3 | 2.98 / 2.99 | 121 / 170 |
-| binary | 19 | 3.18 / 3.72 | 4.3 / 2.4 |
+| text   |  9 | 4.33 / 4.35 |  20 /  41 |
+| text   | 16 | 4.80 / 4.76 | 2.4 / 3.4 |
+| text   | 19 | 4.86 / 4.87 | 2.1 / 2.1 |
+| binary |  3 | 2.98 / 2.99 | 130 / 179 |
+| binary | 16 | 3.47 / 3.46 | 1.9 / 4.4 |
+| binary | 19 | 3.63 / 3.72 | 1.8 / 2.5 |
 
-Levels 1-12 are within about 3% of libzstd's ratio. Levels 13-22 use lazy2 parsing instead
-of libzstd's binary-tree and optimal parsers, so they compress less than libzstd.
+Ratios are within about 3% of libzstd at all levels. Levels 13-15 use lazy2 (libzstd uses a
+binary-tree lazy parser there); levels 16-22 use an optimal parser with a binary-tree match finder.
 
 ### Decompression (MB/s of output)
 

@@ -1,5 +1,37 @@
 # Benchmark Results Log
 
+## 2026-11-17 — Optimal parser for levels 16-22
+
+Script: `test/benchmark/compress_compare.jl` (now also level 16). Same machine and corpora.
+
+```
+Compression: ratio and throughput (MB/s of input, median)
+------------------------------------------------------------------------------------
+Dataset      level | ratio jl  ratio C |   MB/s jl    MB/s C | slowdown
+------------------------------------------------------------------------------------
+text 4MB         1 |    3.354    3.421 |     192.4     277.8 |     1.4x
+text 4MB         3 |    3.767    3.783 |     138.0     159.2 |     1.2x
+text 4MB         6 |    4.032    4.208 |      70.9      63.6 |     0.9x
+text 4MB         9 |    4.333    4.350 |      19.8      41.3 |     2.1x
+text 4MB        16 |    4.800    4.764 |       2.4       3.4 |     1.4x
+text 4MB        19 |    4.859    4.868 |       2.1       2.1 |     1.0x
+binary           1 |    2.705    2.669 |     204.8     297.9 |     1.5x
+binary           3 |    2.981    2.985 |     130.4     179.4 |     1.4x
+binary           6 |    3.112    3.188 |      49.6      65.0 |     1.3x
+binary           9 |    3.126    3.222 |      20.0      43.5 |     2.2x
+binary          16 |    3.471    3.455 |       1.9       4.4 |     2.3x
+binary          19 |    3.627    3.720 |       1.8       2.5 |     1.4x
+------------------------------------------------------------------------------------
+```
+
+### Notes
+- Forward DP over up to 4096 positions with adaptive prices (literals, LL/ML/OF codes), repeat
+  offsets tracked per DP state; binary-tree match finder (insertBt1 / getAllMatches).
+- Level 19 before (lazy2): text 4.430, binary 3.182. Now 4.859 / 3.627 (libzstd 4.868 / 3.720).
+- Levels 18-22 use minimum match length 3 (3-byte hash), as libzstd does.
+
+---
+
 ## 2026-11-17 — New encoder (level strategies, entropy coding)
 
 Script: `test/benchmark/compress_compare.jl`, same machine and corpora as the decoder entry below.

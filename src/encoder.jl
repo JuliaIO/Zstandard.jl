@@ -31,7 +31,7 @@ const MIN_MATCH = 3
 # Compression parameters (after ZSTD_defaultCParameters for large inputs)
 # ---------------------------------------------------------------------------
 
-@enum Strategy S_FAST S_DFAST S_GREEDY S_LAZY S_LAZY2
+@enum Strategy S_FAST S_DFAST S_GREEDY S_LAZY S_LAZY2 S_BTOPT S_BTULTRA
 
 struct CParams
     window_log::Int
@@ -44,9 +44,11 @@ struct CParams
 end
 
 # window, chain, hash, search, minMatch, targetLength, strategy
-# Levels 13+ use libzstd's window/table sizes but lazy2 parsing (the binary-tree
-# and optimal parsers of libzstd levels 13-22 are not implemented); search depth
-# is capped where deeper chains stopped paying for themselves on real data.
+# Levels 13-15 use lazy2 (libzstd: btlazy2); 16-17 the optimal parser with
+# static-ish pricing (btopt), 18-22 the full optimal parser (btultra). Match
+# candidates come from a hash chain rather than a binary tree; search depth is
+# capped where deeper chains stopped paying for themselves on real data.
+# For the optimal parser, targetLength is the "sufficient" match length.
 const LEVEL_TABLE = CParams[
     CParams(19, 12, 13, 1, 6, 1, S_FAST),     # base for negative levels
     CParams(19, 13, 14, 1, 7, 0, S_FAST),     # 1
@@ -64,13 +66,13 @@ const LEVEL_TABLE = CParams[
     CParams(22, 22, 22, 6, 5, 32, S_LAZY2),   # 13
     CParams(22, 22, 23, 6, 5, 48, S_LAZY2),   # 14
     CParams(22, 23, 23, 7, 5, 64, S_LAZY2),   # 15
-    CParams(22, 23, 23, 7, 4, 96, S_LAZY2),   # 16
-    CParams(23, 23, 23, 7, 4, 128, S_LAZY2),  # 17
-    CParams(23, 24, 23, 7, 4, 192, S_LAZY2),  # 18
-    CParams(23, 24, 23, 7, 4, 256, S_LAZY2),  # 19
-    CParams(25, 25, 23, 8, 4, 256, S_LAZY2),  # 20
-    CParams(26, 26, 24, 8, 4, 512, S_LAZY2),  # 21
-    CParams(27, 27, 25, 8, 4, 999, S_LAZY2),  # 22
+    CParams(22, 22, 22, 5, 4, 48, S_BTOPT),   # 16
+    CParams(23, 23, 22, 6, 4, 64, S_BTOPT),   # 17
+    CParams(23, 23, 22, 6, 3, 64, S_BTULTRA), # 18
+    CParams(23, 24, 22, 7, 3, 256, S_BTULTRA),# 19
+    CParams(25, 25, 23, 7, 3, 256, S_BTULTRA),# 20
+    CParams(26, 26, 24, 8, 3, 512, S_BTULTRA),# 21
+    CParams(27, 27, 25, 9, 3, 999, S_BTULTRA),# 22
 ]
 
 """
@@ -122,13 +124,16 @@ end
 end
 
 # Hashes of the first `mls` bytes at p (reads 8 bytes).
+const PRIME3 = 0x9E3779B1
 const PRIME4 = 0x9E3779B1
 const PRIME5 = 0x000000CF1BBCDCBB
 const PRIME6 = 0x0000CF1BBCDCBF9B
 const PRIME7 = 0x00CF1BBCDCBFA563
 const PRIME8 = 0xCF1BBCDCB7A56463
 @inline function zhash(p::Ptr{UInt8}, hlog::Int, mls::Int)
-    if mls == 4
+    if mls == 3
+        return Int(((load32(p) << 8) * PRIME3) >> ((32 - hlog) & 31))
+    elseif mls == 4
         return Int((load32(p) * PRIME4) >> ((32 - hlog) & 31))
     elseif mls == 5
         return Int(((load64(p) << 24) * PRIME5) >> ((64 - hlog) & 63))
@@ -474,6 +479,8 @@ function parse_lazy!(ss::SeqStore, htab::Vector{Int32}, hlog::Int, ctab::Vector{
     store_last_literals!(ss, anchor, Int(iend - anchor))
     return rep1, rep2, next
 end
+
+include("encoder_opt.jl")
 
 # ---------------------------------------------------------------------------
 # Backward bit writer (BIT_CStream)
@@ -930,6 +937,7 @@ mutable struct CompressionContext
     # output scratch
     blk::Vector{UInt8}
     tmp::Vector{UInt8}
+    opt::OptState
 end
 
 function default_ctable(norm, al, tabsym, cumul)
@@ -952,7 +960,7 @@ function CompressionContext()
         HufCTable(), HufCTable(), false,
         zeros(UInt8, 256), zeros(Int, 256), zeros(Int, 512), zeros(Int, 512),
         zeros(Int16, 16), FSECTable(), zeros(Int, 16), zeros(UInt8, 256),
-        zeros(UInt8, 1024), zeros(UInt8, 1024))
+        zeros(UInt8, 1024), zeros(UInt8, 1024), OptState())
 end
 
 function reset_context!(cc::CompressionContext, p::CParams, level::Int)
@@ -971,6 +979,7 @@ function reset_context!(cc::CompressionContext, p::CParams, level::Int)
     cc.rep = (1, 4, 8)
     cc.ll_prev_ok = cc.ml_prev_ok = cc.of_prev_ok = false
     cc.huf_prev_ok = false
+    cc.opt.have_stats = false
     return cc
 end
 
@@ -1399,6 +1408,11 @@ function parse_block!(cc::CompressionContext, base::Ptr{UInt8}, bstart::Ptr{UInt
     elseif p.strategy == S_DFAST
         cc.prep1, cc.prep2 = parse_dfast!(ss, cc.htab, p.hash_log, cc.ctab, p.chain_log, mls,
                                           base, bstart, bend, lowlimit, cc.prep1, cc.prep2)
+    elseif p.strategy >= S_BTOPT
+        cc.next_to_update = max(cc.next_to_update, lowlimit)
+        cc.next_to_update = parse_opt!(ss, cc.opt, cc.htab, p.hash_log, cc.ctab, p.chain_log,
+            clamp(p.min_match, 3, 4), 1 << p.search_log, max(p.target_length, 8), p.strategy == S_BTULTRA,
+            base, bstart, bend, lowlimit, cc.rep, cc.next_to_update)
     else
         depth = p.strategy == S_GREEDY ? 0 : p.strategy == S_LAZY ? 1 : 2
         mls = clamp(p.min_match, 4, 6)

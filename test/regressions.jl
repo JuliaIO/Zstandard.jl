@@ -35,6 +35,7 @@ end
 end
 
 using TranscodingStreams
+using CodecZstd
 
 @testset "Reused decompressor codec" begin
     codec = ZstandardDecompressor()
@@ -85,4 +86,25 @@ end
     @test decompress(c) == d
     # (minimum of a few runs: a stray allocation elsewhere must not fail it)
     @test minimum(@allocated(decompress(c)) for _ in 1:3) < 1.6 * length(d)
+end
+
+@testset "Optimal parser at the block end (levels 16-22)" begin
+    # a tree candidate reaching the block end without beating the best match
+    # was ordered by the byte past the end: over-long matches, wrong output
+    function mk(n, seed)
+        x = lcg_bytes(300, seed, 0x00:0xff)
+        d = repeat(x, n ÷ 300 + 1)[1:n]
+        r = UInt64(seed)
+        for k in 1:(n ÷ 97)
+            r = r * 6364136223846793005 + 1442695040888963407
+            d[(r >> 33) % n + 1] = (r >> 13) % UInt8
+        end
+        d
+    end
+    for (n, seed, level) in ((262144, 3, 19), (400000, 6, 18), (400000, 2, 19), (262144, 5, 16), (262144, 7, 22))
+        d = mk(n, seed)
+        c = compress(d; level)
+        @test decompress(c) == d
+        @test transcode(CodecZstd.ZstdDecompressor, c) == d
+    end
 end
