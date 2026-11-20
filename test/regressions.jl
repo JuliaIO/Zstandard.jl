@@ -183,3 +183,61 @@ end
     @test_throws ArgumentError Zstandard.XXHash.update!(st, Ptr{UInt8}(0), -1)
     @test st.total == 0
 end
+
+@testset "close after a pledge mismatch" begin
+    io = IOBuffer()
+    s = Zstandard.ZstdCompressorStream(io; pledged_size=2000)
+    write(s, lcg_bytes(1000, 4, 0x00:0xff))
+    @test_throws ArgumentError close(s)
+    @test !isopen(s)
+    @test !isopen(io)
+    close(s)                                   # already closed: no error
+end
+
+@testset "Size hint from a forged content size" begin
+    @test TranscodingStreams.expectedsize(ZstandardDecompressor(),
+        TranscodingStreams.Memory(pointer(forged_fcs(UInt64(1) << 46)), 16)) <= 1 << 26
+    c = compress(lcg_bytes(1000, 5, 0x00:0xff))
+    @test transcode(ZstandardDecompressor(), c) == decompress(c)
+end
+
+@testset "Precompile workload leaves the context pools empty" begin
+    # in a fresh process, i.e. as loaded from the package image
+    code = "using Zstandard; print(length(Zstandard._CCTX_POOL), \" \", length(Zstandard._STATE_POOL))"
+    cmd = `$(Base.julia_cmd()) --startup-file=no --project=$(Base.active_project()) -e $code`
+    @test readchomp(cmd) == "0 0"
+end
+
+@testset "Prepared dictionary levels" begin
+    dict = ZstdDictionary(Vector{UInt8}(repeat("dictionary content for prepared levels ", 200)))
+    x = Vector{UInt8}("some dictionary content for prepared levels to compress")
+    @test prepare_dictionary(dict; level=99).level == Zstandard.Encoder.MAX_LEVEL
+    pd = prepare_dictionary(dict; level=0)
+    @test pd.level == 3
+    @test decompress(compress(x; dict=pd, level=3), dict) == x
+    @test decompress(compress(x; dict=pd, level=0), dict) == x
+end
+
+@testset "Prepared dictionaries in streams without a pledged size" begin
+    dict = ZstdDictionary(repeat(lcg_bytes(1000, 10, UInt8.(0x41:0x50)), 100))
+    pd = prepare_dictionary(dict; level=3)
+    function streamed(d; kw...)
+        io = IOBuffer()
+        s = Zstandard.ZstdCompressorStream(io; close_io=false, dict=pd, kw...)
+        for p in Iterators.partition(d, 50_000); write(s, p); end
+        close(s); take!(io)
+    end
+    small = lcg_bytes(300, 11, UInt8.(0x41:0x50))
+    for d in (small, UInt8[], lcg_bytes(70_000, 12, UInt8.(0x41:0x50)), repeat(small, 3000))
+        c = streamed(d)
+        @test decompress(c, dict) == d
+    end
+    # a small unpledged stream uses the prepared tables: same frame as pledged
+    # apart from the header's content size
+    @test decompress(streamed(small), dict) == small
+    @test length(streamed(small)) <= length(streamed(small; pledged_size=300)) + 2
+    # flushing before the end still works
+    io = IOBuffer(); s = Zstandard.ZstdCompressorStream(io; close_io=false, dict=pd)
+    write(s, small); flush(s); write(s, small); close(s)
+    @test decompress(take!(io), dict) == vcat(small, small)
+end

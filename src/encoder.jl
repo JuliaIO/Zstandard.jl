@@ -17,7 +17,8 @@ import ..Decoder: LL_BASE, LL_BITS, ML_BASE, ML_BITS, LL_DEFAULT_NORM, ML_DEFAUL
                   OF_DEFAULT_NORM, MAGIC_NUMBER, BLOCK_SIZE_MAX, ZstdDictionary, has_entropy
 
 export CompressionContext, compress_frame!, compression_parameters, MIN_LEVEL, MAX_LEVEL,
-       StreamCompressor, stream_write!, stream_flush!, stream_finish!
+       StreamCompressor, stream_write!, stream_flush!, stream_finish!, stream_pledge!,
+       PreparedDictionary, prepare_dictionary, ParameterOverrides, parameter_overrides, NO_OVERRIDES
 
 const MIN_LEVEL = -7
 const MAX_LEVEL = 22
@@ -45,8 +46,10 @@ end
 
 # window, chain, hash, search, minMatch, targetLength, strategy
 # Levels 13-15 use lazy2 (libzstd: btlazy2); 16-17 the optimal parser with
-# static-ish pricing (btopt), 18-22 the full optimal parser (btultra). Match
-# candidates come from a hash chain rather than a binary tree; search depth is
+# static-ish pricing (btopt), 18-22 the full optimal parser (btultra).
+# Greedy/lazy levels find matches with libzstd's row-based match finder (rows
+# of 2^clamp(searchLog, 4, 6) entries; chainLog is unused). The optimal parser
+# takes candidates from a hash chain rather than a binary tree; search depth is
 # capped where deeper chains stopped paying for themselves on real data.
 # For the optimal parser, targetLength is the "sufficient" match length.
 const LEVEL_TABLE = CParams[
@@ -76,17 +79,111 @@ const LEVEL_TABLE = CParams[
 ]
 
 """
-    compression_parameters(level, src_size) -> CParams
+    ParameterOverrides
+
+Explicit compression parameters replacing a level's defaults (`-1` = unset).
+Build with [`parameter_overrides`](@ref).
+"""
+struct ParameterOverrides
+    window_log::Int
+    chain_log::Int
+    hash_log::Int
+    search_log::Int
+    min_match::Int
+    target_length::Int
+    strategy::Int        # Int(Strategy) or -1
+end
+
+const NO_OVERRIDES = ParameterOverrides(-1, -1, -1, -1, -1, -1, -1)
+
+# libzstd strategy names; btlazy2 and btultra2 are not implemented and use
+# the nearest strategy here.
+const STRATEGY_NAMES = Dict(:fast => S_FAST, :dfast => S_DFAST, :greedy => S_GREEDY,
+                            :lazy => S_LAZY, :lazy2 => S_LAZY2, :btlazy2 => S_LAZY2,
+                            :btopt => S_BTOPT, :btultra => S_BTULTRA, :btultra2 => S_BTULTRA)
+
+function checked_param(name::Symbol, v, lo::Int, hi::Int)
+    v === nothing && return -1
+    v isa Integer || throw(ArgumentError("$name must be an integer"))
+    lo <= v <= hi || throw(ArgumentError("$name = $v is outside $lo:$hi"))
+    return Int(v)
+end
+
+"""
+    parameter_overrides(; window_log, hash_log, chain_log, search_log, min_match,
+                          target_length, strategy) -> ParameterOverrides
+
+Validate explicit compression parameters (each `nothing` = the level's value),
+with the meaning of libzstd's `ZSTD_c_*` parameters:
+
+- `window_log` (10-30): log2 of the maximum match distance (window size)
+- `hash_log` (6-27): log2 of the main hash table size
+- `chain_log` (6-28): log2 of the chain / secondary table size (unused by the
+  greedy and lazy strategies, whose row-based match finder sizes rows from
+  `search_log`, as in libzstd)
+- `search_log` (1-26): log2 of the number of match candidates searched
+- `min_match` (3-7): minimum match length searched for (the match finders
+  use 4-7 for fast/dfast, 4-6 for greedy/lazy, 3-4 for btopt/btultra)
+- `target_length` (0-131072): for fast, a step size (acceleration); for
+  lazy, a length beyond which no better match is sought; for btopt/btultra,
+  a length taken without optimizing
+- `strategy`: `:fast`, `:dfast`, `:greedy`, `:lazy`, `:lazy2`, `:btopt`,
+  `:btultra` (libzstd's `:btlazy2` and `:btultra2` are accepted and use
+  `:lazy2` and `:btultra`)
+
+Parameters are adapted to the input size afterwards, as in libzstd (e.g.
+the window shrinks for small inputs).
+"""
+function parameter_overrides(; window_log=nothing, hash_log=nothing, chain_log=nothing,
+                             search_log=nothing, min_match=nothing, target_length=nothing,
+                             strategy=nothing)
+    st = -1
+    if strategy !== nothing
+        haskey(STRATEGY_NAMES, strategy) ||
+            throw(ArgumentError("unknown strategy $(repr(strategy)); use one of " *
+                                join(repr.(sort(collect(keys(STRATEGY_NAMES)))), ", ")))
+        st = Int(STRATEGY_NAMES[strategy])
+    end
+    ParameterOverrides(checked_param(:window_log, window_log, 10, 30),
+                       checked_param(:chain_log, chain_log, 6, 28),
+                       checked_param(:hash_log, hash_log, 6, 27),
+                       checked_param(:search_log, search_log, 1, 26),
+                       checked_param(:min_match, min_match, 3, 7),
+                       checked_param(:target_length, target_length, 0, 1 << 17), st)
+end
+
+pick(v::Int, default) = v >= 0 ? v : default
+
+apply_overrides(p::CParams, ov::ParameterOverrides) =
+    ov === NO_OVERRIDES ? p :
+    CParams(pick(ov.window_log, p.window_log), pick(ov.chain_log, p.chain_log),
+            pick(ov.hash_log, p.hash_log), pick(ov.search_log, p.search_log),
+            pick(ov.min_match, p.min_match), pick(ov.target_length, p.target_length),
+            ov.strategy >= 0 ? Strategy(ov.strategy) : p.strategy)
+
+"""Block size for parameters `p`: RFC 8878 limits blocks to
+`Block_Maximum_Size = min(Window_Size, 128 KiB)`."""
+block_size(p::CParams) = min(BLOCK_SIZE_MAX, 1 << p.window_log)
+
+"""The level as compression uses it: clamped to MIN_LEVEL:MAX_LEVEL, with 0 meaning 3."""
+normalize_level(level::Integer) = (l = clamp(Int(level), MIN_LEVEL, MAX_LEVEL); l == 0 ? 3 : l)
+
+"""
+    compression_parameters(level, src_size[, overrides]) -> CParams
 
 Parameters for `level`, shrunk for small inputs as the reference
 implementation does (smaller tables for small data are faster and lose
 nothing).
 """
-function compression_parameters(level::Integer, src_size::Integer)
-    level = clamp(level, MIN_LEVEL, MAX_LEVEL)
-    level == 0 && (level = 3)
+function compression_parameters(level::Integer, src_size::Integer,
+                                ov::ParameterOverrides=NO_OVERRIDES)
+    level = normalize_level(level)
     p = level < 0 ? LEVEL_TABLE[1] : LEVEL_TABLE[level + 1]
     target = level < 0 ? -level : p.target_length
+    # explicit parameters replace the level's, then everything is adapted to
+    # the input size (as ZSTD_getCParamsFromCCtxParams + ZSTD_adjustCParams)
+    p = apply_overrides(p, ov)
+    ov.target_length >= 0 && (target = ov.target_length)
     wlog = p.window_log
     if src_size >= 0
         src_log = max(10, 64 - leading_zeros(UInt64(max(src_size - 1, 1))))
@@ -338,48 +435,117 @@ function parse_dfast!(ss::SeqStore, hlong::Vector{Int32}, hllog::Int, hsmall::Ve
     return rep1, rep2
 end
 
-# Hash chain: insert all positions in [next, target) and return the head for `target`.
-@inline function hc_insert!(ht::Ptr{Int32}, ch::Ptr{Int32}, hlog::Int, cmask::Int, mls::Int,
-                            base::Ptr{UInt8}, next::Int, target::Int)
-    i = next
-    while i < target
-        h = zhash(ptr_of(i, base), hlog, mls)
-        unsafe_store!(ch, unsafe_load(ht, h + 1), (i & cmask) + 1)
-        unsafe_store!(ht, i % Int32, h + 1)
-        i += 1
-    end
-    return Int(unsafe_load(ht, zhash(ptr_of(target, base), hlog, mls) + 1))
+# Row-based match finder (libzstd's ZSTD_row_*), used by the greedy and lazy
+# strategies. The hash table is split into rows of 2^rlog entries; each row
+# keeps the most recent positions whose hash falls in it as a ring (newest at
+# the row's head), plus a 1-byte tag per entry from the next hash bits. A
+# search compares the tags of a whole row at once and only visits entries with
+# a matching tag, newest first.
+#
+# Layout: `htab` holds the positions (2^hash_log entries); `ctab`, read as
+# bytes, holds the tags (2^hash_log bytes) followed by one head byte per row.
+@inline row_log(p) = min(clamp(p.search_log, 4, 6), p.hash_log)
+@inline row_tab_len(p) = ((1 << p.hash_log) + (1 << (p.hash_log - row_log(p)))) >> 2 + 1
+@inline is_row(p) = S_GREEDY <= p.strategy <= S_LAZY2
+
+const PREFETCH_IR = """
+declare void @llvm.prefetch.p0(ptr, i32, i32, i32)
+define void @entry(i64 %a) #0 {
+  %p = inttoptr i64 %a to ptr
+  call void @llvm.prefetch.p0(ptr %p, i32 0, i32 3, i32 1)
+  ret void
+}
+attributes #0 = { alwaysinline }
+"""
+# i64 in the IR: pass a UInt64, so that 32-bit platforms (UInt is 32 bits) compile too
+@inline prefetch(p::Ptr) = Base.llvmcall((PREFETCH_IR, "entry"), Cvoid, Tuple{UInt64}, UInt64(UInt(p)))
+
+@inline function row_prefetch(pos::Ptr{Int32}, tags::Ptr{UInt8}, rbits::Int, rlog::Int, mls::Int, p::Ptr{UInt8})
+    rows = (zhash(p, rbits + 8, mls) >> 8) << rlog
+    prefetch(tags + rows)
+    prefetch(pos + 4rows)
+    return
 end
 
-# Best match at ip via the hash chain. Returns (length, offset); updates `next`.
-@inline function hc_find_best(ht::Ptr{Int32}, ch::Ptr{Int32}, hlog::Int, clog::Int, mls::Int,
-                              attempts::Int, base::Ptr{UInt8}, ip::Ptr{UInt8}, iend::Ptr{UInt8},
-                              lowlimit::Int, next::Int)
+@inline function row_insert!(pos::Ptr{Int32}, tags::Ptr{UInt8}, rbits::Int, rlog::Int, mls::Int,
+                             base::Ptr{UInt8}, next::Int, target::Int)
+    heads = tags + (1 << (rbits + rlog))
+    rmask = (1 << rlog) - 1
+    i = next
+    while i < target
+        i + 8 < target && row_prefetch(pos, tags, rbits, rlog, mls, ptr_of(i + 8, base))
+        h = zhash(ptr_of(i, base), rbits + 8, mls)
+        row = h >> 8
+        hd = (Int(unsafe_load(heads, row + 1)) - 1) & rmask
+        unsafe_store!(heads, hd % UInt8, row + 1)
+        slot = (row << rlog) + hd + 1
+        unsafe_store!(tags, h % UInt8, slot)
+        unsafe_store!(pos, i % Int32, slot)
+        i += 1
+    end
+    return
+end
+
+# Bit k set iff byte k of x is zero (exact: no carries between bytes).
+@inline function zero_bytes(x::UInt64)
+    y = (x & 0x7F7F7F7F7F7F7F7F) + 0x7F7F7F7F7F7F7F7F
+    return ((~(y | x | 0x7F7F7F7F7F7F7F7F) >> 7) * 0x0102040810204080) >> 56
+end
+
+# Bit k set iff tags[k] == tag, for the 2^rlog tags of a row.
+@inline function row_tag_mask(tr::Ptr{UInt8}, tag::UInt8, rlog::Int)
+    t = UInt64(tag) * 0x0101010101010101
+    m = zero_bytes(load64(tr) ⊻ t) | (zero_bytes(load64(tr + 8) ⊻ t) << 8)
+    if rlog >= 5
+        m |= (zero_bytes(load64(tr + 16) ⊻ t) << 16) | (zero_bytes(load64(tr + 24) ⊻ t) << 24)
+        if rlog == 6
+            m |= (zero_bytes(load64(tr + 32) ⊻ t) << 32) | (zero_bytes(load64(tr + 40) ⊻ t) << 40) |
+                 (zero_bytes(load64(tr + 48) ⊻ t) << 48) | (zero_bytes(load64(tr + 56) ⊻ t) << 56)
+        end
+    end
+    return m
+end
+
+# Best match at ip via the row table. Returns (length, offset, next).
+@inline function row_find_best(pos::Ptr{Int32}, tags::Ptr{UInt8}, rbits::Int, rlog::Int, mls::Int,
+                               attempts::Int, base::Ptr{UInt8}, ip::Ptr{UInt8}, iend::Ptr{UInt8},
+                               lowlimit::Int, next::Int)
+    ilimit = iend - HASH_READ_SIZE
     cur = pos_of(ip, base)
-    cmask = (1 << clog) - 1
-    midx = hc_insert!(ht, ch, hlog, cmask, mls, base, next, cur)
-    minchain = cur > (1 << clog) ? cur - (1 << clog) : 0
+    row_insert!(pos, tags, rbits, rlog, mls, base, next, cur)
+    h = zhash(ip, rbits + 8, mls)
+    row = h >> 8
+    rows = row << rlog
+    nent = 1 << rlog
+    hd = Int(unsafe_load(tags + (1 << (rbits + rlog)), row + 1))
+    m = row_tag_mask(tags + rows, h % UInt8, rlog)
+    ip + 1 < ilimit && row_prefetch(pos, tags, rbits, rlog, mls, ip + 1)
+    # rotate so that bit j is slot (hd + j) mod nent: newest first
+    emask = nent == 64 ? typemax(UInt64) : (UInt64(1) << nent) - 1
+    m = ((m >> hd) | (m << ((nent - hd) & 63))) & emask
     best = 3
     bestoff = 0
     lowl = max(lowlimit, 1)
-    while attempts > 0 && midx >= lowl
-        m = ptr_of(midx, base)
-        if unsafe_load(m + best) == unsafe_load(ip + best) && load32(m) == load32(ip)
-            l = zcount(ip + 4, m + 4, iend) + 4
+    while m != 0 && attempts > 0
+        j = trailing_zeros(m)
+        m &= m - 1
+        midx = Int(unsafe_load(pos, rows + ((hd + j) & (nent - 1)) + 1))
+        (lowl <= midx < cur) || continue
+        attempts -= 1
+        mp = ptr_of(midx, base)
+        if unsafe_load(mp + best) == unsafe_load(ip + best) && load32(mp) == load32(ip)
+            l = zcount(ip + 4, mp + 4, iend) + 4
             if l > best
                 best = l
                 bestoff = cur - midx
                 ip + l == iend && break
             end
         end
-        midx <= minchain && break
-        midx = Int(unsafe_load(ch, (midx & cmask) + 1))
-        attempts -= 1
     end
     return (bestoff == 0 ? 0 : best), bestoff, cur
 end
 
-function parse_lazy!(ss::SeqStore, htab::Vector{Int32}, hlog::Int, ctab::Vector{Int32}, clog::Int,
+function parse_lazy!(ss::SeqStore, htab::Vector{Int32}, hlog::Int, ctab::Vector{Int32}, rlog::Int,
                      mls::Int, attempts::Int, depth::Int, target_len::Int, base::Ptr{UInt8},
                      istart::Ptr{UInt8}, iend::Ptr{UInt8}, lowlimit::Int, rep1::Int, rep2::Int,
                      next::Int)
@@ -388,8 +554,9 @@ function parse_lazy!(ss::SeqStore, htab::Vector{Int32}, hlog::Int, ctab::Vector{
     ip = istart
     ip == base && (ip += 1)
     lowp = ptr_of(max(lowlimit, 1), base)
+    rbits = hlog - rlog
     GC.@preserve htab ctab begin
-        ht = pointer(htab); ch = pointer(ctab)
+        ht = pointer(htab); ch = Ptr{UInt8}(pointer(ctab))
         while ip < ilimit
             ml = 0; offset = 0; start = ip + 1
             cur = pos_of(ip, base)
@@ -400,7 +567,7 @@ function parse_lazy!(ss::SeqStore, htab::Vector{Int32}, hlog::Int, ctab::Vector{
                 start = ip + 1
             end
             if !(depth == 0 && ml > 0)
-                l2, o2, nxt = hc_find_best(ht, ch, hlog, clog, mls, attempts, base, ip, iend, lowlimit, next)
+                l2, o2, nxt = row_find_best(ht, ch, rbits, rlog, mls, attempts, base, ip, iend, lowlimit, next)
                 next = nxt
                 if l2 > ml
                     ml = l2; offset = o2; start = ip
@@ -423,7 +590,7 @@ function parse_lazy!(ss::SeqStore, htab::Vector{Int32}, hlog::Int, ctab::Vector{
                             ml = mlr; offset = rep1; start = ip
                         end
                     end
-                    l2, o2, nxt = hc_find_best(ht, ch, hlog, clog, mls, attempts, base, ip, iend, lowlimit, next)
+                    l2, o2, nxt = row_find_best(ht, ch, rbits, rlog, mls, attempts, base, ip, iend, lowlimit, next)
                     next = nxt
                     gain2 = l2 * 4 - highbit(o2 + 3)
                     gain1 = ml * 4 - highbit(offset + 3) + 4
@@ -442,7 +609,7 @@ function parse_lazy!(ss::SeqStore, htab::Vector{Int32}, hlog::Int, ctab::Vector{
                                 ml = mlr; offset = rep1; start = ip
                             end
                         end
-                        l2, o2, nxt = hc_find_best(ht, ch, hlog, clog, mls, attempts, base, ip, iend, lowlimit, next)
+                        l2, o2, nxt = row_find_best(ht, ch, rbits, rlog, mls, attempts, base, ip, iend, lowlimit, next)
                         next = nxt
                         gain2 = l2 * 4 - highbit(o2 + 3)
                         gain1 = ml * 4 - highbit(offset + 3) + 7
@@ -963,16 +1130,16 @@ function CompressionContext()
         zeros(UInt8, 1024), zeros(UInt8, 1024), OptState())
 end
 
-function reset_context!(cc::CompressionContext, p::CParams, level::Int)
+function reset_context!(cc::CompressionContext, p::CParams, level::Int; clear::Bool=true)
     cc.params = p
     cc.level = level
     hsize = 1 << p.hash_log
     length(cc.htab) != hsize && resize!(cc.htab, hsize)
-    fill!(cc.htab, Int32(0))
+    clear && fill!(cc.htab, Int32(0))
     if p.strategy == S_DFAST || p.strategy >= S_GREEDY
-        csize = 1 << p.chain_log
+        csize = is_row(p) ? row_tab_len(p) : 1 << p.chain_log
         length(cc.ctab) != csize && resize!(cc.ctab, csize)
-        fill!(cc.ctab, Int32(0))
+        clear && fill!(cc.ctab, Int32(0))
     end
     cc.next_to_update = 1
     cc.prep1, cc.prep2 = 1, 4
@@ -1434,7 +1601,7 @@ function parse_range!(cc::CompressionContext, base::Ptr{UInt8}, bstart::Ptr{UInt
         mls = clamp(p.min_match, 4, 6)
         cc.next_to_update = max(cc.next_to_update, lowlimit)
         cc.prep1, cc.prep2, cc.next_to_update = parse_lazy!(ss, cc.htab, p.hash_log, cc.ctab,
-            p.chain_log, mls, 1 << p.search_log, depth, max(p.target_length, 4), base, bstart, bend,
+            row_log(p), mls, 1 << min(p.search_log, row_log(p)), depth, max(p.target_length, 4), base, bstart, bend,
             lowlimit, cc.prep1, cc.prep2, cc.next_to_update)
     end
     return
@@ -1527,14 +1694,24 @@ function write_frame_header!(out::Vector{UInt8}, pos::Int, src_size::Int, window
     return pos
 end
 
+include("prepared.jl")
+
 """
     compress_frame!(cc, data, level; checksum=false) -> Vector{UInt8}
 
 Compress `data` as a single Zstandard frame.
 """
 function compress_frame!(cc::CompressionContext, data::AbstractVector{UInt8}, level::Integer;
-                         checksum::Bool=false, dict::Union{Nothing,ZstdDictionary}=nothing,
-                         long::Bool=false)
+                         checksum::Bool=false,
+                         dict::Union{Nothing,ZstdDictionary,PreparedDictionary}=nothing,
+                         long::Bool=false, params::ParameterOverrides=NO_OVERRIDES)
+    prepared = nothing
+    if dict isa PreparedDictionary
+        level = dict.level
+        prepared = (!long && use_prepared(dict, length(data), level, params)) ? dict : nothing
+        params = dict.overrides
+        dict = dict.dict
+    end
     n = length(data)
     dlen = dict === nothing ? 0 : length(dict.content)
     if dlen > 0
@@ -1545,33 +1722,39 @@ function compress_frame!(cc::CompressionContext, data::AbstractVector{UInt8}, le
     else
         src = data isa Vector{UInt8} ? data : Vector{UInt8}(data)
     end
-    p = compression_parameters(level, n + dlen)
+    p = compression_parameters(level, n + dlen, params)
     if long
         # long-distance matching uses a 128 MiB window (as `zstd --long`)
         src_log = max(10, 64 - leading_zeros(UInt64(max(n + dlen - 1, 1))))
         wlog = max(p.window_log, min(LDM_WINDOW_LOG, src_log))
         p = CParams(wlog, p.chain_log, p.hash_log, p.search_log, p.min_match, p.target_length, p.strategy)
     end
-    reset_context!(cc, p, Int(level))
-    dict === nothing || apply_dict_entropy!(cc, dict)
+    if prepared !== nothing
+        p = prepared.params
+        use_prepared!(cc, prepared)
+    else
+        reset_context!(cc, p, Int(level))
+        dict === nothing || apply_dict_entropy!(cc, dict)
+    end
     bound = n + (n >> 7) + 64 + 3 * (n ÷ BLOCK_SIZE_MAX + 1)
     out = Vector{UInt8}(undef, bound)
     pos = write_frame_header!(out, 1, n, p.window_log, checksum, dict === nothing ? UInt32(0) : dict.id)
     GC.@preserve src begin
         base = pointer(src)
-        dlen > 0 && load_dict!(cc, base, dlen)
+        dlen > 0 && prepared === nothing && load_dict!(cc, base, dlen)
         ldm = nothing
         if long && n >= 1 << 16
             mm = p.strategy >= S_BTULTRA ? 32 : 64
             ldm = ldm_sequences(base, dlen + 1, dlen + n, 1 << p.window_log, mm,
                                 max(6, min(20, p.window_log - 7)))
         end
+        bmax = block_size(p)
         if n == 0
             pos = write_block_header!(out, pos, true, 0, 0)
         else
             off = dlen
             while off < dlen + n
-                bn = min(BLOCK_SIZE_MAX, dlen + n - off)
+                bn = min(bmax, dlen + n - off)
                 last = off + bn == dlen + n
                 length(out) < pos + bn + 16 && resize!(out, pos + bn + 1024)
                 pos = compress_block!(cc, out, pos, base, base + off, base + off + bn, last, ldm)
@@ -1603,8 +1786,8 @@ defaults: jobs of at least one window (min 1 MiB; four windows for the
 optimal parser, whose history is expensive to load), each loading part of the
 preceding data as history (window/8 for fast..lazy2, more for optimal parsing).
 """
-function mt_layout(n::Int, level::Integer)
-    p = compression_parameters(level, n)
+function mt_layout(n::Int, level::Integer, ov::ParameterOverrides=NO_OVERRIDES)
+    p = compression_parameters(level, n, ov)
     window = 1 << p.window_log
     job = max(1 << 20, p.strategy >= S_BTOPT ? 4window : window)
     overlap = window >> (p.strategy == S_BTULTRA ? 1 : p.strategy == S_BTOPT ? 2 : 3)
@@ -1634,8 +1817,9 @@ function compress_job!(cc::CompressionContext, p::CParams, level::Integer, data:
         hist = max(1, job_start - overlap)
         hist < job_start && load_history!(cc, base, hist, job_start)
         off = job_start - 1
+        bmax = block_size(p)
         while off < job_end
-            bn = min(BLOCK_SIZE_MAX, job_end - off)
+            bn = min(bmax, job_end - off)
             lastb = last && off + bn == job_end
             length(out) < pos + bn + 16 && resize!(out, pos + bn + 1024)
             pos = compress_block!(cc, out, pos, base, base + off, base + off + bn, lastb)
@@ -1658,18 +1842,22 @@ end
 # ---------------------------------------------------------------------------
 
 """
-    StreamCompressor(; level=3, checksum=false, dict=nothing)
+    StreamCompressor(; level=3, checksum=false, dict=nothing, pledged_size=nothing)
 
-Incremental compressor producing one frame without a known content size.
-Input is fed with [`stream_write!`](@ref); compressed bytes accumulate in
-`sc.out[1:sc.olen]` and are taken by the caller. Memory use is bounded by the
-window size of the level.
+Incremental compressor producing one frame. Input is fed with
+[`stream_write!`](@ref); compressed bytes accumulate in `sc.out[1:sc.olen]` and
+are taken by the caller. Memory use is bounded by the window size of the level.
+
+With `pledged_size` (or [`stream_pledge!`](@ref) before the first write), the
+frame header records that content size and the compression parameters are
+sized to it, as for one-shot compression. Exactly that many bytes must then be
+written before the frame is finished.
 """
 mutable struct StreamCompressor
     cc::CompressionContext
     level::Int
     checksum::Bool
-    dict::Union{Nothing,ZstdDictionary}
+    dict::Union{Nothing,ZstdDictionary,PreparedDictionary}
     buf::Vector{UInt8}   # [history | pending input]
     len::Int             # valid bytes in buf
     pend::Int            # first byte not yet compressed (1-based)
@@ -1680,12 +1868,39 @@ mutable struct StreamCompressor
     started::Bool
     finished::Bool
     xxh::ChecksumState
+    pledged::Int         # pledged content size of the current frame, -1 if unknown
+    total::Int           # bytes written to the current frame
+    params::ParameterOverrides
+    bsize::Int           # block size of the current frame
+    deferred::Bool       # prepared dictionary, no pledge: tables chosen at the first block
 end
 
-function StreamCompressor(; level::Integer=3, checksum::Bool=false,
-                          dict::Union{Nothing,ZstdDictionary}=nothing)
-    StreamCompressor(CompressionContext(), Int(level), checksum, dict, UInt8[], 0, 1, 0, 0,
-                     UInt8[], 0, false, false, ChecksumState())
+function StreamCompressor(; level::Union{Nothing,Integer}=nothing, checksum::Bool=false,
+                          dict::Union{Nothing,ZstdDictionary,PreparedDictionary}=nothing,
+                          pledged_size::Union{Nothing,Integer}=nothing,
+                          params::ParameterOverrides=NO_OVERRIDES)
+    if dict isa PreparedDictionary
+        use_prepared(dict, 0, level, params)    # checks level and parameters
+        level = dict.level
+        params = dict.overrides
+    end
+    level = level === nothing ? 3 : Int(level)
+    sc = StreamCompressor(CompressionContext(), level, checksum, dict, UInt8[], 0, 1, 0, 0,
+                          UInt8[], 0, false, false, ChecksumState(), -1, 0, params, BLOCK_SIZE_MAX, false)
+    pledged_size === nothing || stream_pledge!(sc, pledged_size)
+    return sc
+end
+
+"""
+    stream_pledge!(sc::StreamCompressor, n)
+
+Pledge that the next frame will contain exactly `n` bytes (a negative `n`
+means unknown). Must be called before the frame's first write.
+"""
+function stream_pledge!(sc::StreamCompressor, n::Integer)
+    sc.started && throw(ArgumentError("the content size must be pledged before writing to the frame"))
+    sc.pledged = n < 0 ? -1 : Int(n)
+    return sc
 end
 
 function out_reserve!(sc::StreamCompressor, n::Int)
@@ -1695,35 +1910,72 @@ function out_reserve!(sc::StreamCompressor, n::Int)
 end
 
 function stream_begin!(sc::StreamCompressor)
-    cc = sc.cc
-    dlen = sc.dict === nothing ? 0 : length(sc.dict.content)
-    p = compression_parameters(sc.level, -1)
-    reset_context!(cc, p, sc.level)
-    sc.dict === nothing || apply_dict_entropy!(cc, sc.dict)
-    window = 1 << p.window_log
-    sc.gran = 1 << max(p.chain_log, 17)
-    sc.cap = window + dlen + sc.gran + 2 * BLOCK_SIZE_MAX
-    resize!(sc.buf, min(sc.cap, max(dlen + 2 * BLOCK_SIZE_MAX, 1 << 18)))
-    sc.len = 0
-    if dlen > 0
-        copyto!(sc.buf, 1, sc.dict.content, 1, dlen)
+    dict = sc.dict isa PreparedDictionary ? sc.dict.dict : sc.dict
+    dlen = dict === nothing ? 0 : length(dict.content)
+    if sc.dict isa PreparedDictionary && sc.pledged < 0
+        # Without a pledge the input size is unknown until the stream finishes
+        # or a block must be emitted: buffer the input until then, so that a
+        # small stream can still use the prepared tables (libzstd uses its
+        # CDict for streams of unknown size). Nothing is emitted before.
+        sc.cap = dlen + 3 * BLOCK_SIZE_MAX        # never reached: a block is emitted first
+        sc.bsize = BLOCK_SIZE_MAX
+        resize!(sc.buf, dlen + 2 * BLOCK_SIZE_MAX)
+        copyto!(sc.buf, 1, dict.content, 1, dlen)
         sc.len = dlen
-        GC.@preserve sc load_dict!(cc, pointer(sc.buf), dlen)
+        sc.pend = sc.len + 1
+        sc.deferred = true
+    else
+        pd = sc.dict isa PreparedDictionary && use_prepared(sc.dict, sc.pledged, nothing) ? sc.dict : nothing
+        stream_setup!(sc, pd, true)
     end
-    sc.pend = sc.len + 1
-    out_reserve!(sc, 32)
-    sc.olen = write_frame_header!(sc.out, sc.olen + 1, -1, p.window_log, sc.checksum,
-                                  sc.dict === nothing ? UInt32(0) : sc.dict.id) - 1
     sc.xxh = ChecksumState()
+    sc.total = 0
     sc.started = true
     sc.finished = false
+    return sc
+end
+
+# Choose the frame's parameters and tables (from the prepared dictionary `pd`
+# if given) and write the frame header. With `fresh`, also put the dictionary
+# content in the buffer; otherwise (a deferred start) it is already there,
+# followed by the input buffered so far.
+function stream_setup!(sc::StreamCompressor, pd::Union{Nothing,PreparedDictionary}, fresh::Bool)
+    cc = sc.cc
+    dict = sc.dict isa PreparedDictionary ? sc.dict.dict : sc.dict
+    dlen = dict === nothing ? 0 : length(dict.content)
+    if pd !== nothing
+        p = pd.params
+        use_prepared!(cc, pd)
+    else
+        p = compression_parameters(sc.level, sc.pledged < 0 ? -1 : sc.pledged + dlen, sc.params)
+        reset_context!(cc, p, sc.level)
+        dict === nothing || apply_dict_entropy!(cc, dict)
+    end
+    window = 1 << p.window_log
+    sc.bsize = block_size(p)
+    sc.gran = 1 << max(p.chain_log, 17)
+    sc.cap = window + dlen + sc.gran + 2 * BLOCK_SIZE_MAX
+    if fresh
+        resize!(sc.buf, min(sc.cap, max(dlen + 2 * BLOCK_SIZE_MAX, 1 << 18)))
+        sc.len = 0
+        if dlen > 0
+            copyto!(sc.buf, 1, dict.content, 1, dlen)
+            sc.len = dlen
+        end
+        sc.pend = sc.len + 1
+    end
+    dlen > 0 && pd === nothing && GC.@preserve sc load_dict!(cc, pointer(sc.buf), dlen)
+    out_reserve!(sc, 32)
+    sc.olen = write_frame_header!(sc.out, sc.olen + 1, sc.pledged, p.window_log, sc.checksum,
+                                  dict === nothing ? UInt32(0) : dict.id) - 1
+    sc.deferred = false
     return sc
 end
 
 # Shift tables and buffer down by `d` bytes (a multiple of sc.gran).
 function rebase!(sc::StreamCompressor, d::Int)
     cc = sc.cc
-    for t in (cc.htab, cc.ctab)
+    for t in (is_row(cc.params) ? (cc.htab,) : (cc.htab, cc.ctab))   # row tags are not positions
         @inbounds for i in eachindex(t)
             v = Int(t[i]) - d
             t[i] = v < 1 ? Int32(0) : v % Int32
@@ -1753,6 +2005,8 @@ function make_input_room!(sc::StreamCompressor, n::Int)
 end
 
 function emit_block!(sc::StreamCompressor, bn::Int, last::Bool)
+    # deferred start: more than a block of input (or a flush), size still unknown
+    sc.deferred && stream_setup!(sc, nothing, false)
     out_reserve!(sc, bn + 64)
     GC.@preserve sc begin
         base = pointer(sc.buf)
@@ -1771,6 +2025,11 @@ Feed input. Full blocks are compressed as soon as more input follows them.
 function stream_write!(sc::StreamCompressor, data::AbstractVector{UInt8})
     sc.finished && error("stream already finished")
     sc.started || stream_begin!(sc)
+    if sc.pledged >= 0 && sc.total + length(data) > sc.pledged
+        throw(ArgumentError("writing $(length(data)) more bytes exceeds the pledged content size " *
+                            "of $(sc.pledged) bytes ($(sc.total) written)"))
+    end
+    sc.total += length(data)
     i = firstindex(data)
     stop = lastindex(data)
     while i <= stop
@@ -1780,8 +2039,8 @@ function stream_write!(sc::StreamCompressor, data::AbstractVector{UInt8})
         sc.len += k
         i += k
         # keep the last (possibly full) block pending so it can be marked last
-        while sc.len - sc.pend + 1 > BLOCK_SIZE_MAX
-            emit_block!(sc, BLOCK_SIZE_MAX, false)
+        while sc.len - sc.pend + 1 > sc.bsize
+            emit_block!(sc, sc.bsize, false)
         end
     end
     sc.checksum && checksum_update!(sc.xxh, data)
@@ -1800,6 +2059,11 @@ end
 function stream_finish!(sc::StreamCompressor)
     sc.finished && return sc
     sc.started || stream_begin!(sc)
+    if sc.pledged >= 0 && sc.total != sc.pledged
+        throw(ArgumentError("frame finished after $(sc.total) bytes, but $(sc.pledged) were pledged"))
+    end
+    # deferred start: the whole input is known now
+    sc.deferred && stream_setup!(sc, use_prepared(sc.dict, sc.total, nothing) ? sc.dict : nothing, false)
     n = sc.len - sc.pend + 1
     if n > 0
         emit_block!(sc, n, true)
@@ -1817,6 +2081,7 @@ function stream_finish!(sc::StreamCompressor)
     end
     sc.finished = true
     sc.started = false
+    sc.pledged = -1          # a pledge applies to one frame
     return sc
 end
 

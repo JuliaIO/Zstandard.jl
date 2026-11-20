@@ -5,7 +5,8 @@ module Streaming
 import ..Decoder: DecoderState, ZstdDictionary, FrameInfo, read_frame_info, reset_frame!,
                   decode_compressed_block!, memset!, zerr, ensure_capacity!, ZstdError,
                   MAGIC_NUMBER, SKIPPABLE_MAGIC_START, SKIPPABLE_MASK, BLOCK_SIZE_MAX, WILDCOPY_SLACK
-import ..Encoder: StreamCompressor, stream_write!, stream_flush!, stream_finish!
+import ..Encoder: StreamCompressor, stream_write!, stream_flush!, stream_finish!, PreparedDictionary,
+                  parameter_overrides
 using ..XXHash: ChecksumState, checksum_update!, checksum_digest
 
 export ZstdDecompressorStream, ZstdCompressorStream, StreamDecoder
@@ -52,11 +53,24 @@ mutable struct StreamDecoder
     fi::FrameInfo
     frame_produced::Int
     xxh::Union{Nothing,ChecksumState}
+    max_window::Int      # largest window size accepted
 end
 
-function StreamDecoder(dict::Union{Nothing,ZstdDictionary}=nothing)
+"""
+Default largest window a streaming decoder accepts: 128 MiB, as libzstd's
+default `windowLogMax` of 27. Frames Zstandard.jl writes stay within it
+(`long=true` included) unless `window_log` above 27 is passed explicitly; such
+frames need a larger `max_window_size` here (or `--long=N` / `windowLogMax`
+with libzstd).
+"""
+const DEFAULT_MAX_WINDOW_SIZE = 1 << 27
+
+function StreamDecoder(dict::Union{Nothing,ZstdDictionary}=nothing;
+                       max_window_size::Integer=DEFAULT_MAX_WINDOW_SIZE)
+    max_window_size >= 1 << 10 || throw(ArgumentError("max_window_size must be at least 1 KiB"))
     StreamDecoder(dict, DecoderState(), Vector{UInt8}(undef, 64), 0, 4, U_MAGIC, 0, 0, false,
-        UInt8[], 1, 0, 0, false, 0, FrameInfo(0, 0, -1, 0, false, false), 0, nothing)
+        UInt8[], 1, 0, 0, false, 0, FrameInfo(0, 0, -1, 0, false, false), 0, nothing,
+        Int(max_window_size))
 end
 
 """Number of input bytes the decoder wants next (0 never happens)."""
@@ -101,6 +115,12 @@ end
 function begin_frame!(d::StreamDecoder, hdr::AbstractVector{UInt8})
     h = Vector{UInt8}(hdr)
     fi = GC.@preserve h read_frame_info(pointer(h), length(h))
+    # Decoding keeps up to one window of history in memory, so refuse windows
+    # above the limit (libzstd: frameParameter_windowTooLarge).
+    if fi.window_size > d.max_window
+        zerr("frame requires a window of $(fi.window_size) bytes, more than the limit of " *
+             "$(d.max_window) bytes (raise it with the `max_window_size` keyword)")
+    end
     dict = d.dict
     if fi.dict_id != 0
         dict === nothing && zerr("frame requires dictionary ID $(fi.dict_id)")
@@ -133,7 +153,7 @@ end
 
 function decode_body!(d::StreamDecoder)
     bsize = d.want
-    lim = BLOCK_SIZE_MAX
+    lim = min(BLOCK_SIZE_MAX, d.fi.window_size)     # Block_Maximum_Size
     if d.btype == 2 && d.fi.content_size >= 0
         lim = min(lim, Int(d.fi.content_size) - d.frame_produced)
         lim < 0 && zerr("frame content size exceeded")
@@ -212,7 +232,7 @@ function process_unit!(d::StreamDecoder)
         d.btype = (bh >> 1) & 3
         bsize = bh >> 3
         d.btype == 3 && zerr("reserved block type")
-        bsize > BLOCK_SIZE_MAX && zerr("block too large")
+        bsize > min(BLOCK_SIZE_MAX, d.fi.window_size) && zerr("block larger than the maximum block size")
         if d.btype == 1
             d.skip_left = bsize
             set_unit!(d, U_BODY, 1)
@@ -284,11 +304,15 @@ end
 # ---------------------------------------------------------------------------
 
 """
-    ZstdDecompressorStream(io::IO, dict::Union{Nothing, ZstdDictionary}=nothing)
+    ZstdDecompressorStream(io::IO, dict::Union{Nothing, ZstdDictionary}=nothing;
+                           max_window_size=128 MiB)
 
 A streaming Zstandard decompressor that implements the `IO` interface.
 Decoded data is produced one block at a time; memory use is bounded by the
-frame's window size plus one block.
+frame's window size plus one block. Frames declaring a window larger than
+`max_window_size` (default 128 MiB, as libzstd) are rejected with a
+`ZstdError`, so untrusted input cannot make the decoder allocate more; raise
+it to read frames written with a larger window (e.g. `zstd --long=30`).
 
 After a decoding error (a `ZstdError`), the stream is unusable: later reads
 rethrow the same error (bytes decoded before it can still be read). Other
@@ -300,8 +324,9 @@ mutable struct ZstdDecompressorStream <: IO
     err::Union{Nothing,ZstdError}   # sticky decoding error
 end
 
-ZstdDecompressorStream(io::IO, dict::Union{Nothing,ZstdDictionary}=nothing) =
-    ZstdDecompressorStream(io, StreamDecoder(dict), nothing)
+ZstdDecompressorStream(io::IO, dict::Union{Nothing,ZstdDictionary}=nothing;
+                       max_window_size::Integer=DEFAULT_MAX_WINDOW_SIZE) =
+    ZstdDecompressorStream(io, StreamDecoder(dict; max_window_size), nothing)
 
 # Decode until at least one unread byte is available. Returns false at end of input.
 function fill_buffer!(s::ZstdDecompressorStream)
@@ -390,12 +415,23 @@ end
 # ---------------------------------------------------------------------------
 
 """
-    ZstdCompressorStream(io::IO; level=3, checksum=false, dict=nothing, close_io=true)
+    ZstdCompressorStream(io::IO; level=3, checksum=false, dict=nothing, pledged_size=nothing,
+                         close_io=true)
 
 A streaming Zstandard compressor implementing the writable `IO` interface.
-Data written to the stream is compressed into a single frame (without a
-content size) and written to `io` block by block. `flush` emits all pending
-data as a complete block, so everything written so far can be decoded.
+Data written to the stream is compressed into a single frame and written to
+`io` block by block. `flush` emits all pending data as a complete block, so
+everything written so far can be decoded.
+
+Without `pledged_size` the frame header does not record the content size. With
+`pledged_size = n`, it does (so decoders can preallocate, and
+`frame_content_size` reports it), the compression parameters are sized to `n`
+as in one-shot `compress`, and exactly `n` bytes must be written: writing more
+throws an `ArgumentError`, and so does `close` after writing fewer.
+
+`window_log`, `hash_log`, `chain_log`, `search_log`, `min_match`,
+`target_length` and `strategy` override the level's parameters, as for
+`compress`.
 `close` finishes the frame and, if `close_io` is true, closes `io` (pass
 `close_io=false` to keep writing to `io`, e.g. an `IOBuffer` read afterwards).
 """
@@ -406,9 +442,12 @@ mutable struct ZstdCompressorStream <: IO
     close_io::Bool
 end
 
-function ZstdCompressorStream(io::IO; level::Integer=3, checksum::Bool=false,
-                              dict::Union{Nothing,ZstdDictionary}=nothing, close_io::Bool=true)
-    ZstdCompressorStream(io, StreamCompressor(; level, checksum, dict), false, close_io)
+function ZstdCompressorStream(io::IO; level::Union{Nothing,Integer}=nothing, checksum::Bool=false,
+                              dict::Union{Nothing,ZstdDictionary,PreparedDictionary}=nothing,
+                              pledged_size::Union{Nothing,Integer}=nothing, close_io::Bool=true,
+                              window_log=nothing, hash_log=nothing, chain_log=nothing, search_log=nothing, min_match=nothing, target_length=nothing, strategy=nothing)
+    params = parameter_overrides(; window_log, hash_log, chain_log, search_log, min_match, target_length, strategy)
+    ZstdCompressorStream(io, StreamCompressor(; level, checksum, dict, pledged_size, params), false, close_io)
 end
 
 function drain!(s::ZstdCompressorStream)
@@ -441,10 +480,15 @@ Base.iswritable(s::ZstdCompressorStream) = !s.closed
 
 function Base.close(s::ZstdCompressorStream)
     s.closed && return
-    stream_finish!(s.sc)
-    drain!(s)
-    s.closed = true
-    s.close_io ? close(s.io) : flush(s.io)
+    # Close (or flush) the wrapped io even if finishing the frame throws (a
+    # pledge mismatch, a failed job): the frame cannot be completed anyway.
+    try
+        stream_finish!(s.sc)
+        drain!(s)
+    finally
+        s.closed = true
+        s.close_io ? close(s.io) : flush(s.io)
+    end
     return nothing
 end
 

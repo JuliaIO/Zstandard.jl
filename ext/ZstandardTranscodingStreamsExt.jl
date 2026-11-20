@@ -2,7 +2,7 @@ module ZstandardTranscodingStreamsExt
 
 using Zstandard
 using Zstandard: ZstdDictionary, ZstdError
-using Zstandard.Encoder: StreamCompressor, stream_write!, stream_finish!
+using Zstandard.Encoder: StreamCompressor, stream_write!, stream_finish!, stream_pledge!
 using Zstandard.Streaming: StreamDecoder, feed!, needed, at_boundary, available
 import TranscodingStreams
 using TranscodingStreams: Codec, Memory, Error
@@ -12,23 +12,39 @@ using TranscodingStreams: Codec, Memory, Error
 # ---------------------------------------------------------------------------
 
 mutable struct ZstandardCompressorCodec <: Codec
-    level::Int
+    level::Union{Nothing,Int}
     checksum::Bool
-    dict::Union{Nothing,ZstdDictionary}
+    dict::Union{Nothing,ZstdDictionary,Zstandard.PreparedDictionary}
+    params::Zstandard.Encoder.ParameterOverrides
     sc::StreamCompressor
     opos::Int            # next byte of sc.out to emit
 end
 
-Zstandard.ZstandardCompressor(; level::Integer=3, checksum::Bool=false,
-                              dict::Union{Nothing,ZstdDictionary}=nothing) =
-    ZstandardCompressorCodec(Int(level), checksum, dict, StreamCompressor(; level, checksum, dict), 1)
+function Zstandard.ZstandardCompressor(; level::Union{Nothing,Integer}=nothing, checksum::Bool=false,
+                                       dict::Union{Nothing,ZstdDictionary,Zstandard.PreparedDictionary}=nothing,
+                                       window_log=nothing, hash_log=nothing, chain_log=nothing, search_log=nothing, min_match=nothing, target_length=nothing, strategy=nothing)
+    params = Zstandard.Encoder.parameter_overrides(; window_log, hash_log, chain_log, search_log, min_match, target_length, strategy)
+    sc = StreamCompressor(; level, checksum, dict, params)
+    ZstandardCompressorCodec(sc.level, checksum, dict, params, sc, 1)
+end
 
 Base.show(io::IO, c::ZstandardCompressorCodec) = print(io, "ZstandardCompressor(level=$(c.level))")
 
 function TranscodingStreams.startproc(c::ZstandardCompressorCodec, mode::Symbol, err::Error)
-    c.sc = StreamCompressor(; level=c.level, checksum=c.checksum, dict=c.dict)
+    c.sc = StreamCompressor(; level=c.level, checksum=c.checksum, dict=c.dict, params=c.params)
     c.opos = 1
     return :ok
+end
+
+# `transcode` pledges the total input size: record it in the frame header.
+function TranscodingStreams.pledgeinsize(c::ZstandardCompressorCodec, insize::Int64, err::Error)
+    try
+        stream_pledge!(c.sc, insize)
+        return :ok
+    catch e
+        err[] = e
+        return :error
+    end
 end
 
 function emit!(c::ZstandardCompressorCodec, output::Memory)
@@ -71,20 +87,37 @@ end
 
 mutable struct ZstandardDecompressorCodec <: Codec
     dict::Union{Nothing,ZstdDictionary}
+    max_window_size::Int
     d::StreamDecoder
     frames_reported::Int
 end
 
-Zstandard.ZstandardDecompressor(; dict::Union{Nothing,ZstdDictionary}=nothing) =
-    ZstandardDecompressorCodec(dict, StreamDecoder(dict), 0)
+Zstandard.ZstandardDecompressor(; dict::Union{Nothing,ZstdDictionary}=nothing,
+                                max_window_size::Integer=Zstandard.Streaming.DEFAULT_MAX_WINDOW_SIZE) =
+    ZstandardDecompressorCodec(dict, Int(max_window_size), StreamDecoder(dict; max_window_size), 0)
 
 Base.show(io::IO, ::ZstandardDecompressorCodec) = print(io, "ZstandardDecompressor()")
+
+# Use the content sizes recorded in the frame headers, when all are present.
+function TranscodingStreams.expectedsize(c::ZstandardDecompressorCodec, input::Memory)
+    n = Int(input.size)
+    n == 0 && return 0
+    try
+        data = unsafe_wrap(Array, input.ptr, n)
+        s = Zstandard.decompressed_size(data)
+        # the recorded sizes are untrusted: the hint only pre-sizes the
+        # buffer, which TranscodingStreams grows as needed
+        return s === nothing ? 4n : min(Int(s), Zstandard.Decoder.presize_limit(n))
+    catch
+        return 4n
+    end
+end
 
 function TranscodingStreams.startproc(c::ZstandardDecompressorCodec, mode::Symbol, err::Error)
     # Keep the decoder (and its buffers) only at a clean frame boundary: mid-frame,
     # or with decoded bytes that were never read, it belongs to an abandoned stream.
     if !at_boundary(c.d) || available(c.d) > 0
-        c.d = StreamDecoder(c.dict)
+        c.d = StreamDecoder(c.dict; max_window_size=c.max_window_size)
         c.frames_reported = 0
     end
     return :ok
@@ -125,6 +158,15 @@ function TranscodingStreams.process(c::ZstandardDecompressorCodec, input::Memory
     catch e
         err[] = e
         return 0, 0, :error
+    end
+end
+
+# Precompilation workload for the codecs (see src/precompile.jl).
+if ccall(:jl_generating_output, Cint, ()) == 1
+    let data = Vector{UInt8}(repeat("TranscodingStreams precompile workload. ", 2000))
+        c = transcode(Zstandard.ZstandardCompressor(), data)
+        transcode(Zstandard.ZstandardDecompressor(), c)
+        read(TranscodingStreams.TranscodingStream(Zstandard.ZstandardDecompressor(), IOBuffer(c)))
     end
 end
 

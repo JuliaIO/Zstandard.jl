@@ -8,7 +8,7 @@ A pure Julia implementation of the [Zstandard](https://facebook.github.io/zstd/)
 - Huffman literals (direct or FSE-compressed weights, 1 or 4 streams, table reuse across blocks) and FSE sequence coding with predefined/RLE/compressed/repeat table selection
 - Frame content size recorded in the header; optional XXH64 content checksum
 - **Decompression** of all standard frames, including concatenated and skippable frames (decoded in parallel with `nthreads`), raw and formatted dictionaries
-- Streaming decompression via `ZstdDecompressorStream` (implements `IO`, memory bounded by the window size)
+- Streaming decompression via `ZstdDecompressorStream` (implements `IO`, memory bounded by the window size; frames with windows above `max_window_size`, default 128 MiB as in libzstd, are rejected)
 - Streaming compression via `ZstdCompressorStream` (implements `IO`, with `flush` support)
 - Dictionary compression (raw content or formatted dictionaries) and dictionary training (`train_dictionary`, fastCover as `zstd --train`)
 - Long-distance matching (`long=true`, as `zstd --long`) and multithreaded compression (`nthreads`)
@@ -52,14 +52,25 @@ stream = ZstdCompressorStream(open("out.zst", "w"); level=5)
 write(stream, data)
 close(stream)
 
+# If the total size is known in advance, pledge it: the frame header then records
+# the content size and the compression parameters are sized to it
+stream = ZstdCompressorStream(open("out.zst", "w"); pledged_size=length(data))
+
 # Dictionaries
 dict = parse_dictionary(read("my.dict"))      # formatted (zstd --train) or raw content
 compressed = compress(data; dict)
 decompress(compressed, dict)
 
+# Many small messages with one dictionary: prepare it once (much faster per message)
+pdict = prepare_dictionary(dict; level=3)
+compressed = compress(message; dict=pdict)      # decompress with `dict` as usual
+
 # Train a dictionary from many small samples
 dict_bytes = train_dictionary(samples; dict_size=16384)
 dict = parse_dictionary(dict_bytes)
+
+# Explicit parameters override the level's (as libzstd's ZSTD_c_* parameters)
+compressed = compress(data; level=19, window_log=24, strategy=:btultra)
 
 # Long-distance matching and multithreading (start Julia with `-t N`)
 compressed = compress(big_data; level=9, long=true)
