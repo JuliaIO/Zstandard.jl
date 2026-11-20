@@ -470,8 +470,8 @@ less when a smaller `pledged_size` or `size_hint` is given). With
 `nthreads > 1`, input is cut into jobs compressed in parallel tasks (as
 libzstd's `nbWorkers`; jobs are four windows long, so the stream buffers
 that much); output is written as jobs complete, in order, and `flush` and
-`close` wait for them. Neither is combined with `dict` or `prefix`, and
-`long` not with `nthreads`.
+`close` wait for them. `nthreads > 1` is not combined with `dict`, `prefix`
+or `long`.
 
 `close` finishes the frame and, if `close_io` is true, closes `io` (pass
 `close_io=false` to keep writing to `io`, e.g. an `IOBuffer` read afterwards).

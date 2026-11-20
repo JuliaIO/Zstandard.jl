@@ -165,7 +165,7 @@ Upper bound on the decompressed size of all frames in `data` (as libzstd's
 `ZSTD_decompressBound`): a frame's recorded content size, or for frames that
 do not record it, its number of blocks times the largest block size its
 window allows. Skippable frames count as 0. Throws a `ZstdError` for
-malformed or truncated data.
+malformed or truncated data, and if the total overflows `Int64`.
 """
 function decompress_bound(data::AbstractVector{UInt8}; magicless::Bool=false)
     total = Int64(0)
@@ -177,7 +177,7 @@ function decompress_bound(data::AbstractVector{UInt8}; magicless::Bool=false)
         end
         fh = frame_header(data; offset=pos, magicless)
         if fh.content_size !== nothing
-            total += fh.content_size
+            total = _add_size(total, fh.content_size)
         else
             # count blocks
             bmax = min(fh.window_size, BLOCK_SIZE_MAX)
@@ -192,12 +192,15 @@ function decompress_bound(data::AbstractVector{UInt8}; magicless::Bool=false)
                 nb += 1
                 bh & 1 == 1 && break
             end
-            total += Int64(nb) * bmax
+            total = _add_size(total, Int64(nb) * bmax)
         end
         pos += frame_compressed_size(data; offset=pos, magicless)
     end
     return total
 end
+
+# largest n with n + n>>8 representable
+const COMPRESS_BOUND_MAX_INPUT = typemax(Int) - (typemax(Int) >> 8) - 1
 
 """
     compress_bound(n) -> Int
@@ -208,7 +211,10 @@ Largest possible size of the frame `compress` produces for `n` bytes of input
 archives add their seek table on top.)
 """
 function compress_bound(n::Integer)
-    n < 0 && throw(ArgumentError("n must be non-negative"))
+    # libzstd's ZSTD_MAX_INPUT_SIZE plays the same role: larger inputs have no
+    # representable bound
+    0 <= n <= COMPRESS_BOUND_MAX_INPUT ||
+        throw(ArgumentError("n must be in 0:$COMPRESS_BOUND_MAX_INPUT, got $n"))
     n = Int(n)
     return n + (n >> 8) + (n < BLOCK_SIZE_MAX ? (BLOCK_SIZE_MAX - n) >> 11 : 0)
 end
