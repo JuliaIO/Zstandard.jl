@@ -149,3 +149,16 @@ end
     @test_throws ArgumentError finalize_dictionary(content, samples; dict_id=-1)
     @test_throws ArgumentError finalize_dictionary(content, samples; dict_id=Int64(typemax(UInt32)) + 1)
 end
+
+@testset "Long-distance matching samples every ~128 bytes" begin
+    # N random 1000-byte records followed by the same records shuffled: the
+    # repeats are 4 MiB back, inside the window but beyond the regular
+    # match finder; zstd --long=27 compresses this to ~51% of plain level 3
+    recs = [lcg_bytes(1000, i, 0x00:0xff) for i in 1:4096]
+    perm = sortperm([hash(i) for i in 1:4096])
+    d = vcat(reduce(vcat, recs), reduce(vcat, recs[perm]))
+    plain = length(compress(d; level=3))
+    c = compress(d; level=3, long=true)
+    @test decompress(c) == d
+    @test length(c) < 0.56 * plain          # was 0.74 with the sparse rate
+end
