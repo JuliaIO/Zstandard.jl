@@ -1048,7 +1048,7 @@ function decompress_frames(data::AbstractVector{UInt8}, st::DecoderState=Decoder
                 # without a recorded size, bound this frame by its block headers
                 # (raw and RLE sizes are exact, compressed blocks at most a block)
                 guess = fi.content_size >= 0 ? min(Int(fi.content_size), max_expand) :
-                        min(frame_blocks_bound(p, pos + fi.header_size, n, fi.window_size), max_expand)
+                        min(frame_blocks_bound(p, pos, n, fi.window_size), max_expand)
                 length(out) < guess + WILDCOPY_SLACK && resize!(out, guess + WILDCOPY_SLACK)
                 first = false
             elseif fi.content_size >= 0

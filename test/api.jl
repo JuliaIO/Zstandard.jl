@@ -993,3 +993,19 @@ end
     @test_throws ArgumentError Zstandard.ZstdCompressorStream(IOBuffer(); nthreads=2, dict=ZstdDictionary(a[1:1000]))
     @test_throws ArgumentError Zstandard.ZstdCompressorStream(IOBuffer(); nthreads=0)
 end
+
+@testset "Decoder output sizing without a recorded content size" begin
+    x = UInt64(3)
+    raw = UInt8[(x = x * 6364136223846793005 + 1442695040888963407; (x >> 56) % UInt8) for _ in 1:3_000_000]
+    for d in (raw, make_text(3_000_000))
+        buf = IOBuffer()
+        s = Zstandard.ZstdCompressorStream(buf; close_io=false)
+        write(s, d); close(s)
+        c = take!(buf)
+        @test frame_content_size(c) === nothing
+        @test decompress(c; nthreads=1) == d
+        decompress(c; nthreads=1)
+        # the output is sized from the block headers: no regrowth
+        @test @allocated(decompress(c; nthreads=1)) < 1.3 * length(d) + 1_000_000
+    end
+end
