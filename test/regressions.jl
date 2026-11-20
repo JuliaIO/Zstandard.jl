@@ -116,3 +116,23 @@ end
     @test_throws ArgumentError finalize_dictionary(content, samples; dict_id=-1)
     @test_throws ArgumentError finalize_dictionary(content, samples; dict_id=Int64(typemax(UInt32)) + 1)
 end
+
+@testset "Parallel decode chunking" begin
+    d = reduce(vcat, [compress(lcg_bytes(20, i, 0x00:0xff)) for i in 1:20_000])
+    @test Zstandard._frame_chunks(d, 16) === nothing                 # tiny frames: serial
+    @test decompress(d; nthreads=4) == reduce(vcat, [lcg_bytes(20, i, 0x00:0xff) for i in 1:20_000])
+    x = lcg_bytes(2_000_000, 3, UInt8.(0:40))
+    big = compress(x; level=1)
+    t = vcat(big, skippable_frame(zeros(UInt8, 16)))
+    @test Zstandard._frame_chunks(t, 16) === nothing                 # tiny remainder merged
+    two = vcat(big, big)
+    @test Zstandard._frame_chunks(two, 2) == [1:length(big), length(big)+1:2length(big)]
+    @test decompress(two; nthreads=2) == vcat(x, x)
+    @test frame_header(view(big, 1:length(big))).content_size == length(x)   # non-Vector input
+end
+
+@testset "XXH64 update with a negative length" begin
+    st = Zstandard.XXHash.XXH64State()
+    @test_throws ArgumentError Zstandard.XXHash.update!(st, Ptr{UInt8}(0), -1)
+    @test st.total == 0
+end
