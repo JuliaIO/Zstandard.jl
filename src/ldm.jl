@@ -29,34 +29,59 @@ mutable struct LdmCursor
 end
 
 """
-    ldm_sequences(base, from, to, window, min_match, hash_log) -> LdmCursor
-
-Find long matches in positions `from:to` of the buffer at `base`.
+Long-distance matching state, kept across calls so input can be scanned as it
+arrives (streaming): the bucketed table, the rolling hash and where it stands,
+and the long matches found so far (`cur`, consumed by `parse_block_ldm!`).
+Positions are 1-based offsets from the buffer base.
 """
-function ldm_sequences(base::Ptr{UInt8}, from::Int, to::Int, window::Int, min_match::Int, hash_log::Int,
-                       hist::Int=from)
-    blog = LDM_BUCKET_LOG
-    bsize = 1 << blog
-    nbuckets = 1 << (hash_log - blog)
-    eoff = zeros(Int32, 1 << hash_log)
-    echk = zeros(UInt32, 1 << hash_log)
-    bnext = zeros(UInt8, nbuckets)
+mutable struct LdmState
+    eoff::Vector{Int32}
+    echk::Vector{UInt32}
+    bnext::Vector{UInt8}
+    nbuckets::Int
+    stopmask::UInt64
+    window::Int
+    min_match::Int
+    h::UInt64
+    q::Int           # next position to roll into the hash
+    hist::Int        # lowest position that may be indexed
+    anchor::Int      # end of the last long match (no overlapping matches)
+    ipos::Int        # matches start at or after this
+    cur::LdmCursor
+end
+
+function LdmState(window::Int, min_match::Int, hash_log::Int, hist::Int, from::Int)
+    nbuckets = 1 << (hash_log - LDM_BUCKET_LOG)
     # one split per 2^hrlog bytes: libzstd sizes the table as windowLog - 7
     # and so samples every ~128 bytes, whatever the window (a rate derived
     # from the maximum window left small windows' tables mostly empty)
     hrlog = max(0, (63 - leading_zeros(UInt64(window))) - hash_log)
     maxbits = min(min_match, 64)
     stopmask = hrlog <= maxbits ? ((UInt64(1) << hrlog) - 1) << (maxbits - hrlog) : (UInt64(1) << hrlog) - 1
-    starts = Int[]; mls = Int[]; offs = Int[]
-    h = UInt64(0)
-    anchor = from
-    ipos = from
-    iend = base + to             # one past the last byte
-    # positions [hist, from) (a dictionary or prefix) are only indexed
-    @inbounds for q in hist:to - HASH_READ_SIZE
+    return LdmState(zeros(Int32, 1 << hash_log), zeros(UInt32, 1 << hash_log), zeros(UInt8, nbuckets),
+                    nbuckets, stopmask, window, min_match, UInt64(0), hist, hist, from, from,
+                    LdmCursor(Int[], Int[], Int[], 1))
+end
+
+"""
+Scan positions up to `upto` (the last byte available, 1-based) for long
+matches, appending them to `st.cur`. Matches are extended forwards over all
+available bytes. Positions before `st.ipos` (a dictionary or prefix) are only
+indexed.
+"""
+function ldm_scan!(st::LdmState, base::Ptr{UInt8}, upto::Int)
+    bsize = 1 << LDM_BUCKET_LOG
+    eoff = st.eoff; echk = st.echk; bnext = st.bnext
+    nbuckets = st.nbuckets; stopmask = st.stopmask; window = st.window; min_match = st.min_match
+    starts = st.cur.starts; mls = st.cur.mls; offs = st.cur.offs
+    h = st.h; anchor = st.anchor; ipos = st.ipos; hist = st.hist
+    iend = base + upto             # one past the last byte
+    q = st.q
+    @inbounds while q <= upto - HASH_READ_SIZE
         h = (h << 1) + GEAR[Int(unsafe_load(base, q)) + 1]
+        qq = q; q += 1
         (h & stopmask) != 0 && continue
-        ws = q - min_match + 1
+        ws = qq - min_match + 1
         ws < hist && continue
         xx = xxh64(base + ws - 1, min_match)   # internal hash: always the native XXH64
         bucket = Int(xx & UInt64(nbuckets - 1))
@@ -89,8 +114,41 @@ function ldm_sequences(base::Ptr{UInt8}, from::Int, to::Int, window::Int, min_ma
         echk[slot0 + e + 1] = chk
         bnext[bucket + 1] = UInt8((e + 1) & (bsize - 1))
     end
-    return LdmCursor(starts, mls, offs, 1)
+    st.h = h; st.q = q; st.anchor = anchor; st.ipos = ipos
+    return st
 end
+
+"""Shift the state down by `d` positions (the stream buffer was compacted)."""
+function ldm_rebase!(st::LdmState, d::Int)
+    @inbounds for i in eachindex(st.eoff)
+        v = Int(st.eoff[i]) - d
+        st.eoff[i] = v < 1 ? Int32(0) : v % Int32
+    end
+    c = st.cur
+    # drop consumed matches, shift the rest
+    deleteat!(c.starts, 1:c.idx-1); deleteat!(c.mls, 1:c.idx-1); deleteat!(c.offs, 1:c.idx-1)
+    c.idx = 1
+    c.starts .-= d
+    st.q -= d; st.anchor -= d; st.ipos -= d; st.hist = max(1, st.hist - d)
+    return st
+end
+
+"""
+    ldm_sequences(base, from, to, window, min_match, hash_log, hist=from) -> LdmCursor
+
+Find long matches in positions `from:to` of the buffer at `base`
+(positions `hist:from-1` are indexed as history only).
+"""
+function ldm_sequences(base::Ptr{UInt8}, from::Int, to::Int, window::Int, min_match::Int, hash_log::Int,
+                       hist::Int=from)
+    st = LdmState(window, min_match, hash_log, hist, from)
+    ldm_scan!(st, base, to)
+    return st.cur
+end
+
+# LDM parameters for compression parameters p (as zstd --long)
+ldm_min_match(p) = p.strategy >= S_BTULTRA ? 32 : 64
+ldm_hash_log(p) = max(6, min(20, p.window_log - 7))
 
 """Parse a block, splicing in the long matches from `cur`."""
 function parse_block_ldm!(cc::CompressionContext, base::Ptr{UInt8}, bstart::Ptr{UInt8}, bend::Ptr{UInt8},

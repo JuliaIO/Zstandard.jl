@@ -12,7 +12,8 @@
 
 module XXHash
 
-using Base.ScopedValues: ScopedValue, with
+# ScopedValues.jl: Base.ScopedValues on Julia 1.11+, a backport on 1.10
+using ScopedValues: ScopedValue, with
 
 export xxh64, XXH64State, update!, digest!,
        AbstractXXH64, NativeXXH64, XXH64_IMPLEMENTATION, with_xxh64_implementation

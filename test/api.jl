@@ -886,6 +886,8 @@ end
     @test compress(big; level=3, window_log=17, rsyncable=true, nthreads=3) == a
     @test length(a) < 1.01 * length(compress(big; level=3, window_log=17))
     @test decompress(compress(data[1:1000]; rsyncable=true, checksum=true)) == data[1:1000]
+    @test decompress(compress(UInt8[]; rsyncable=true, checksum=true)) == UInt8[]
+    @test transcode(CodecZstd.ZstdDecompressor, compress(UInt8[]; rsyncable=true)) == UInt8[]
     @test_throws ArgumentError compress(data; rsyncable=true, long=true)
 end
 
@@ -906,4 +908,107 @@ end
     @test transcode(ZstandardDecompressor(), transcode(ZstandardCompressor(target_block_size=4000), data)) == data
     @test_throws ArgumentError compress(data; target_block_size=100)
     @test_throws ArgumentError compress(data; target_block_size=1 << 20)
+end
+
+@testset "compress_bound and decompress_bound" begin
+    x = UInt64(9)
+    rnd(n) = UInt8[(x = x * 6364136223846793005 + 1442695040888963407; (x >> 56) % UInt8) for _ in 1:n]
+    for n in (0, 1, 7, 100, 1000, 131071, 131072, 131073, 400_000)
+        d = rnd(n)
+        for kw in ((; level=1, checksum=true), (; level=19, checksum=true), (; level=-7),
+                   (; level=3, target_block_size=1340, checksum=true), (; level=3, rsyncable=true, checksum=true))
+            @test length(compress(d; kw...)) <= compress_bound(n)
+        end
+        out = Vector{UInt8}(undef, compress_bound(n))
+        @test length(compress!(ZstdCompressionContext(), out, d)) <= compress_bound(n)
+    end
+    @test compress_bound(0) == 64
+    @test compress_bound(1 << 20) == (1 << 20) + (1 << 12)
+    @test_throws ArgumentError compress_bound(-1)
+    t = make_text(300_000)
+    c = compress(t)
+    @test decompress_bound(c) == length(t)
+    buf = IOBuffer()
+    s = Zstandard.ZstdCompressorStream(buf; close_io=false)
+    write(s, t); close(s)
+    u = take!(buf)                                           # no content size recorded
+    @test decompress_bound(u) >= length(t)
+    @test decompress_bound(u) == cld(length(t), 128 << 10) * (128 << 10)
+    @test decompress_bound(vcat(u, skippable_frame(UInt8[1, 2]), c)) == decompress_bound(u) + length(t)
+    @test decompress_bound(compress(t; magicless=true); magicless=true) == length(t)
+    @test decompress_bound(UInt8[]) == 0
+    @test_throws ZstdError decompress_bound(c[1:end-10])
+end
+
+@testset "Streaming long-distance matching and threads" begin
+    a = make_text(1_500_000)
+    x = UInt64(5)
+    noise = UInt8[(x = x * 6364136223846793005 + 1442695040888963407; (x >> 56) % UInt8) for _ in 1:3_000_000]
+    data = vcat(a, noise, a)                      # the second copy is beyond the default window
+    function streamed(d; chunk=100_003, kw...)
+        buf = IOBuffer()
+        s = Zstandard.ZstdCompressorStream(buf; close_io=false, kw...)
+        for p in Iterators.partition(d, chunk); write(s, p); end
+        close(s)
+        return take!(buf)
+    end
+    for level in (1, 3, 9, 19)
+        plain = streamed(data; level)
+        cl = streamed(data; level, long=true)
+        @test decompress(cl) == data
+        @test transcode(CodecZstd.ZstdDecompressor, cl) == data
+        if 1 << Zstandard.Encoder.compression_parameters(level, -1).window_log < length(data)
+            @test length(cl) < length(plain) - length(compress(a; level)) ÷ 2   # the long match was found
+        end
+        @test length(cl) < 1.01 * length(compress(data; level, long=true))
+    end
+    # long with a pledged size, a small window override, and a prefix
+    @test decompress(streamed(data; level=3, long=true, pledged_size=length(data))) == data
+    @test decompress(streamed(data; level=3, long=true, window_log=20)) == data
+    @test decompress(streamed(a; level=3, long=true, prefix=a[1:500_000]); prefix=a[1:500_000]) == a
+    # threads: same frame as one-shot multithreading when the size is pledged
+    big = repeat(data, 3)
+    for level in (1, 3)
+        c = streamed(big; level, nthreads=3, pledged_size=length(big))
+        @test c == compress(big; level, nthreads=3)
+        cu = streamed(big; level, nthreads=3, checksum=true, chunk=1 << 20)
+        @test transcode(CodecZstd.ZstdDecompressor, cu) == big
+        @test streamed(big; level, nthreads=2, checksum=true, chunk=1 << 20) == cu   # independent of thread count
+    end
+    # flush mid-stream with threads: everything so far decodes
+    buf = IOBuffer()
+    s = Zstandard.ZstdCompressorStream(buf; level=3, nthreads=2, close_io=false)
+    write(s, big[1:5_000_000]); flush(s)
+    sofar = Vector{UInt8}(view(buf.data, 1:buf.size))
+    @test read(Zstandard.ZstdDecompressorStream(IOBuffer(sofar)), 5_000_000) == big[1:5_000_000]
+    write(s, big[5_000_001:end]); close(s)
+    @test decompress(take!(buf)) == big
+    # empty and tiny streams
+    @test decompress(streamed(UInt8[]; nthreads=4)) == UInt8[]
+    @test decompress(streamed(a[1:10]; nthreads=4, long=false)) == a[1:10]
+    @test decompress(streamed(UInt8[]; long=true)) == UInt8[]
+    # the TranscodingStreams codec takes the same keywords
+    @test transcode(ZstandardDecompressor(), transcode(ZstandardCompressor(long=true), data)) == data
+    @test transcode(ZstandardDecompressor(), transcode(ZstandardCompressor(nthreads=2), big)) == big
+    @test_throws ArgumentError Zstandard.ZstdCompressorStream(IOBuffer(); nthreads=2, long=true)
+    @test_throws ArgumentError Zstandard.ZstdCompressorStream(IOBuffer(); nthreads=2, dict=ZstdDictionary(a[1:1000]))
+    @test_throws ArgumentError Zstandard.ZstdCompressorStream(IOBuffer(); nthreads=0)
+end
+
+@testset "Decoder output sizing without a recorded content size" begin
+    x = UInt64(3)
+    raw = UInt8[(x = x * 6364136223846793005 + 1442695040888963407; (x >> 56) % UInt8) for _ in 1:3_000_000]
+    for d in (raw, make_text(3_000_000))
+        buf = IOBuffer()
+        s = Zstandard.ZstdCompressorStream(buf; close_io=false)
+        write(s, d); close(s)
+        c = take!(buf)
+        @test frame_content_size(c) === nothing
+        @test decompress(c; nthreads=1) == d
+        decompress(c; nthreads=1)
+        # the output is sized from the block headers: no regrowth
+        # (minimum of a few runs: a stray allocation elsewhere, e.g. by the
+        # runtime, must not fail the test)
+        @test minimum(@allocated(decompress(c; nthreads=1)) for _ in 1:3) < 1.3 * length(d) + 1_000_000
+    end
 end

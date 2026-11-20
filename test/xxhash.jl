@@ -205,3 +205,21 @@ xxh64_digest(::ZeroXXH64, st) = UInt64(0)
     end
     @test_throws ZstdError decompress(Zstandard.with_xxh64_implementation(() -> compress(data; checksum=true), ZeroXXH64()))
 end
+
+# XXH64's four lanes are serial multiply chains: packing them into one vector
+# (vpmullq) roughly halves throughput, and LLVM's SLP vectorizer does that on
+# its own unless each lane passes the `opaque` barrier. Guard against new
+# Julia/LLVM versions seeing through it.
+@testset "XXH64 stripe loop stays scalar" begin
+    using InteractiveUtils: code_llvm
+    # The stripe loop lives in xxh64_src (the xxh64 methods are thin wrappers
+    # around it), so inspect that; the positive control fails if the loop
+    # moves elsewhere and this check would then test nothing.
+    ir(T) = sprint(io -> code_llvm(io, XX.xxh64_src, T; debuginfo=:none))
+    for T in (Tuple{XX.PtrSrc,Int,UInt64}, Tuple{XX.VecSrc{Vector{UInt8}},Int,UInt64},
+              Tuple{XX.VecSrc{SubArray{UInt8,1,Vector{UInt8},Tuple{UnitRange{Int}},true}},Int,UInt64})
+        s = ir(T)
+        @test occursin("mul i64", s)                 # the scalar rounds are here
+        @test !occursin(r"mul <\d+ x i64>", s)       # and not vectorized
+    end
+end

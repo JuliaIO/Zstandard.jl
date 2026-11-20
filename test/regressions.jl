@@ -306,3 +306,47 @@ end
     @test_throws ZstdError decompress!(ctx, out, c)
     @test isempty(out)
 end
+
+@testset "Multithreaded streaming" begin
+    # history beyond the indexed overlap: as one-shot, byte for byte
+    n = 11_889_238
+    data = repeat(lcg_bytes(100_000, 5, 0x00:0xff), cld(n, 100_000))[1:n]
+    io = IOBuffer()
+    s = Zstandard.ZstdCompressorStream(io; close_io=false, level=1, window_log=17, nthreads=2, pledged_size=n)
+    write(s, data); close(s)
+    a = take!(io)
+    @test a == compress(data; level=1, window_log=17, nthreads=2)
+    @test decompress(a) == data
+
+    # a failed job is not dropped: the stream stays failed
+    io = IOBuffer()
+    s = Zstandard.ZstdCompressorStream(io; close_io=false, nthreads=2)
+    write(s, lcg_bytes(3_000_000, 6, 0x00:0xff))
+    t = Threads.@spawn error("boom")                         # stand-in for a failing worker
+    try wait(t) catch end                                    # done, so the next write collects it
+    pushfirst!(s.sc.jobs, t)
+    @test_throws TaskFailedException write(s, lcg_bytes(9_000_000, 7, 0x00:0xff))
+    @test_throws ArgumentError write(s, UInt8[1, 2, 3])
+    @test_throws ArgumentError flush(s)
+    @test_throws ArgumentError close(s)
+    @test !isopen(s)
+end
+
+@testset "Size bounds do not wrap" begin
+    big1 = forged_fcs(UInt64(2)^62)
+    @test_throws ZstdError decompress_bound(vcat(big1, big1))
+    @test_throws ArgumentError compress_bound(typemax(Int))
+    @test_throws ArgumentError compress_bound(-1)
+    m = Zstandard.COMPRESS_BOUND_MAX_INPUT
+    @test compress_bound(m) >= m
+end
+
+@testset "Forged block headers in a frame without a content size" begin
+    f = UInt8[0x28, 0xb5, 0x2f, 0xfd, 0x00, 0x00]             # 1 KiB window
+    for i in 1:25_000
+        bh = (131072 << 3) | 2
+        append!(f, UInt8[bh & 0xff, (bh >> 8) & 0xff, (bh >> 16) & 0xff, 0x41])
+    end
+    @test_throws ZstdError decompress(f)
+    @test (@allocated try decompress(f) catch end) < 1 << 27
+end

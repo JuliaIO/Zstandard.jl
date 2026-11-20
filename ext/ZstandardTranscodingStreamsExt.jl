@@ -18,6 +18,8 @@ mutable struct ZstandardCompressorCodec <: Codec
     params::Zstandard.Encoder.ParameterOverrides
     frame::Zstandard.Encoder.FrameOptions
     size_hint::Union{Nothing,Int}
+    long::Bool
+    nthreads::Int
     sc::StreamCompressor
     opos::Int            # next byte of sc.out to emit
 end
@@ -27,19 +29,20 @@ function Zstandard.ZstandardCompressor(; level::Union{Nothing,Integer}=nothing, 
                                        content_size::Bool=true, dict_id::Bool=true, magicless::Bool=false,
                                        size_hint::Union{Nothing,Integer}=nothing,
                                        target_block_size::Union{Nothing,Integer}=nothing,
+                                       long::Bool=false, nthreads::Integer=1,
                                        window_log=nothing, hash_log=nothing, chain_log=nothing, search_log=nothing, min_match=nothing, target_length=nothing, strategy=nothing)
     params = Zstandard.Encoder.parameter_overrides(; window_log, hash_log, chain_log, search_log, min_match, target_length, strategy)
     frame = Zstandard.Encoder.FrameOptions(; content_size, dict_id, magicless, target_block_size)
     hint = size_hint === nothing ? nothing : Int(size_hint)
-    sc = StreamCompressor(; level, checksum, dict, params, frame, size_hint=hint)
-    ZstandardCompressorCodec(sc.level, checksum, dict, params, frame, hint, sc, 1)
+    sc = StreamCompressor(; level, checksum, dict, params, frame, size_hint=hint, long, nthreads)
+    ZstandardCompressorCodec(sc.level, checksum, dict, params, frame, hint, long, Int(nthreads), sc, 1)
 end
 
 Base.show(io::IO, c::ZstandardCompressorCodec) = print(io, "ZstandardCompressor(level=$(c.level))")
 
 function TranscodingStreams.startproc(c::ZstandardCompressorCodec, mode::Symbol, err::Error)
     c.sc = StreamCompressor(; level=c.level, checksum=c.checksum, dict=c.dict, params=c.params,
-                            frame=c.frame, size_hint=c.size_hint)
+                            frame=c.frame, size_hint=c.size_hint, long=c.long, nthreads=c.nthreads)
     c.opos = 1
     return :ok
 end

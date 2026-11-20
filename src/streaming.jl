@@ -116,9 +116,10 @@ function make_room!(d::StreamDecoder, n::Int)
         compact!(d)
         need = d.wpos + n + WILDCOPY_SLACK
         if length(d.out) < need
-            # grow exactly (resize! over-allocates): doubling, but not past
-            # what a frame needs, a window plus two blocks
-            full = d.fi.window_size + 2 * BLOCK_SIZE_MAX + WILDCOPY_SLACK
+            # grow exactly (resize! over-allocates): doubling, up to two windows
+            # plus two blocks, so that compaction moves each byte about once
+            # (with one window, it would move the whole window every block)
+            full = 2 * d.fi.window_size + 2 * BLOCK_SIZE_MAX + WILDCOPY_SLACK
             newlen = max(need, min(2 * length(d.out), full))
             w = Vector{UInt8}(undef, newlen)
             copyto!(w, 1, d.out, 1, d.wpos)
@@ -456,7 +457,7 @@ end
 """
     ZstdCompressorStream(io::IO; level=3, checksum=false, dict=nothing, pledged_size=nothing,
                          close_io=true, size_hint=nothing, content_size=true, dict_id=true,
-                         magicless=false, window_log, ...)
+                         magicless=false, long=false, nthreads=1, window_log, ...)
 
 A streaming Zstandard compressor implementing the writable `IO` interface.
 Data written to the stream is compressed into a single frame and written to
@@ -479,6 +480,15 @@ input.
 options, and
 `prefix` sets a reference prefix, as for `compress` (the window is sized for
 the prefix plus the pledged size or size hint).
+With `long=true`, long-distance matching finds repetitions up to 128 MiB
+apart, as for `compress` (the stream then buffers up to 128 MiB of history,
+less when a smaller `pledged_size` or `size_hint` is given). With
+`nthreads > 1`, input is cut into jobs compressed in parallel tasks (as
+libzstd's `nbWorkers`; jobs are four windows long, so the stream buffers
+that much); output is written as jobs complete, in order, and `flush` and
+`close` wait for them. `nthreads > 1` is not combined with `dict`, `prefix`
+or `long`.
+
 `close` finishes the frame and, if `close_io` is true, closes `io` (pass
 `close_io=false` to keep writing to `io`, e.g. an `IOBuffer` read afterwards).
 """
@@ -497,6 +507,7 @@ function ZstdCompressorStream(io::IO; level::Union{Nothing,Integer}=nothing, che
                               content_size::Bool=true, dict_id::Bool=true, magicless::Bool=false,
                               prefix::Union{Nothing,AbstractVector{UInt8}}=nothing,
                               target_block_size::Union{Nothing,Integer}=nothing,
+                              long::Bool=false, nthreads::Integer=1,
                               window_log=nothing, hash_log=nothing, chain_log=nothing, search_log=nothing, min_match=nothing, target_length=nothing, strategy=nothing)
     params = parameter_overrides(; window_log, hash_log, chain_log, search_log, min_match, target_length, strategy)
     frame = FrameOptions(; content_size, dict_id, magicless, target_block_size)
@@ -504,8 +515,8 @@ function ZstdCompressorStream(io::IO; level::Union{Nothing,Integer}=nothing, che
     expect = pledged_size !== nothing ? Int(pledged_size) : size_hint !== nothing ? Int(size_hint) :
              prefix === nothing ? 0 : length(prefix)
     params = prefix_params(params, prefix, level, expect)
-    ZstdCompressorStream(io, StreamCompressor(; level, checksum, dict, pledged_size, params, frame, size_hint),
-                         false, close_io, 0)
+    ZstdCompressorStream(io, StreamCompressor(; level, checksum, dict, pledged_size, params, frame, size_hint,
+                                              long, nthreads), false, close_io, 0)
 end
 
 function drain!(s::ZstdCompressorStream)
