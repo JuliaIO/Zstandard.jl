@@ -72,12 +72,13 @@ end
 
 Estimated bytes of working memory to decode frames with windows up to
 `window_size` (as libzstd's `ZSTD_estimateDStreamSize`): decoding tables, plus
-for streaming the window and block buffers. One-shot `decompress` needs the
+for streaming a buffer of two windows and two blocks (libzstd needs one window,
+as it wraps around; two avoid copying the window back for every block). One-shot `decompress` needs the
 decoding tables besides the decoded result itself.
 """
 function estimate_decompression_memory(; window_size::Integer=Streaming.DEFAULT_MAX_WINDOW_SIZE,
                                        streaming::Bool=true)
     _, _, ds = _overheads()
     streaming || return ds
-    return ds + Int(window_size) + 2 * Encoder.BLOCK_SIZE_MAX + 64
+    return ds + 2 * Int(window_size) + 2 * Encoder.BLOCK_SIZE_MAX + 64
 end

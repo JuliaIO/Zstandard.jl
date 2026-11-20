@@ -972,6 +972,23 @@ function read_frame_info(p::Ptr{UInt8}, len::Int)
     return FrameInfo(hs, window, fcs, did, checksum, single)
 end
 
+# Upper bound on a frame's content from its block headers, starting at 1-based
+# position `pos` of the input at `p` (last valid index `n`); stops quietly at
+# malformed data (decoding reports it).
+function frame_blocks_bound(p::Ptr{UInt8}, pos::Int, n::Int, window::Int)
+    bmax = min(BLOCK_SIZE_MAX, window)
+    total = 0
+    while pos + 2 <= n
+        bh = Int(unsafe_load(p, pos)) | (Int(unsafe_load(p, pos + 1)) << 8) | (Int(unsafe_load(p, pos + 2)) << 16)
+        btype = (bh >> 1) & 3; bsize = bh >> 3
+        btype == 3 && break
+        total += btype == 2 ? bmax : bsize
+        pos += 3 + (btype == 1 ? 1 : bsize)
+        bh & 1 == 1 && break
+    end
+    return total
+end
+
 @inline function ensure_capacity!(out::Vector{UInt8}, need::Int)
     if length(out) < need
         resize!(out, max(need, 2 * length(out)))
@@ -1028,7 +1045,10 @@ function decompress_frames(data::AbstractVector{UInt8}, st::DecoderState=Decoder
             # trigger a huge allocation.
             max_expand = (n - pos + 1) * (BLOCK_SIZE_MAX >> 2) + BLOCK_SIZE_MAX
             if first
-                guess = fi.content_size >= 0 ? min(Int(fi.content_size), max_expand) : min(4 * length(range), 1 << 28)
+                # without a recorded size, bound this frame by its block headers
+                # (raw and RLE sizes are exact, compressed blocks at most a block)
+                guess = fi.content_size >= 0 ? min(Int(fi.content_size), max_expand) :
+                        min(frame_blocks_bound(p, pos + fi.header_size, n, fi.window_size), max_expand)
                 length(out) < guess + WILDCOPY_SLACK && resize!(out, guess + WILDCOPY_SLACK)
                 first = false
             elseif fi.content_size >= 0

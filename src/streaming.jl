@@ -114,9 +114,10 @@ function make_room!(d::StreamDecoder, n::Int)
         compact!(d)
         need = d.wpos + n + WILDCOPY_SLACK
         if length(d.out) < need
-            # grow exactly (resize! over-allocates): doubling, but not past
-            # what a frame needs, a window plus two blocks
-            full = d.fi.window_size + 2 * BLOCK_SIZE_MAX + WILDCOPY_SLACK
+            # grow exactly (resize! over-allocates): doubling, up to two windows
+            # plus two blocks, so that compaction moves each byte about once
+            # (with one window, it would move the whole window every block)
+            full = 2 * d.fi.window_size + 2 * BLOCK_SIZE_MAX + WILDCOPY_SLACK
             newlen = max(need, min(2 * length(d.out), full))
             w = Vector{UInt8}(undef, newlen)
             copyto!(w, 1, d.out, 1, d.wpos)
