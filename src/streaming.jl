@@ -135,15 +135,19 @@ function decode_block!(s::ZstdDecompressorStream)
     bsize = bh >> 3
     btype == 3 && zerr("reserved block type")
     bsize > BLOCK_SIZE_MAX && zerr("block too large")
+    # make_room! may compact the buffer (moving wpos), so each branch takes
+    # `start` after it
     start = s.wpos
     if btype == 0
         make_room!(s, bsize)
+        start = s.wpos
         got = readbytes!(s.io, view(s.out, s.wpos+1:s.wpos+bsize), bsize)
         got < bsize && zerr("truncated input (raw block)")
         s.wpos += bsize
     elseif btype == 1
         v = read_exact!(s, 1, "RLE block")[1]
         make_room!(s, bsize)
+        start = s.wpos
         GC.@preserve s memset!(pointer(s.out) + s.wpos, v, bsize)
         s.wpos += bsize
     else
@@ -154,6 +158,7 @@ function decode_block!(s::ZstdDecompressorStream)
             lim < 0 && zerr("frame content size exceeded")
         end
         make_room!(s, lim)
+        start = s.wpos
         out = s.out
         hist = max(s.frame_start, 0)
         d = s.frame_start >= 0 ? s.dict : nothing
@@ -233,6 +238,12 @@ function Base.read(s::ZstdDecompressorStream)
     return out
 end
 
-Base.read(s::ZstdDecompressorStream, nb::Integer) = (b = Vector{UInt8}(undef, nb); resize!(b, readbytes!(s, b, nb)))
+# At most `nb` bytes: start small and let readbytes! grow the vector as data
+# arrives, rather than allocating `nb` bytes up front.
+function Base.read(s::ZstdDecompressorStream, nb::Integer)
+    nb < 0 && throw(ArgumentError("nb must be non-negative, got $nb"))
+    b = Vector{UInt8}(undef, min(Int(nb), 1 << 16))
+    return resize!(b, readbytes!(s, b, nb))
+end
 
 end # module
