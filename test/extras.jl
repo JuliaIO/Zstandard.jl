@@ -153,7 +153,8 @@ end
             # the second copy of `a` lies beyond the regular window: only LDM finds it
             @test length(c1) < length(c0) - length(compress(a; level)) ÷ 2
         else
-            @test length(c1) <= length(c0) + 64
+            # LDM matches can displace slightly better regular ones (as in libzstd)
+            @test length(c1) <= length(c0) * 1.005 + 64
         end
     end
     # small inputs: long mode is harmless
