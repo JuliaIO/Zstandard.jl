@@ -139,7 +139,7 @@ function decompress!(ctx::ZstdDecompressionContext, out::Vector{UInt8}, data::Ab
     out === data && throw(ArgumentError("out must not be the input"))
     resize!(out, 0)
     try
-        return decompress_frames(data, ctx.st, ctx.dict; out, magicless=ctx.magicless)
+        return decompress_frames(data, ctx.st, ctx.dict; out, magicless=ctx.magicless, release=false)
     catch
         resize!(out, 0)          # no partly undefined contents after an error
         rethrow()

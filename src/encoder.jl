@@ -2333,6 +2333,7 @@ mutable struct StreamCompressor
     pool::Vector{CompressionContext}
     pool_lock::ReentrantLock
     failed::Union{Nothing,Exception}   # a job failed: the frame cannot be completed
+    deferred::Bool       # prepared dictionary, no pledge: tables chosen at the first block
 end
 
 function StreamCompressor(; level::Union{Nothing,Integer}=nothing, checksum::Bool=false,
@@ -2356,7 +2357,7 @@ function StreamCompressor(; level::Union{Nothing,Integer}=nothing, checksum::Boo
                           UInt8[], 0, false, false, ChecksumState(), -1, 0, params, BLOCK_SIZE_MAX,
                           frame, size_hint === nothing ? -1 : Int(size_hint), 0, long, nothing,
                           Int(nthreads), LEVEL_TABLE[4], 0, 0, Task[], CompressionContext[], ReentrantLock(),
-                          nothing)
+                          nothing, false)
     pledged_size === nothing || stream_pledge!(sc, pledged_size)
     return sc
 end
@@ -2380,9 +2381,39 @@ function out_reserve!(sc::StreamCompressor, n::Int)
 end
 
 function stream_begin!(sc::StreamCompressor)
+    dict = sc.dict isa PreparedDictionary ? sc.dict.dict : sc.dict
+    dlen = dict === nothing ? 0 : length(dict.content)
+    if sc.dict isa PreparedDictionary && sc.pledged < 0
+        # Without a pledge the input size is unknown until the stream finishes
+        # or a block must be emitted: buffer the input until then, so that a
+        # small stream can still use the prepared tables (libzstd uses its
+        # CDict for streams of unknown size). Nothing is emitted before.
+        # (Prepared dictionaries are not combined with nthreads > 1.)
+        sc.cap = dlen + 3 * BLOCK_SIZE_MAX        # never reached: a block is emitted first
+        sc.bsize = BLOCK_SIZE_MAX
+        resize!(sc.buf, dlen + 2 * BLOCK_SIZE_MAX)
+        copyto!(sc.buf, 1, dict.content, 1, dlen)
+        sc.len = dlen
+        sc.pend = sc.len + 1
+        sc.deferred = true
+    else
+        pd = sc.dict isa PreparedDictionary && use_prepared(sc.dict, sc.pledged, nothing) ? sc.dict : nothing
+        stream_setup!(sc, pd, true)
+    end
+    sc.xxh = ChecksumState()
+    sc.total = 0
+    sc.consumed = 0
+    sc.started = true
+    sc.finished = false
+    return sc
+end
+
+# Choose the frame's parameters and tables (from the prepared dictionary `pd`
+# if given) and write the frame header. With `fresh`, also put the dictionary
+# content in the buffer; otherwise (a deferred start) it is already there,
+# followed by the input buffered so far.
+function stream_setup!(sc::StreamCompressor, pd::Union{Nothing,PreparedDictionary}, fresh::Bool)
     cc = sc.cc
-    pd = sc.dict isa PreparedDictionary && sc.pledged >= 0 && use_prepared(sc.dict, sc.pledged, nothing) ?
-         sc.dict : nothing
     dict = sc.dict isa PreparedDictionary ? sc.dict.dict : sc.dict
     dlen = dict === nothing ? 0 : length(dict.content)
     if pd !== nothing
@@ -2413,23 +2444,21 @@ function stream_begin!(sc::StreamCompressor)
     sc.cap = window + dlen + sc.gran + 2 * BLOCK_SIZE_MAX
     # multithreaded: a whole job (four windows) plus its overlap must fit
     sc.nthreads > 1 && (sc.cap = max(sc.cap, window + sc.job + sc.gran + 2 * BLOCK_SIZE_MAX))
-    resize!(sc.buf, min(sc.cap, max(dlen + 2 * BLOCK_SIZE_MAX, 1 << 18)))
-    sc.len = 0
-    if dlen > 0
-        copyto!(sc.buf, 1, dict.content, 1, dlen)
-        sc.len = dlen
-        pd === nothing && GC.@preserve sc load_dict!(cc, pointer(sc.buf), dlen)
+    if fresh
+        resize!(sc.buf, min(sc.cap, max(dlen + 2 * BLOCK_SIZE_MAX, 1 << 18)))
+        sc.len = 0
+        if dlen > 0
+            copyto!(sc.buf, 1, dict.content, 1, dlen)
+            sc.len = dlen
+        end
+        sc.pend = sc.len + 1
     end
-    sc.pend = sc.len + 1
+    dlen > 0 && pd === nothing && GC.@preserve sc load_dict!(cc, pointer(sc.buf), dlen)
     out_reserve!(sc, 32)
     sc.olen = write_frame_header!(sc.out, sc.olen + 1, sc.pledged, p.window_log, sc.checksum,
                                   dict === nothing ? UInt32(0) : dict.id, sc.frame) - 1
     cc.target_block = sc.frame.target_block_size
-    sc.xxh = ChecksumState()
-    sc.total = 0
-    sc.consumed = 0
-    sc.started = true
-    sc.finished = false
+    sc.deferred = false
     return sc
 end
 
@@ -2491,12 +2520,16 @@ function make_input_room!(sc::StreamCompressor, n::Int)
 end
 
 function stream_block_size(sc::StreamCompressor, pending::Int)
+    # deferred start: a block is about to be emitted, the size is still unknown
+    sc.deferred && stream_setup!(sc, nothing, false)
     GC.@preserve sc begin
         return next_block_size(sc.cc, pointer(sc.buf, sc.pend), pending, sc.bsize)
     end
 end
 
 function emit_block!(sc::StreamCompressor, bn::Int, last::Bool)
+    # deferred start: more than a block of input (or a flush), size still unknown
+    sc.deferred && stream_setup!(sc, nothing, false)
     out_reserve!(sc, bn + 64)
     GC.@preserve sc begin
         base = pointer(sc.buf)
@@ -2632,6 +2665,8 @@ function stream_finish!(sc::StreamCompressor)
     if sc.pledged >= 0 && sc.total != sc.pledged
         throw(ArgumentError("frame finished after $(sc.total) bytes, but $(sc.pledged) were pledged"))
     end
+    # deferred start: the whole input is known now
+    sc.deferred && stream_setup!(sc, use_prepared(sc.dict, sc.total, nothing) ? sc.dict : nothing, false)
     n = sc.len - sc.pend + 1
     if sc.nthreads > 1
         n > 0 && dispatch_job!(sc, n, true)

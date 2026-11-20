@@ -54,6 +54,39 @@ end
     @test !occursin("requires TranscodingStreams", sprint(showerror, e))
 end
 
+# an io whose first eof check throws once
+mutable struct FlakyIO <: IO
+    io::IOBuffer
+    fail::Bool
+end
+Base.eof(f::FlakyIO) = (f.fail && (f.fail = false; throw(InterruptException())); eof(f.io))
+Base.readbytes!(f::FlakyIO, b::AbstractVector{UInt8}, n::Integer) = readbytes!(f.io, b, n)
+Base.read(f::FlakyIO, ::Type{UInt8}) = read(f.io, UInt8)
+
+@testset "Streaming decoder errors are sticky" begin
+    data = lcg_bytes(1000, 8, 0x00:0x0f)
+    bad = compress(data; checksum=true); bad[end] ⊻= 0x01
+    s = Zstandard.ZstdDecompressorStream(IOBuffer(bad))
+    e1 = try read(s) catch e; e end
+    e2 = try read(s) catch e; e end
+    @test e1 isa ZstdError
+    @test e2 === e1                    # the original error, not an unrelated one
+    # other exceptions (here from the wrapped io) are not sticky
+    s = Zstandard.ZstdDecompressorStream(FlakyIO(IOBuffer(compress(data)), true))
+    @test_throws InterruptException read(s)
+    @test read(s) == data
+end
+
+@testset "Highly compressible frames with a recorded size" begin
+    # above 64:1 the block-header guess is too small; growth extrapolates from
+    # the ratio decoded so far instead of doubling
+    pat = lcg_bytes(1000, 9, 0x00:0xff)
+    d = repeat(pat, 50_000)
+    c = compress(d; level=3)
+    @test decompress(c) == d
+    @test (@allocated decompress(c)) < 1.6 * length(d)
+end
+
 @testset "Optimal parser at the block end (levels 16-22)" begin
     # a tree candidate reaching the block end without beating the best match
     # was ordered by the byte past the end: over-long matches, wrong output
@@ -117,6 +150,19 @@ end
     @test_throws ArgumentError finalize_dictionary(content, samples; dict_id=Int64(typemax(UInt32)) + 1)
 end
 
+@testset "Long-distance matching samples every ~128 bytes" begin
+    # N random 1000-byte records followed by the same records shuffled: the
+    # repeats are 4 MiB back, inside the window but beyond the regular
+    # match finder; zstd --long=27 compresses this to ~51% of plain level 3
+    recs = [lcg_bytes(1000, i, 0x00:0xff) for i in 1:4096]
+    perm = sortperm([hash(i) for i in 1:4096])
+    d = vcat(reduce(vcat, recs), reduce(vcat, recs[perm]))
+    plain = length(compress(d; level=3))
+    c = compress(d; level=3, long=true)
+    @test decompress(c) == d
+    @test length(c) < 0.56 * plain          # was 0.74 with the sparse rate
+end
+
 @testset "Parallel decode chunking" begin
     d = reduce(vcat, [compress(lcg_bytes(20, i, 0x00:0xff)) for i in 1:20_000])
     @test Zstandard._frame_chunks(d, 16) === nothing                 # tiny frames: serial
@@ -169,6 +215,30 @@ end
     @test pd.level == 3
     @test decompress(compress(x; dict=pd, level=3), dict) == x
     @test decompress(compress(x; dict=pd, level=0), dict) == x
+end
+
+@testset "Prepared dictionaries in streams without a pledged size" begin
+    dict = ZstdDictionary(repeat(lcg_bytes(1000, 10, UInt8.(0x41:0x50)), 100))
+    pd = prepare_dictionary(dict; level=3)
+    function streamed(d; kw...)
+        io = IOBuffer()
+        s = Zstandard.ZstdCompressorStream(io; close_io=false, dict=pd, kw...)
+        for p in Iterators.partition(d, 50_000); write(s, p); end
+        close(s); take!(io)
+    end
+    small = lcg_bytes(300, 11, UInt8.(0x41:0x50))
+    for d in (small, UInt8[], lcg_bytes(70_000, 12, UInt8.(0x41:0x50)), repeat(small, 3000))
+        c = streamed(d)
+        @test decompress(c, dict) == d
+    end
+    # a small unpledged stream uses the prepared tables: same frame as pledged
+    # apart from the header's content size
+    @test decompress(streamed(small), dict) == small
+    @test length(streamed(small)) <= length(streamed(small; pledged_size=300)) + 2
+    # flushing before the end still works
+    io = IOBuffer(); s = Zstandard.ZstdCompressorStream(io; close_io=false, dict=pd)
+    write(s, small); flush(s); write(s, small); close(s)
+    @test decompress(take!(io), dict) == vcat(small, small)
 end
 
 @testset "target_block_size on the streaming paths" begin
