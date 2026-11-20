@@ -361,7 +361,13 @@ function Base.read(s::ZstdDecompressorStream)
     return out
 end
 
-Base.read(s::ZstdDecompressorStream, nb::Integer) = (b = Vector{UInt8}(undef, nb); resize!(b, readbytes!(s, b, nb)))
+# At most `nb` bytes: start small and let readbytes! grow the vector as data
+# arrives, rather than allocating `nb` bytes up front.
+function Base.read(s::ZstdDecompressorStream, nb::Integer)
+    nb < 0 && throw(ArgumentError("nb must be non-negative, got $nb"))
+    b = Vector{UInt8}(undef, min(Int(nb), 1 << 16))
+    return resize!(b, readbytes!(s, b, nb))
+end
 
 # ---------------------------------------------------------------------------
 # ZstdCompressorStream
