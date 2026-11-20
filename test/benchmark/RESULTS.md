@@ -1,5 +1,90 @@
 # Benchmark Results Log
 
+## 2026-11-19 — XXH64 implementations compared
+
+Script: `test/benchmark/xxhash_compare.jl` (adapters in `test/xxhash_impls.jl`; ZstdInflate.jl is
+included when installed). Julia 1.11, 4-core Xeon VM.
+
+```
+XXH64 one-shot (MB/s)
+                                16 bytes  100 bytes 1024 bytes 64.000 KiB 16.000 MiB
+Zstandard.jl (native)                381       1734       7398      10967      10718
+XXHashNative.jl                      193        782       2625       3478       3359
+xxHash C library (xxHash_jll)        381       1766       7398      10969      10748
+ZstdInflate.jl                       272       1109       3742       5176       5066
+
+XXH64 streaming, 16 MiB in pieces of the given size (MB/s)
+                               4.000 KiB 128.000 KiB
+Zstandard.jl (native)              10765      10794
+XXHashNative.jl                     3239       3298
+xxHash C library (xxHash_jll)      10789      10833
+ZstdInflate.jl                     10438      10759
+
+Zstandard.jl with each implementation, 4 MiB checksummed frame (MB/s)
+                                decompress  stream read  compress L1
+Zstandard.jl (native)                 5251         1710         5145
+XXHashNative.jl                       2526         1211         2525
+xxHash C library (xxHash_jll)         5185         1673         5134
+ZstdInflate.jl                        3360         2048         3334
+```
+
+Zstandard.jl's native XXH64 matches the C reference library. ZstdInflate.jl's one-shot hash packs the
+four lanes into a SIMD.jl vector and is about half as fast as its own scalar streaming code.
+
+---
+
+## 2026-11-18 — XXH64 rewrite, parallel decoding of concatenated frames
+
+XXH64, 16 MB (MB/s): XXHashNative 3,522; ZstdInflate (SIMD.jl, 4 lanes in one vector) 5,209;
+new scalar implementation 11,167 (one-shot) / 11,010 (streaming, 128 KB updates).
+The four XXH64 lanes are serial multiply/rotate chains, so packing them into one vector does not
+help: `vpmullq` has much higher latency than scalar `imul`. LLVM's SLP vectorizer packed the
+streaming loop on its own (halving its speed); an empty inline-asm barrier per lane prevents that.
+
+Concatenated frames, 4 threads, `decompress` vs `inflate_zstd(...; nthreads=4)` (MB/s):
+
+| Input | Zstandard.jl | ZstdInflate |
+|---|--:|--:|
+| 4 MB in 4 frames | 2,330 | 1,074 |
+| 16 MB in 16 frames | 1,708 | 423 |
+| 16 MB in 256 frames | 1,887 | 1,192 |
+
+Checksummed 4 MB frame: 642 MB/s (was 548), the same as without a checksum.
+
+---
+
+## 2026-11-17 — Optimal parser for levels 16-22
+
+Script: `test/benchmark/compress_compare.jl` (now also level 16). Same machine and corpora.
+
+```
+Compression: ratio and throughput (MB/s of input, median)
+------------------------------------------------------------------------------------
+Dataset      level | ratio jl  ratio C |   MB/s jl    MB/s C | slowdown
+------------------------------------------------------------------------------------
+text 4MB         1 |    3.354    3.421 |     192.4     277.8 |     1.4x
+text 4MB         3 |    3.767    3.783 |     138.0     159.2 |     1.2x
+text 4MB         6 |    4.032    4.208 |      70.9      63.6 |     0.9x
+text 4MB         9 |    4.333    4.350 |      19.8      41.3 |     2.1x
+text 4MB        16 |    4.800    4.764 |       2.4       3.4 |     1.4x
+text 4MB        19 |    4.859    4.868 |       2.1       2.1 |     1.0x
+binary           1 |    2.705    2.669 |     204.8     297.9 |     1.5x
+binary           3 |    2.981    2.985 |     130.4     179.4 |     1.4x
+binary           6 |    3.112    3.188 |      49.6      65.0 |     1.3x
+binary           9 |    3.126    3.222 |      20.0      43.5 |     2.2x
+binary          16 |    3.471    3.455 |       1.9       4.4 |     2.3x
+binary          19 |    3.627    3.720 |       1.8       2.5 |     1.4x
+------------------------------------------------------------------------------------
+```
+
+### Notes
+- Forward DP over up to 4096 positions with adaptive prices (literals, LL/ML/OF codes), repeat
+  offsets tracked per DP state; binary-tree match finder (insertBt1 / getAllMatches).
+- Level 19 before (lazy2): text 4.430, binary 3.182. Now 4.859 / 3.627 (libzstd 4.868 / 3.720).
+- Levels 18-22 use minimum match length 3 (3-byte hash), as libzstd does.
+
+---
+
 ## 2026-11-17 — New encoder (level strategies, entropy coding)
 
 Script: `test/benchmark/compress_compare.jl`, same machine and corpora as the decoder entry below.

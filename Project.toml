@@ -1,21 +1,28 @@
 name = "Zstandard"
 uuid = "1affa58d-55fd-4c2a-ac15-0c0ae7390835"
-version = "0.1.1"
 authors = ["Mark Kittisopikul <markkitt@gmail.com>"]
+version = "0.1.1"
 
 [deps]
-XXHashNative = "e5d8e439-e7fa-4681-9c12-1c64bda517be"
+ScopedValues = "7e506255-f358-4e82-b7e4-beb19740aa63"
+
+[weakdeps]
+TranscodingStreams = "3bb67fe8-82b1-5028-8e26-92a6c54297fa"
+
+[extensions]
+ZstandardTranscodingStreamsExt = "TranscodingStreams"
+
+[compat]
+ScopedValues = "1.3"
+Test = "1"
+TranscodingStreams = "0.11"
+julia = "1.10"
 
 [extras]
 Test = "8dfed614-e22c-5e08-85e1-65c5234f0b40"
 
 [targets]
 test = ["Test"]
-
-[compat]
-Test = "1.11"
-XXHashNative = "1.1"
-julia = "1.11"
 
 [workspace]
 projects = ["test"]
