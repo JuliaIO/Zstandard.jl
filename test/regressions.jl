@@ -216,3 +216,27 @@ end
     @test decompress(compress(x; dict=pd, level=3), dict) == x
     @test decompress(compress(x; dict=pd, level=0), dict) == x
 end
+
+@testset "Prepared dictionaries in streams without a pledged size" begin
+    dict = ZstdDictionary(repeat(lcg_bytes(1000, 10, UInt8.(0x41:0x50)), 100))
+    pd = prepare_dictionary(dict; level=3)
+    function streamed(d; kw...)
+        io = IOBuffer()
+        s = Zstandard.ZstdCompressorStream(io; close_io=false, dict=pd, kw...)
+        for p in Iterators.partition(d, 50_000); write(s, p); end
+        close(s); take!(io)
+    end
+    small = lcg_bytes(300, 11, UInt8.(0x41:0x50))
+    for d in (small, UInt8[], lcg_bytes(70_000, 12, UInt8.(0x41:0x50)), repeat(small, 3000))
+        c = streamed(d)
+        @test decompress(c, dict) == d
+    end
+    # a small unpledged stream uses the prepared tables: same frame as pledged
+    # apart from the header's content size
+    @test decompress(streamed(small), dict) == small
+    @test length(streamed(small)) <= length(streamed(small; pledged_size=300)) + 2
+    # flushing before the end still works
+    io = IOBuffer(); s = Zstandard.ZstdCompressorStream(io; close_io=false, dict=pd)
+    write(s, small); flush(s); write(s, small); close(s)
+    @test decompress(take!(io), dict) == vcat(small, small)
+end
