@@ -140,21 +140,21 @@ end
 @testset "Decompression Error Detection" begin
     fixtures_dir = joinpath(@__DIR__, "fixtures")
 
-    # These invalid frames should be rejected by the decoder.
-    # Marked as broken until error detection is implemented.
+    # These invalid frames (from the reference implementation's golden
+    # decompression-errors set) must be rejected by the decoder.
     @testset "Invalid offset 0" begin
         compressed = read(joinpath(fixtures_dir, "off0.bin.zst"))
-        @test_broken try decompress(compressed); false catch; true end
+        @test_throws ZstdError decompress(compressed)
     end
 
     @testset "Truncated Huffman state" begin
         compressed = read(joinpath(fixtures_dir, "truncated_huff_state.zst"))
-        @test_broken try decompress(compressed); false catch; true end
+        @test_throws ZstdError decompress(compressed)
     end
 
     @testset "Extraneous zero sequences" begin
         compressed = read(joinpath(fixtures_dir, "zeroSeq_extraneous.zst"))
-        @test_broken try decompress(compressed); false catch; true end
+        @test_throws ZstdError decompress(compressed)
     end
 end
 
@@ -368,4 +368,126 @@ end
             @test transcode(ZstdDecompressor, comp) == data
         end
     end
+end
+
+# Deterministic shuffle without depending on Random's stream stability
+function randperm_stable(n)
+    p = collect(1:n)
+    x = UInt64(0x9E3779B97F4A7C15)
+    for i in n:-1:2
+        x = xor(x, x << 13); x = xor(x, x >> 7); x = xor(x, x << 17)
+        j = Int(x % UInt64(i)) + 1
+        p[i], p[j] = p[j], p[i]
+    end
+    return p
+end
+
+@testset "Huffman code length limiting" begin
+    E = Zstandard.Encoder
+    # Fibonacci-like frequencies produce an unlimited Huffman depth > 11 bits,
+    # forcing length limiting. The resulting code must be complete (Kraft sum
+    # exactly 2^max_bits), otherwise the decoder cannot infer the implicit
+    # last weight.
+    for nsym in (14, 20, 30, 64, 128, 256)
+        counts = zeros(Int, 256)
+        a, b = 1, 1
+        for i in 1:nsym
+            counts[i] = a
+            a, b = b, min(a + b, 10^9)
+        end
+        lens = zeros(UInt8, 256)
+        tl = E.huf_lengths!(lens, counts, nsym - 1, 11, zeros(Int, 256), zeros(Int, 512), zeros(Int, 512))
+        @test tl <= 11
+        @test sum(l > 0 ? 1 << (tl - l) : 0 for l in lens) == 1 << tl
+        @test all(lens[i] > 0 for i in 1:nsym)
+    end
+
+    # End-to-end: literals with a very skewed distribution
+    data = UInt8[]
+    for i in 0:24
+        append!(data, fill(UInt8(0x20 + i), round(Int, 1.6^i)))
+    end
+    data = data[randperm_stable(length(data))]
+    comp = compress(data)
+    @test decompress(comp) == data
+    @test transcode(ZstdDecompressor, comp) == data
+end
+
+@testset "Streaming window compaction" begin
+    # libzstd level 1 uses a window far smaller than the data, so reading in
+    # small chunks forces the streaming decoder to discard old history.
+    data = UInt8[]
+    x = UInt32(1)
+    while length(data) < 10 * 1024 * 1024
+        x = x * 0x0019660D + 0x3C6EF35F
+        append!(data, codeunits(string("record ", x >> 20, " value ", (x >> 8) & 0xff, "\n")))
+    end
+    comp = transcode(ZstdCompressor(level=1), data)
+    stream = Zstandard.ZstdDecompressorStream(IOBuffer(comp))
+    out = UInt8[]
+    buf = Vector{UInt8}(undef, 997)
+    while !eof(stream)
+        n = readbytes!(stream, buf)
+        append!(out, view(buf, 1:n))
+    end
+    @test out == data
+    @test length(stream.out) < length(data)  # bounded by window + block, not by output size
+end
+
+@testset "Corrupted input fuzz" begin
+    # Corrupted frames must either decode or throw ZstdError, never crash or
+    # throw anything else.
+    text = Vector{UInt8}(repeat("The quick brown fox jumps over the lazy dog. 0123456789\n", 2000))
+    for i in 1:length(text) ÷ 7
+        text[(i * 7919) % length(text) + 1] = UInt8(i % 251)
+    end
+    inputs = [transcode(ZstdCompressor(level=3), text), transcode(ZstdCompressor(level=19), text[1:5000]),
+              compress(text), compress(text[1:3000], checksum=true)]
+    x = UInt64(42)
+    nexti(n) = (x = x * 6364136223846793005 + 1442695040888963407; Int((x >> 33) % UInt64(n)) + 1)
+    bad = 0
+    for trial in 1:1500
+        c = copy(inputs[nexti(length(inputs))])
+        if trial % 3 == 0
+            c = c[1:nexti(length(c)) - 1]
+        else
+            for _ in 1:nexti(3)
+                c[nexti(length(c))] ⊻= UInt8(1) << (nexti(8) - 1)
+            end
+        end
+        for f in (decompress, c -> read(Zstandard.ZstdDecompressorStream(IOBuffer(c))))
+            try
+                f(c)
+            catch e
+                e isa ZstdError || (bad += 1)
+            end
+        end
+    end
+    @test bad == 0
+end
+
+@testset "Compression levels on structured data" begin
+    # Text with a realistic mix of literals and matches, binary-like data with
+    # bytes > 127 (exercises FSE-compressed Huffman weights), and multi-block
+    # inputs; every level must round-trip through both decoders.
+    words = ["alpha", "beta", "gamma", "delta", "epsilon", "zeta", "eta", "theta", "\n", " = ", "(x)"]
+    x = UInt64(99)
+    nxt() = (x = x * 6364136223846793005 + 1442695040888963407; Int(x >> 40))
+    text = UInt8[]
+    while length(text) < 300_000
+        append!(text, codeunits(words[nxt() % length(words) + 1]))
+        nxt() % 7 == 0 && append!(text, codeunits(string(nxt() % 1000)))
+    end
+    bin = UInt8[UInt8((nxt() % 3 == 0 ? nxt() : i * 7) & 0xff) for i in 1:200_000]
+    for data in (text, bin), level in (-5, 1, 2, 3, 4, 5, 6, 7, 9, 12, 16, 19, 22)
+        c = compress(data; level)
+        @test decompress(c) == data
+        @test transcode(ZstdDecompressor, c) == data
+    end
+    # Higher levels should not compress worse than level 1 on text
+    @test length(compress(text; level=19)) < length(compress(text; level=1))
+    # Frame content size is recorded in the header
+    c = compress(text)
+    fi = GC.@preserve c Zstandard.Decoder.read_frame_info(pointer(c) + 4, length(c) - 4)
+    @test fi.content_size == length(text)
 end

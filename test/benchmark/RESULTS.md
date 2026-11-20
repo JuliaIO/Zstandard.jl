@@ -1,5 +1,106 @@
 # Benchmark Results Log
 
+## 2026-11-17 — New encoder (level strategies, entropy coding)
+
+Script: `test/benchmark/compress_compare.jl`, same machine and corpora as the decoder entry below.
+
+### Before (commit 5e71ef0)
+
+```
+Compression: ratio and throughput (MB/s of input, median)
+------------------------------------------------------------------------------------
+Dataset      level | ratio jl  ratio C |   MB/s jl    MB/s C | slowdown
+------------------------------------------------------------------------------------
+text 4MB         1 |    2.866    3.421 |      29.8     208.7 |     7.0x
+text 4MB         3 |    3.029    3.783 |      13.3     136.0 |    10.2x
+text 4MB         6 |    3.029    4.208 |      14.5      63.7 |     4.4x
+text 4MB         9 |    3.029    4.350 |      12.0      34.6 |     2.9x
+text 4MB        19 |    3.029    4.868 |      13.4       1.9 |     0.1x
+binary           1 |    2.470    2.669 |      31.2     184.2 |     5.9x
+binary           3 |    2.594    2.985 |      10.1     136.6 |    13.6x
+binary           6 |    2.594    3.188 |      11.8      64.2 |     5.5x
+binary           9 |    2.594    3.222 |       9.0      40.9 |     4.5x
+binary          19 |    2.594    3.720 |      11.9       2.1 |     0.2x
+------------------------------------------------------------------------------------
+```
+
+### After
+
+```
+Compression: ratio and throughput (MB/s of input, median)
+------------------------------------------------------------------------------------
+Dataset      level | ratio jl  ratio C |   MB/s jl    MB/s C | slowdown
+------------------------------------------------------------------------------------
+text 4MB         1 |    3.354    3.421 |     255.4     247.2 |     1.0x
+text 4MB         3 |    3.767    3.783 |     150.9     157.2 |     1.0x
+text 4MB         6 |    4.032    4.208 |      70.9      64.8 |     0.9x
+text 4MB         9 |    4.333    4.350 |      24.6      44.9 |     1.8x
+text 4MB        19 |    4.430    4.868 |       2.3       2.0 |     0.9x
+binary           1 |    2.705    2.669 |     168.2     312.7 |     1.9x
+binary           3 |    2.981    2.985 |     120.7     169.5 |     1.4x
+binary           6 |    3.112    3.188 |      55.0      61.2 |     1.1x
+binary           9 |    3.126    3.222 |      20.7      46.3 |     2.2x
+binary          19 |    3.182    3.720 |       4.3       2.4 |     0.5x
+------------------------------------------------------------------------------------
+```
+
+### Notes
+- Level table after libzstd: fast (1-2, negative), dfast (3-4), greedy (5), lazy (6-7), lazy2 (8+).
+- Repeat-offset checks before hash lookups; backward match extension; hash tables kept across blocks.
+- Huffman: two-queue construction with exact length limiting, FSE-compressed weights (binary
+  data now gets Huffman literals), treeless reuse; FSE: cost-based predefined/RLE/FSE/repeat.
+- Levels 13+ lack libzstd's btopt/btultra parsers, hence the ratio gap at level 19.
+
+---
+
+## 2026-11-17 — Decoder rewrite (vs ZstdInflate.jl)
+
+Script: `test/benchmark/inflate_compare.jl` (realistic corpora: Julia `base/` sources and
+`libjulia-internal.so`, compressed by libzstd at the given level, or by Zstandard.jl for "jl").
+Single thread, Julia 1.11.7, 4-core cloud VM. libzstd is measured through CodecZstd's
+`transcode`, which includes TranscodingStreams buffering overhead.
+
+### Before (commit 487e194)
+
+```
+Decompression throughput (MB/s of output, median), single thread
+------------------------------------------------------------------------------
+Dataset        |   ratio |    Zstd.jl  ZstdInflate    libzstd |  jl/Infl
+------------------------------------------------------------------------------
+text 64KB L3   |   3.15  |      145.4        486.1      653.5 |    3.34x
+text 4MB L1    |   3.42  |      135.4        445.2      803.2 |    3.29x
+text 4MB L3    |   3.78  |      127.7        416.6      650.7 |    3.26x
+text 4MB L19   |   4.87  |      126.2        423.1      573.4 |    3.35x
+binary L3      |   2.99  |       60.5        277.2      465.4 |    4.58x
+```
+
+### After
+
+```
+Decompression throughput (MB/s of output, median), single thread
+------------------------------------------------------------------------------
+Dataset        |   ratio |    Zstd.jl  ZstdInflate    libzstd |  jl/Infl
+------------------------------------------------------------------------------
+text 64KB L3   |   3.15  |      942.8        523.8      661.4 |    0.56x
+text 4MB L1    |   3.42  |      876.2        439.5      708.4 |    0.50x
+text 4MB L3    |   3.78  |      705.6        402.8      631.0 |    0.57x
+text 4MB L19   |   4.87  |      666.3        366.6      562.8 |    0.55x
+binary L3      |   2.99  |      567.7        268.8      508.7 |    0.47x
+text 4MB jl    |   3.03  |      727.3        440.5      585.0 |    0.61x
+------------------------------------------------------------------------------
+```
+
+### Notes
+- New `Decoder` module: frames decoded straight from the input vector into one output buffer
+  (no per-block IOBuffer/allocations, no history copies).
+- libzstd-style backward bit reader (64-bit container, unaligned reloads) held in registers.
+- Packed UInt64 FSE entries; 4-stream Huffman decoded in lockstep; fused sequence decode/execute
+  with wildcopy.
+- Corruption detection: offset 0/out of range, overruns, unconsumed bitstreams, content size and
+  checksum mismatches all raise `ZstdError` (previously-broken golden error tests now pass).
+
+---
+
 ## 2026-03-28 — Window_size fix, optional checksum, optimized frame header
 
 Commit: 2e60e66

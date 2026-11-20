@@ -1,74 +1,91 @@
 module Zstandard
 
-export decompress, compress, ZstdDecompressorStream, ZstdDictionary, parse_dictionary
+export decompress, compress, ZstdDecompressorStream, ZstdDictionary, parse_dictionary, ZstdError
 
 const MAGIC_NUMBER = 0xFD2FB528
 const SKIPPABLE_MAGIC_START = 0x184D2A50
 const SKIPPABLE_MAGIC_END   = 0x184D2A5F
 
-include("bitstream.jl")
-using .Bitstream: ForwardBitReader, BackwardBitReader, read_bits, peek_bits, consume_bits, align_to_byte, bits_left
-
-include("fse.jl")
-using .FSE: build_fse_table, read_fse_table, FSETable, get_default_ll_table, get_default_ml_table, get_default_of_table
-
-include("huffman.jl")
-using .Huffman: decode_huffman_tree, decode_huffman_stream, decode_huffman_streams, HuffmanTable
-
-include("dictionary.jl")
-using .Dictionary: ZstdDictionary, parse_dictionary
-
-mutable struct FrameContext
-    window_size::Int
-    rep_offsets::Vector{Int}
-    huffman_table::Union{Nothing, HuffmanTable}
-    ll_table::Union{Nothing, FSETable}
-    ml_table::Union{Nothing, FSETable}
-    of_table::Union{Nothing, FSETable}
-    dict::Union{Nothing, ZstdDictionary}
-end
-
-function FrameContext(window_size::Int, dict::Union{Nothing, ZstdDictionary}=nothing)
-    rep_offsets = (dict !== nothing) ? copy(dict.rep_offsets) : [1, 4, 8]
-    huffman_table = (dict !== nothing) ? dict.huffman_table : nothing
-    ll_table = (dict !== nothing) ? dict.ll_table : nothing
-    ml_table = (dict !== nothing) ? dict.ml_table : nothing
-    of_table = (dict !== nothing) ? dict.of_table : nothing
-    return FrameContext(window_size, rep_offsets, huffman_table, ll_table, ml_table, of_table, dict)
-end
-
-include("sequences.jl")
-using .Sequences: decode_sequences
-
-include("blocks.jl")
-using .Blocks: decompress_compressed_block, decode_literals
-
-include("frames.jl")
-using .Frames: FrameHeader, read_frame_header, BlockHeader, read_block_header
+include("decoder.jl")
+using .Decoder: ZstdError, ZstdDictionary, parse_dictionary, DecoderState, decompress_frames
 
 include("streaming.jl")
-using .Streaming: ZstdDecompressor, ZstdDecompressorStream
+using .Streaming: ZstdDecompressorStream
 
-include("matchfinder.jl")
-using .MatchFinder: find_sequences
+include("encoder.jl")
+using .Encoder: CompressionContext, compress_frame!
 
-include("write_bitstream.jl")
-include("encode_fse.jl")
-include("encode_huffman.jl")
-include("encode_sequences.jl")
+# Pool of reusable decoder scratch states (~150KB each), so that repeated
+# `decompress` calls do not reallocate them. Safe for concurrent use.
+const _STATE_LOCK = ReentrantLock()
+const _STATE_POOL = DecoderState[]
 
-include("compress.jl")
-using .Compress: compress
+function _with_state(f)
+    st = lock(_STATE_LOCK) do
+        isempty(_STATE_POOL) ? DecoderState() : pop!(_STATE_POOL)
+    end
+    try
+        return f(st)
+    finally
+        lock(_STATE_LOCK) do
+            push!(_STATE_POOL, st)
+        end
+    end
+end
+
+const _CCTX_LOCK = ReentrantLock()
+const _CCTX_POOL = CompressionContext[]
+
+function _with_cctx(f)
+    cc = lock(_CCTX_LOCK) do
+        isempty(_CCTX_POOL) ? CompressionContext() : pop!(_CCTX_POOL)
+    end
+    try
+        return f(cc)
+    finally
+        lock(_CCTX_LOCK) do
+            push!(_CCTX_POOL, cc)
+        end
+    end
+end
+
+# Positions are stored as Int32 in the match finder tables.
+const MAX_FRAME_INPUT = 1 << 30
 
 """
-    decompress(data::Vector{UInt8}, dict::Union{Nothing, ZstdDictionary}=nothing)
+    compress(data; level=3, checksum=false) -> Vector{UInt8}
 
-Decompress Zstandard compressed data. Optionally, a `ZstdDictionary` can be provided.
+Compress `data` (a byte vector or string) into a Zstandard frame.
+
+`level` ranges from $(Encoder.MIN_LEVEL) (fastest) to $(Encoder.MAX_LEVEL) (strongest);
+`0` selects the default level 3, as in libzstd. With `checksum=true` an XXH64
+content checksum is appended. Inputs larger than 1 GiB are written as several
+concatenated frames.
 """
-function decompress(data::Vector{UInt8}, dict::Union{Nothing, ZstdDictionary}=nothing)
-    io = IOBuffer(data)
-    stream = ZstdDecompressorStream(io, dict)
-    return read(stream)
+function compress(data::AbstractVector{UInt8}; level::Integer=3, checksum::Bool=false)
+    _with_cctx() do cc
+        if length(data) <= MAX_FRAME_INPUT
+            return compress_frame!(cc, data, level; checksum)
+        end
+        out = UInt8[]
+        for off in 0:MAX_FRAME_INPUT:length(data)-1
+            chunk = view(data, off+1:min(off + MAX_FRAME_INPUT, length(data)))
+            append!(out, compress_frame!(cc, chunk, level; checksum))
+        end
+        return out
+    end
+end
+compress(data::AbstractString; kwargs...) = compress(codeunits(data); kwargs...)
+
+"""
+    decompress(data::AbstractVector{UInt8}, dict::Union{Nothing, ZstdDictionary}=nothing)
+
+Decompress Zstandard compressed data, which may contain several concatenated
+and/or skippable frames. Optionally, a `ZstdDictionary` can be provided.
+Throws a [`ZstdError`](@ref) if the data is malformed.
+"""
+function decompress(data::AbstractVector{UInt8}, dict::Union{Nothing, ZstdDictionary}=nothing)
+    return _with_state(st -> decompress_frames(data, st, dict))
 end
 
 end # module
