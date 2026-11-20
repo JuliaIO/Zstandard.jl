@@ -5,6 +5,10 @@
 
 using .Decoder: read_frame_info, zerr, SKIPPABLE_MASK, BLOCK_SIZE_MAX
 
+const MAGIC_NUMBER = 0xFD2FB528
+const SKIPPABLE_MAGIC_START = 0x184D2A50
+const SKIPPABLE_MAGIC_END   = 0x184D2A5F
+
 """
     ZstdFrameHeader
 
