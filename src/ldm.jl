@@ -41,7 +41,10 @@ function ldm_sequences(base::Ptr{UInt8}, from::Int, to::Int, window::Int, min_ma
     eoff = zeros(Int32, 1 << hash_log)
     echk = zeros(UInt32, 1 << hash_log)
     bnext = zeros(UInt8, nbuckets)
-    hrlog = LDM_WINDOW_LOG - hash_log
+    # one split per 2^hrlog bytes: libzstd sizes the table as windowLog - 7
+    # and so samples every ~128 bytes, whatever the window (a rate derived
+    # from the maximum window left small windows' tables mostly empty)
+    hrlog = max(0, (63 - leading_zeros(UInt64(window))) - hash_log)
     maxbits = min(min_match, 64)
     stopmask = hrlog <= maxbits ? ((UInt64(1) << hrlog) - 1) << (maxbits - hrlog) : (UInt64(1) << hrlog) - 1
     starts = Int[]; mls = Int[]; offs = Int[]

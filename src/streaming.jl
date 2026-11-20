@@ -3,7 +3,7 @@
 module Streaming
 
 import ..Decoder: DecoderState, ZstdDictionary, FrameInfo, read_frame_info, reset_frame!,
-                  decode_compressed_block!, memset!, zerr, ensure_capacity!,
+                  decode_compressed_block!, memset!, zerr, ensure_capacity!, ZstdError,
                   MAGIC_NUMBER, SKIPPABLE_MAGIC_START, SKIPPABLE_MASK, BLOCK_SIZE_MAX, WILDCOPY_SLACK
 import ..Encoder: StreamCompressor, stream_write!, stream_flush!, stream_finish!, PreparedDictionary, FrameOptions,
                   prefix_dict, prefix_params,
@@ -336,19 +336,35 @@ it to read frames written with a larger window (e.g. `zstd --long=30`).
 With `magicless=true`, frames are read without their magic number, and
 `prefix` decodes frames written with that reference prefix (see
 [`compress`](@ref Zstandard.compress)).
+
+After a decoding error (a `ZstdError`), the stream is unusable: later reads
+rethrow the same error (bytes decoded before it can still be read). Other
+exceptions, such as an interrupt or an error from `io`, are not sticky.
 """
 mutable struct ZstdDecompressorStream <: IO
     io::IO
     d::StreamDecoder
+    err::Union{Nothing,ZstdError}   # sticky decoding error
 end
 
 ZstdDecompressorStream(io::IO, dict::Union{Nothing,ZstdDictionary}=nothing;
                        max_window_size::Integer=DEFAULT_MAX_WINDOW_SIZE, magicless::Bool=false,
                        prefix::Union{Nothing,AbstractVector{UInt8}}=nothing) =
-    ZstdDecompressorStream(io, StreamDecoder(prefix_dict(prefix, dict); max_window_size, magicless))
+    ZstdDecompressorStream(io, StreamDecoder(prefix_dict(prefix, dict); max_window_size, magicless), nothing)
 
 # Decode until at least one unread byte is available. Returns false at end of input.
 function fill_buffer!(s::ZstdDecompressorStream)
+    s.err === nothing || throw(s.err)
+    try
+        return fill_buffer_unchecked!(s)
+    catch e
+        # after a decoding error the position in the input is lost: stay failed
+        e isa ZstdError && (s.err = e)
+        rethrow()
+    end
+end
+
+function fill_buffer_unchecked!(s::ZstdDecompressorStream)
     d = s.d
     while available(d) <= 0
         if eof(s.io)
