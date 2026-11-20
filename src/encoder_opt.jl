@@ -283,14 +283,14 @@ state at the block start. Returns the updated `next_to_update`.
 function parse_opt!(ss::SeqStore, o::OptState, htab::Vector{Int32}, hlog::Int, ctab::Vector{Int32},
                     clog::Int, mls::Int, attempts::Int, sufficient::Int, ultra::Bool,
                     base::Ptr{UInt8}, istart::Ptr{UInt8}, iend::Ptr{UInt8}, lowlimit::Int,
-                    rep::NTuple{3,Int}, next::Int)
+                    rep::NTuple{3,Int}, next::Int, first::Bool=true)
     ilimit = iend - HASH_READ_SIZE
     anchor = istart
     ip = istart
     ip == base && (ip += 1)
     r1, r2, r3 = rep
     sufficient = min(sufficient, OPT_NUM - 1)
-    init_stats!(o, istart, Int(iend - istart))
+    (first || !o.have_stats) && init_stats!(o, istart, Int(iend - istart))
     price = o.price; mlen = o.mlen; offv = o.off; litlen = o.litlen
     GC.@preserve htab ctab o begin
         ht = pointer(htab); ch = pointer(ctab)
