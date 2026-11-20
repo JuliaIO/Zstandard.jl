@@ -132,10 +132,16 @@ decompress(ctx::ZstdDecompressionContext, data::AbstractVector{UInt8}) =
     decompress!(ctx::ZstdDecompressionContext, out::Vector{UInt8}, data) -> out
 
 Decompress `data` into `out`, which is resized to the decoded content. Reusing
-`out` across calls avoids allocating (its capacity is kept by Julia).
+`out` across calls avoids allocating (its capacity is kept by Julia). If
+decoding throws, `out` is left empty.
 """
 function decompress!(ctx::ZstdDecompressionContext, out::Vector{UInt8}, data::AbstractVector{UInt8})
     out === data && throw(ArgumentError("out must not be the input"))
     resize!(out, 0)
-    return decompress_frames(data, ctx.st, ctx.dict; out, magicless=ctx.magicless)
+    try
+        return decompress_frames(data, ctx.st, ctx.dict; out, magicless=ctx.magicless)
+    catch
+        resize!(out, 0)          # no partly undefined contents after an error
+        rethrow()
+    end
 end

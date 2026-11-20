@@ -337,19 +337,34 @@ it to read frames written with a larger window (e.g. `zstd --long=30`).
 With `magicless=true`, frames are read without their magic number, and
 `prefix` decodes frames written with that reference prefix (see
 [`compress`](@ref Zstandard.compress)).
+
+After a decoding error, the stream is unusable: later reads rethrow the same
+error (bytes decoded before it can still be read).
 """
 mutable struct ZstdDecompressorStream <: IO
     io::IO
     d::StreamDecoder
+    err::Union{Nothing,Exception}   # sticky decoding error
 end
 
 ZstdDecompressorStream(io::IO, dict::Union{Nothing,ZstdDictionary}=nothing;
                        max_window_size::Integer=DEFAULT_MAX_WINDOW_SIZE, magicless::Bool=false,
                        prefix::Union{Nothing,AbstractVector{UInt8}}=nothing) =
-    ZstdDecompressorStream(io, StreamDecoder(prefix_dict(prefix, dict); max_window_size, magicless))
+    ZstdDecompressorStream(io, StreamDecoder(prefix_dict(prefix, dict); max_window_size, magicless), nothing)
 
 # Decode until at least one unread byte is available. Returns false at end of input.
 function fill_buffer!(s::ZstdDecompressorStream)
+    s.err === nothing || throw(s.err)
+    try
+        return fill_buffer_unchecked!(s)
+    catch e
+        # the decoder's position in the input is lost: stay failed
+        s.err = e
+        rethrow()
+    end
+end
+
+function fill_buffer_unchecked!(s::ZstdDecompressorStream)
     d = s.d
     while available(d) <= 0
         if eof(s.io)
@@ -426,7 +441,13 @@ function Base.read(s::ZstdDecompressorStream)
     return out
 end
 
-Base.read(s::ZstdDecompressorStream, nb::Integer) = (b = Vector{UInt8}(undef, nb); resize!(b, readbytes!(s, b, nb)))
+# At most `nb` bytes: start small and let readbytes! grow the vector as data
+# arrives, rather than allocating `nb` bytes up front.
+function Base.read(s::ZstdDecompressorStream, nb::Integer)
+    nb < 0 && throw(ArgumentError("nb must be non-negative, got $nb"))
+    b = Vector{UInt8}(undef, min(Int(nb), 1 << 16))
+    return resize!(b, readbytes!(s, b, nb))
+end
 
 # ---------------------------------------------------------------------------
 # ZstdCompressorStream

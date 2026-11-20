@@ -681,7 +681,8 @@ define void @entry(i64 %a) #0 {
 }
 attributes #0 = { alwaysinline }
 """
-@inline prefetch(p::Ptr) = Base.llvmcall((PREFETCH_IR, "entry"), Cvoid, Tuple{UInt}, UInt(p))
+# i64 in the IR: pass a UInt64, so that 32-bit platforms (UInt is 32 bits) compile too
+@inline prefetch(p::Ptr) = Base.llvmcall((PREFETCH_IR, "entry"), Cvoid, Tuple{UInt64}, UInt64(UInt(p)))
 
 @inline function row_prefetch(pos::Ptr{Int32}, tags::Ptr{UInt8}, rbits::Int, rlog::Int, mls::Int, p::Ptr{UInt8})
     rows = (zhash(p, rbits + 8, mls) >> 8) << rlog

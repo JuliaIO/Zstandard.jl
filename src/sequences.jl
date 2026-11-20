@@ -87,6 +87,10 @@ function _sequence_blocks(seqs::AbstractVector{ZstdSequence}, n::Int, bmax::Int,
         (s.literal_length < 0 || s.match_length < 0 || s.offset < 0) &&
             throw(ArgumentError("sequence $i has a negative field"))
         ll = s.literal_length; ml = s.match_length; off = s.offset
+        # Reject as soon as the sequences cover more than the data: this bounds
+        # every later sum by n (no wrapping) and the splitting work below.
+        (ll > n - total || ml > n - total - ll) &&
+            throw(ArgumentError("the sequences up to sequence $i cover more than the $n bytes of data"))
         if is_delimiter(s)
             explicit || throw(ArgumentError("sequence $i: unexpected block delimiter"))
             fill + ll > bmax && throw(ArgumentError("block ending at sequence $i exceeds $bmax bytes"))
