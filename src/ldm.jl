@@ -52,7 +52,10 @@ end
 
 function LdmState(window::Int, min_match::Int, hash_log::Int, hist::Int, from::Int)
     nbuckets = 1 << (hash_log - LDM_BUCKET_LOG)
-    hrlog = LDM_WINDOW_LOG - hash_log
+    # one split per 2^hrlog bytes: libzstd sizes the table as windowLog - 7
+    # and so samples every ~128 bytes, whatever the window (a rate derived
+    # from the maximum window left small windows' tables mostly empty)
+    hrlog = max(0, (63 - leading_zeros(UInt64(window))) - hash_log)
     maxbits = min(min_match, 64)
     stopmask = hrlog <= maxbits ? ((UInt64(1) << hrlog) - 1) << (maxbits - hrlog) : (UInt64(1) << hrlog) - 1
     return LdmState(zeros(Int32, 1 << hash_log), zeros(UInt32, 1 << hash_log), zeros(UInt8, nbuckets),

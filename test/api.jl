@@ -318,16 +318,17 @@ end
         @test compress(big; dict=pd) == compress(big; level, dict=fd)
     end
     pd = prepare_dictionary(fd; level=3)
-    # streams: prepared tables with a small pledged size, regular path otherwise
-    for pledged in (nothing, length(samples[370]))
+    # streams: prepared tables when the input fits the prepared window, also
+    # without a pledge (decided when the stream finishes)
+    cs = map((nothing, length(samples[370]))) do pledged
         buf = IOBuffer()
         s = ZCS(buf; dict=pd, pledged_size=pledged, close_io=false)
         write(s, samples[370]); close(s)
         c = take!(buf)
         @test decompress(c, fd) == samples[370]
-        pledged === nothing && @test c == (b2 = IOBuffer(); s2 = ZCS(b2; dict=fd, close_io=false);
-                                          write(s2, samples[370]); close(s2); take!(b2))
+        c
     end
+    @test abs(length(cs[1]) - length(cs[2])) <= 2      # same blocks, header differs
     @test_throws ArgumentError ZCS(IOBuffer(); dict=pd, level=5)
     # TranscodingStreams codec
     c = transcode(ZstandardCompressor(dict=pd), samples[371])

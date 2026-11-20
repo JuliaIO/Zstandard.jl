@@ -3,7 +3,7 @@
 module Streaming
 
 import ..Decoder: DecoderState, ZstdDictionary, FrameInfo, read_frame_info, reset_frame!,
-                  decode_compressed_block!, memset!, zerr, ensure_capacity!,
+                  decode_compressed_block!, memset!, zerr, ensure_capacity!, ZstdError,
                   MAGIC_NUMBER, SKIPPABLE_MAGIC_START, SKIPPABLE_MASK, BLOCK_SIZE_MAX, WILDCOPY_SLACK
 import ..Encoder: StreamCompressor, stream_write!, stream_flush!, stream_finish!, PreparedDictionary, FrameOptions,
                   prefix_dict, prefix_params,
@@ -338,13 +338,14 @@ With `magicless=true`, frames are read without their magic number, and
 `prefix` decodes frames written with that reference prefix (see
 [`compress`](@ref Zstandard.compress)).
 
-After a decoding error, the stream is unusable: later reads rethrow the same
-error (bytes decoded before it can still be read).
+After a decoding error (a `ZstdError`), the stream is unusable: later reads
+rethrow the same error (bytes decoded before it can still be read). Other
+exceptions, such as an interrupt or an error from `io`, are not sticky.
 """
 mutable struct ZstdDecompressorStream <: IO
     io::IO
     d::StreamDecoder
-    err::Union{Nothing,Exception}   # sticky decoding error
+    err::Union{Nothing,ZstdError}   # sticky decoding error
 end
 
 ZstdDecompressorStream(io::IO, dict::Union{Nothing,ZstdDictionary}=nothing;
@@ -358,8 +359,8 @@ function fill_buffer!(s::ZstdDecompressorStream)
     try
         return fill_buffer_unchecked!(s)
     catch e
-        # the decoder's position in the input is lost: stay failed
-        s.err = e
+        # after a decoding error the position in the input is lost: stay failed
+        e isa ZstdError && (s.err = e)
         rethrow()
     end
 end

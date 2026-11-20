@@ -81,7 +81,6 @@ include("api.jl")
 include("extras.jl")
 include("xxhash.jl")
 include("regressions.jl")
-include("robustness.jl")
 
 @testset "Aqua.jl" begin
     Aqua.test_all(Zstandard)

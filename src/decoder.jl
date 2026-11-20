@@ -985,7 +985,6 @@ function frame_presize(p::Ptr{UInt8}, pos::Int, n::Int, window::Int)
     while pos + 2 <= n
         bh = Int(unsafe_load(p, pos)) | (Int(unsafe_load(p, pos + 1)) << 8) | (Int(unsafe_load(p, pos + 2)) << 16)
         btype = (bh >> 1) & 3; bsize = bh >> 3
-        # stop at the first block that decoding will reject
         (btype == 3 || bsize > bmax) && break
         pos += 3 + (btype == 1 ? 1 : bsize)
         pos - 1 > n && break
@@ -999,6 +998,20 @@ end
 # (TranscodingStreams' expectedsize): 64 MiB, or 64 bytes per input byte.
 presize_limit(remaining::Int) = min(max(1 << 26, 64 * remaining),
                                     remaining * (BLOCK_SIZE_MAX >> 2) + BLOCK_SIZE_MAX)
+
+# Grow `out` to at least `need` bytes while decoding a frame. With a recorded
+# content size `fcs`, grow by 8x per step (capped by that size) rather than
+# doubling, so a frame whose blocks compress far better than the pre-size
+# guess assumed is copied once or twice, not a dozen times. Growth happens
+# only once real output fills the buffer, so a forged size still cannot
+# allocate more than 8 times what was actually decoded.
+function grow_output!(out::Vector{UInt8}, need::Int, frame_start::Int, fcs::Int64)
+    len = length(out)
+    len >= need && return out
+    newlen = fcs >= 0 ? min(Int(frame_start + fcs) + WILDCOPY_SLACK, 8 * max(len, 1 << 16)) : 2 * len
+    resize!(out, max(need, newlen))
+    return out
+end
 
 @inline function ensure_capacity!(out::Vector{UInt8}, need::Int)
     if length(out) < need
@@ -1016,7 +1029,8 @@ start and end on frame boundaries.
 function decompress_frames(data::AbstractVector{UInt8}, st::DecoderState=DecoderState(),
                            dict::Union{Nothing,ZstdDictionary}=nothing;
                            range::UnitRange{Int}=1:length(data),
-                           out::Vector{UInt8}=Vector{UInt8}(undef, 0), magicless::Bool=false)
+                           out::Vector{UInt8}=Vector{UInt8}(undef, 0), magicless::Bool=false,
+                           release::Bool=true)
     src = data isa Vector{UInt8} ? data : Vector{UInt8}(data)
     checkbounds(src, range)
     n = range.stop            # last valid input index
@@ -1075,14 +1089,14 @@ function decompress_frames(data::AbstractVector{UInt8}, st::DecoderState=Decoder
                 if btype == 0
                     pos + bsize - 1 > n && zerr("truncated raw block")
                     bsize > block_max && zerr("block larger than the maximum block size")
-                    ensure_capacity!(out, produced + bsize + WILDCOPY_SLACK)
+                    grow_output!(out, produced + bsize + WILDCOPY_SLACK, frame_start, fi.content_size)
                     GC.@preserve out unsafe_copyto!(pointer(out) + produced, p + pos - 1, bsize)
                     produced += bsize
                     pos += bsize
                 elseif btype == 1
                     pos > n && zerr("truncated RLE block")
                     bsize > block_max && zerr("block larger than the maximum block size")
-                    ensure_capacity!(out, produced + bsize + WILDCOPY_SLACK)
+                    grow_output!(out, produced + bsize + WILDCOPY_SLACK, frame_start, fi.content_size)
                     GC.@preserve out memset!(pointer(out) + produced, unsafe_load(p, pos), bsize)
                     produced += bsize
                     pos += 1
@@ -1094,7 +1108,7 @@ function decompress_frames(data::AbstractVector{UInt8}, st::DecoderState=Decoder
                         lim = min(lim, Int(fi.content_size) - (produced - frame_start))
                         lim < 0 && zerr("frame content size exceeded")
                     end
-                    ensure_capacity!(out, produced + lim + WILDCOPY_SLACK)
+                    grow_output!(out, produced + lim + WILDCOPY_SLACK, frame_start, fi.content_size)
                     GC.@preserve out begin
                         base = pointer(out)
                         op = decode_compressed_block!(st, p + pos - 1, bsize, base + produced,
@@ -1119,7 +1133,11 @@ function decompress_frames(data::AbstractVector{UInt8}, st::DecoderState=Decoder
             end
         end
     end
+    cap = length(out)
     resize!(out, produced)
+    # release capacity left over from growing (more than a quarter extra)
+    # (not for a caller's `out` reused across calls: `release=false`)
+    release && cap > produced + produced >> 2 + (1 << 16) && sizehint!(out, produced)
     return out
 end
 
