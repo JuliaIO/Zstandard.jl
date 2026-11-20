@@ -290,6 +290,9 @@ apply_overrides(p::CParams, ov::ParameterOverrides) =
 `Block_Maximum_Size = min(Window_Size, 128 KiB)`."""
 block_size(p::CParams) = min(BLOCK_SIZE_MAX, 1 << p.window_log)
 
+"""The level as compression uses it: clamped to MIN_LEVEL:MAX_LEVEL, with 0 meaning 3."""
+normalize_level(level::Integer) = (l = clamp(Int(level), MIN_LEVEL, MAX_LEVEL); l == 0 ? 3 : l)
+
 """
     compression_parameters(level, src_size[, overrides]) -> CParams
 
@@ -299,8 +302,7 @@ nothing).
 """
 function compression_parameters(level::Integer, src_size::Integer,
                                 ov::ParameterOverrides=NO_OVERRIDES)
-    level = clamp(level, MIN_LEVEL, MAX_LEVEL)
-    level == 0 && (level = 3)
+    level = normalize_level(level)
     # table by size class (ZSTD_getCParams_internal)
     tid = src_size < 0 ? 0 : (src_size <= 256 << 10) + (src_size <= 128 << 10) + (src_size <= 16 << 10)
     tab = LEVEL_TABLES[tid + 1]
@@ -670,7 +672,8 @@ define void @entry(i64 %a) #0 {
 }
 attributes #0 = { alwaysinline }
 """
-@inline prefetch(p::Ptr) = Base.llvmcall((PREFETCH_IR, "entry"), Cvoid, Tuple{UInt}, UInt(p))
+# i64 in the IR: pass a UInt64, so that 32-bit platforms (UInt is 32 bits) compile too
+@inline prefetch(p::Ptr) = Base.llvmcall((PREFETCH_IR, "entry"), Cvoid, Tuple{UInt64}, UInt64(UInt(p)))
 
 @inline function row_prefetch(pos::Ptr{Int32}, tags::Ptr{UInt8}, rbits::Int, rlog::Int, mls::Int, p::Ptr{UInt8})
     rows = (zhash(p, rbits + 8, mls) >> 8) << rlog

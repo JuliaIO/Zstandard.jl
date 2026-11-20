@@ -29,7 +29,14 @@ end
 @inline _u32le(d::AbstractVector{UInt8}, i::Int) =
     UInt32(d[i]) | (UInt32(d[i+1]) << 8) | (UInt32(d[i+2]) << 16) | (UInt32(d[i+3]) << 24)
 
-_remaining(d, offset) = length(d) - offset + 1
+# bytes from `offset` on; negative for an offset before the start
+_remaining(d, offset) = offset < 1 ? -1 : length(d) - offset + 1
+_check_offset(offset) = offset >= 1 || throw(ArgumentError("offset must be at least 1, got $offset"))
+
+# Sizes from untrusted headers are summed with overflow checks: a negative or
+# wrapped total would be a hazard for callers that allocate from it.
+_add_size(a::Int64, b::Integer) = Base.Checked.add_with_overflow(a, Int64(b))[2] ?
+    zerr("total decompressed size overflows Int64 (corrupted or forged headers)") : a + Int64(b)
 
 """
     is_zstd_frame(data; offset=1) -> Bool
@@ -60,6 +67,7 @@ Parse the header of the Zstandard frame starting at `offset`. Throws a
 With `magicless=true`, the frame has no magic number (see `compress`).
 """
 function frame_header(data::AbstractVector{UInt8}; offset::Integer=1, magicless::Bool=false)
+    _check_offset(offset)
     m4 = magicless ? 0 : 4
     _remaining(data, offset) < m4 + 1 && zerr("truncated frame header")
     if !magicless
@@ -67,8 +75,12 @@ function frame_header(data::AbstractVector{UInt8}; offset::Integer=1, magicless:
         m & SKIPPABLE_MASK == SKIPPABLE_MAGIC_START && zerr("skippable frame has no frame header")
         m != MAGIC_NUMBER && zerr("unknown frame magic number 0x$(string(m, base=16))")
     end
-    hdr = Vector{UInt8}(data[offset+m4:min(end, offset + m4 + 17)])
-    fi = GC.@preserve hdr read_frame_info(pointer(hdr), length(hdr))
+    fi = if data isa DenseVector{UInt8}           # read in place: no copy per frame
+        GC.@preserve data read_frame_info(pointer(data, offset + m4), length(data) - offset - m4 + 1)
+    else
+        hdr = Vector{UInt8}(data[offset+m4:min(end, offset + m4 + 17)])
+        GC.@preserve hdr read_frame_info(pointer(hdr), length(hdr))
+    end
     cs = fi.content_size >= 0 ? fi.content_size : nothing
     return ZstdFrameHeader(cs, fi.window_size, fi.dict_id, fi.checksum, fi.single_segment, m4 + fi.header_size)
 end
@@ -99,6 +111,7 @@ Total size in bytes of the (Zstandard or skippable) frame starting at
 `offset`, found by walking its block headers.
 """
 function frame_compressed_size(data::AbstractVector{UInt8}; offset::Integer=1, magicless::Bool=false)
+    _check_offset(offset)
     if !magicless && is_skippable_frame(data; offset)
         _remaining(data, offset) < 8 && zerr("truncated skippable frame")
         n = 8 + Int(_u32le(data, offset + 4))
@@ -126,7 +139,8 @@ end
     decompressed_size(data) -> Union{Int64, Nothing}
 
 Sum of the content sizes of all frames in `data` (skippable frames count as 0),
-or `nothing` if any frame does not record its content size.
+or `nothing` if any frame does not record its content size. Throws a
+`ZstdError` if the sizes (taken from untrusted headers) overflow `Int64`.
 """
 function decompressed_size(data::AbstractVector{UInt8})
     total = Int64(0)
@@ -134,7 +148,7 @@ function decompressed_size(data::AbstractVector{UInt8})
     while pos <= length(data)
         cs = frame_content_size(data; offset=pos)
         cs === nothing && return nothing
-        total += cs
+        total = _add_size(total, cs)
         pos += frame_compressed_size(data; offset=pos)
     end
     return total

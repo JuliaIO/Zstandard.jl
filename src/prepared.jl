@@ -49,7 +49,7 @@ a different `level` throws an `ArgumentError`. Explicit compression parameters
 at preparation as well.
 """
 function prepare_dictionary(dict::ZstdDictionary; level::Integer=3, kwargs...)
-    level = Int(level)
+    level = normalize_level(level)
     ov = parameter_overrides(; kwargs...)
     dlen = length(dict.content)
     p = compression_parameters(level, dlen + PREPARED_DICT_SRC_HINT, ov)
@@ -126,7 +126,7 @@ end
 """Whether `pd`'s tables should be used for an input of `n` bytes at `level`
 (dictionary + input fit the prepared window); otherwise its dictionary is loaded normally."""
 function use_prepared(pd::PreparedDictionary, n::Integer, level, ov::ParameterOverrides=NO_OVERRIDES)
-    level === nothing || level == pd.level ||
+    level === nothing || normalize_level(level) == pd.level ||
         throw(ArgumentError("dictionary was prepared for level $(pd.level), not level $level"))
     ov === NO_OVERRIDES || ov == pd.overrides ||
         throw(ArgumentError("compression parameters are fixed by the prepared dictionary"))

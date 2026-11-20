@@ -43,4 +43,7 @@ end
 
 if ccall(:jl_generating_output, Cint, ()) == 1
     _precompile_workload()
+    # the workload's pooled contexts (megabytes of tables) must not be saved
+    # in the package image
+    empty!(_CCTX_POOL); empty!(_STATE_POOL)
 end
