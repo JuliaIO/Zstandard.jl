@@ -12,15 +12,15 @@ lcg_bytes(n, seed, alphabet) = (x = UInt64(seed);
     x = lcg_bytes(3_000_000, 1, UInt8.(collect("abcdefgh \n")))
     for checksum in (false, true)
         c = compress(x; level=1, checksum)
-        @test read(ZstdDecompressorStream(IOBuffer(c))) == x
+        @test read(Zstandard.ZstdDecompressorStream(IOBuffer(c))) == x
     end
 end
 
 @testset "read(stream, nb) does not allocate nb bytes" begin
     small = compress(lcg_bytes(100, 2, 0x00:0xff))
-    @test length(read(ZstdDecompressorStream(IOBuffer(small)), typemax(Int))) == 100
-    @test read(ZstdDecompressorStream(IOBuffer(small)), 10) == decompress(small)[1:10]
-    @test_throws ArgumentError read(ZstdDecompressorStream(IOBuffer(small)), -1)
+    @test length(read(Zstandard.ZstdDecompressorStream(IOBuffer(small)), typemax(Int))) == 100
+    @test read(Zstandard.ZstdDecompressorStream(IOBuffer(small)), 10) == decompress(small)[1:10]
+    @test_throws ArgumentError read(Zstandard.ZstdDecompressorStream(IOBuffer(small)), -1)
 end
 
 @testset "Forged sizes do not drive large allocations" begin
