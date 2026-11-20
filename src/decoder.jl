@@ -994,6 +994,11 @@ function frame_presize(p::Ptr{UInt8}, pos::Int, n::Int, window::Int)
     return total
 end
 
+# Size hint from untrusted recorded sizes when the blocks are not at hand
+# (TranscodingStreams' expectedsize): 64 MiB, or 64 bytes per input byte.
+presize_limit(remaining::Int) = min(max(1 << 26, 64 * remaining),
+                                    remaining * (BLOCK_SIZE_MAX >> 2) + BLOCK_SIZE_MAX)
+
 @inline function ensure_capacity!(out::Vector{UInt8}, need::Int)
     if length(out) < need
         resize!(out, max(need, 2 * length(out)))

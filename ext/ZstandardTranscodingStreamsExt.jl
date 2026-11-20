@@ -105,7 +105,9 @@ function TranscodingStreams.expectedsize(c::ZstandardDecompressorCodec, input::M
     try
         data = unsafe_wrap(Array, input.ptr, n)
         s = Zstandard.decompressed_size(data)
-        return s === nothing ? 4n : Int(s)
+        # the recorded sizes are untrusted: the hint only pre-sizes the
+        # buffer, which TranscodingStreams grows as needed
+        return s === nothing ? 4n : min(Int(s), Zstandard.Decoder.presize_limit(n))
     catch
         return 4n
     end

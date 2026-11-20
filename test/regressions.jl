@@ -136,3 +136,37 @@ end
     @test_throws ArgumentError Zstandard.XXHash.update!(st, Ptr{UInt8}(0), -1)
     @test st.total == 0
 end
+
+@testset "close after a pledge mismatch" begin
+    io = IOBuffer()
+    s = Zstandard.ZstdCompressorStream(io; pledged_size=2000)
+    write(s, lcg_bytes(1000, 4, 0x00:0xff))
+    @test_throws ArgumentError close(s)
+    @test !isopen(s)
+    @test !isopen(io)
+    close(s)                                   # already closed: no error
+end
+
+@testset "Size hint from a forged content size" begin
+    @test TranscodingStreams.expectedsize(ZstandardDecompressor(),
+        TranscodingStreams.Memory(pointer(forged_fcs(UInt64(1) << 46)), 16)) <= 1 << 26
+    c = compress(lcg_bytes(1000, 5, 0x00:0xff))
+    @test transcode(ZstandardDecompressor(), c) == decompress(c)
+end
+
+@testset "Precompile workload leaves the context pools empty" begin
+    # in a fresh process, i.e. as loaded from the package image
+    code = "using Zstandard; print(length(Zstandard._CCTX_POOL), \" \", length(Zstandard._STATE_POOL))"
+    cmd = `$(Base.julia_cmd()) --startup-file=no --project=$(Base.active_project()) -e $code`
+    @test readchomp(cmd) == "0 0"
+end
+
+@testset "Prepared dictionary levels" begin
+    dict = ZstdDictionary(Vector{UInt8}(repeat("dictionary content for prepared levels ", 200)))
+    x = Vector{UInt8}("some dictionary content for prepared levels to compress")
+    @test prepare_dictionary(dict; level=99).level == Zstandard.Encoder.MAX_LEVEL
+    pd = prepare_dictionary(dict; level=0)
+    @test pd.level == 3
+    @test decompress(compress(x; dict=pd, level=3), dict) == x
+    @test decompress(compress(x; dict=pd, level=0), dict) == x
+end

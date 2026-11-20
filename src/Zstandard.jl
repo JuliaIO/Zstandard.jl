@@ -151,6 +151,9 @@ The remaining keywords override individual parameters of the level, with the
 meaning of libzstd's advanced parameters (`ZSTD_c_windowLog` etc.); see
 [`Zstandard.Encoder.parameter_overrides`](@ref). For example,
 `compress(data; level=19, window_log=24)` searches matches up to 16 MiB back.
+A `window_log` above 27 makes frames that streaming decoders reject by default
+(here and in libzstd): decode them with `max_window_size` set, as libzstd's
+`--long=N`, or one-shot with `decompress`.
 
 With `nthreads > 1`, inputs larger than a few window sizes are split into
 jobs compressed in parallel tasks (within a single frame, as libzstd's

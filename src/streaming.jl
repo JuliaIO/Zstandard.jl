@@ -58,8 +58,10 @@ end
 
 """
 Default largest window a streaming decoder accepts: 128 MiB, as libzstd's
-default `windowLogMax` of 27. Every frame Zstandard.jl writes (`long=true`
-included) stays within it.
+default `windowLogMax` of 27. Frames Zstandard.jl writes stay within it
+(`long=true` included) unless `window_log` above 27 is passed explicitly; such
+frames need a larger `max_window_size` here (or `--long=N` / `windowLogMax`
+with libzstd).
 """
 const DEFAULT_MAX_WINDOW_SIZE = 1 << 27
 
@@ -462,10 +464,15 @@ Base.iswritable(s::ZstdCompressorStream) = !s.closed
 
 function Base.close(s::ZstdCompressorStream)
     s.closed && return
-    stream_finish!(s.sc)
-    drain!(s)
-    s.closed = true
-    s.close_io ? close(s.io) : flush(s.io)
+    # Close (or flush) the wrapped io even if finishing the frame throws (a
+    # pledge mismatch, a failed job): the frame cannot be completed anyway.
+    try
+        stream_finish!(s.sc)
+        drain!(s)
+    finally
+        s.closed = true
+        s.close_io ? close(s.io) : flush(s.io)
+    end
     return nothing
 end
 
