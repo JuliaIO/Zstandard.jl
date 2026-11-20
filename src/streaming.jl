@@ -3,7 +3,7 @@
 module Streaming
 
 import ..Decoder: DecoderState, ZstdDictionary, FrameInfo, read_frame_info, reset_frame!,
-                  decode_compressed_block!, memset!, zerr, ensure_capacity!,
+                  decode_compressed_block!, memset!, zerr, ensure_capacity!, ZstdError,
                   MAGIC_NUMBER, SKIPPABLE_MAGIC_START, SKIPPABLE_MASK, BLOCK_SIZE_MAX, WILDCOPY_SLACK
 import ..Encoder: StreamCompressor, stream_write!, stream_flush!, stream_finish!
 using ..XXHash: ChecksumState, checksum_update!, checksum_digest
@@ -289,17 +289,33 @@ end
 A streaming Zstandard decompressor that implements the `IO` interface.
 Decoded data is produced one block at a time; memory use is bounded by the
 frame's window size plus one block.
+
+After a decoding error (a `ZstdError`), the stream is unusable: later reads
+rethrow the same error (bytes decoded before it can still be read). Other
+exceptions, such as an interrupt or an error from `io`, are not sticky.
 """
 mutable struct ZstdDecompressorStream <: IO
     io::IO
     d::StreamDecoder
+    err::Union{Nothing,ZstdError}   # sticky decoding error
 end
 
 ZstdDecompressorStream(io::IO, dict::Union{Nothing,ZstdDictionary}=nothing) =
-    ZstdDecompressorStream(io, StreamDecoder(dict))
+    ZstdDecompressorStream(io, StreamDecoder(dict), nothing)
 
 # Decode until at least one unread byte is available. Returns false at end of input.
 function fill_buffer!(s::ZstdDecompressorStream)
+    s.err === nothing || throw(s.err)
+    try
+        return fill_buffer_unchecked!(s)
+    catch e
+        # after a decoding error the position in the input is lost: stay failed
+        e isa ZstdError && (s.err = e)
+        rethrow()
+    end
+end
+
+function fill_buffer_unchecked!(s::ZstdDecompressorStream)
     d = s.d
     while available(d) <= 0
         if eof(s.io)
