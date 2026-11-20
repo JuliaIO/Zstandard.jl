@@ -2041,6 +2041,11 @@ function emit_parsed_block!(cc::CompressionContext, out::Vector{UInt8}, pos::Int
     q = encode_literals!(cc, blk, 1, cc.ss.lit, cc.ss.nlit)
     q = encode_sequences!(cc, blk, q)
     csize = q - 1
+    # A block split into parts (postsplit.jl) writes a 3-byte header per part,
+    # more than the callers' per-block reservation allows for when many parts
+    # fall back to raw, so make room here.
+    need = pos + 3 + min(n, csize)
+    length(out) < need && resize!(out, max(need, length(out) + length(out) >> 1))
     if csize >= n || csize > BLOCK_SIZE_MAX
         # raw block; the decoder's entropy state does not change
         cc.rep = snap.rep

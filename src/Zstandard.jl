@@ -173,7 +173,8 @@ function _compress_mt(data::Vector{UInt8}, level::Integer, checksum::Bool, nthre
             _with_cctx(cc -> compress_job!(cc, p, level, data, js, je, overlap, j == njobs))
         end
     end
-    parts = fetch.(tasks)
+    parts = Vector{UInt8}[fetch(t) for t in tasks]
+    njobs == 0 && push!(parts, UInt8[0x01, 0x00, 0x00])      # empty input: one empty last block
     out = frame_header_bytes(n, p, checksum, frame)
     sizehint!(out, length(out) + sum(length, parts) + 4)
     foreach(x -> append!(out, x), parts)
