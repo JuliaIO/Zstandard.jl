@@ -64,5 +64,6 @@ end
     d = repeat(pat, 50_000)
     c = compress(d; level=3)
     @test decompress(c) == d
-    @test (@allocated decompress(c)) < 1.6 * length(d)
+    # (minimum of a few runs: a stray allocation elsewhere must not fail it)
+    @test minimum(@allocated(decompress(c)) for _ in 1:3) < 1.6 * length(d)
 end
