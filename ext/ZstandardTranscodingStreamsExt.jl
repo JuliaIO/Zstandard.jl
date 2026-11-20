@@ -126,7 +126,9 @@ function TranscodingStreams.expectedsize(c::ZstandardDecompressorCodec, input::M
 end
 
 function TranscodingStreams.startproc(c::ZstandardDecompressorCodec, mode::Symbol, err::Error)
-    if !at_boundary(c.d)
+    # Keep the decoder (and its buffers) only at a clean frame boundary: mid-frame,
+    # or with decoded bytes that were never read, it belongs to an abandoned stream.
+    if !at_boundary(c.d) || available(c.d) > 0
         c.d = StreamDecoder(c.dict; max_window_size=c.max_window_size, magicless=c.magicless)
         c.frames_reported = 0
     end

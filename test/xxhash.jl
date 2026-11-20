@@ -212,8 +212,14 @@ end
 # Julia/LLVM versions seeing through it.
 @testset "XXH64 stripe loop stays scalar" begin
     using InteractiveUtils: code_llvm
-    vecmul(f, T) = occursin(r"mul <\d+ x i64>", sprint(io -> code_llvm(io, f, T; debuginfo=:none)))
-    @test !vecmul(XX.xxh64, Tuple{Vector{UInt8}})
-    @test !vecmul(XX.xxh64, Tuple{SubArray{UInt8,1,Vector{UInt8},Tuple{UnitRange{Int}},true}})
-    @test !vecmul(XX.xxh64, Tuple{Ptr{UInt8}, Int, UInt64})
+    # The stripe loop lives in xxh64_src (the xxh64 methods are thin wrappers
+    # around it), so inspect that; the positive control fails if the loop
+    # moves elsewhere and this check would then test nothing.
+    ir(T) = sprint(io -> code_llvm(io, XX.xxh64_src, T; debuginfo=:none))
+    for T in (Tuple{XX.PtrSrc,Int,UInt64}, Tuple{XX.VecSrc{Vector{UInt8}},Int,UInt64},
+              Tuple{XX.VecSrc{SubArray{UInt8,1,Vector{UInt8},Tuple{UnitRange{Int}},true}},Int,UInt64})
+        s = ir(T)
+        @test occursin("mul i64", s)                 # the scalar rounds are here
+        @test !occursin(r"mul <\d+ x i64>", s)       # and not vectorized
+    end
 end

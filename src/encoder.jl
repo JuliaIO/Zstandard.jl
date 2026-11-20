@@ -290,6 +290,9 @@ apply_overrides(p::CParams, ov::ParameterOverrides) =
 `Block_Maximum_Size = min(Window_Size, 128 KiB)`."""
 block_size(p::CParams) = min(BLOCK_SIZE_MAX, 1 << p.window_log)
 
+"""The level as compression uses it: clamped to MIN_LEVEL:MAX_LEVEL, with 0 meaning 3."""
+normalize_level(level::Integer) = (l = clamp(Int(level), MIN_LEVEL, MAX_LEVEL); l == 0 ? 3 : l)
+
 """
     compression_parameters(level, src_size[, overrides]) -> CParams
 
@@ -299,8 +302,7 @@ nothing).
 """
 function compression_parameters(level::Integer, src_size::Integer,
                                 ov::ParameterOverrides=NO_OVERRIDES)
-    level = clamp(level, MIN_LEVEL, MAX_LEVEL)
-    level == 0 && (level = 3)
+    level = normalize_level(level)
     # table by size class (ZSTD_getCParams_internal)
     tid = src_size < 0 ? 0 : (src_size <= 256 << 10) + (src_size <= 128 << 10) + (src_size <= 16 << 10)
     tab = LEVEL_TABLES[tid + 1]
@@ -2047,6 +2049,11 @@ function emit_parsed_block!(cc::CompressionContext, out::Vector{UInt8}, pos::Int
     q = encode_literals!(cc, blk, 1, cc.ss.lit, cc.ss.nlit)
     q = encode_sequences!(cc, blk, q)
     csize = q - 1
+    # A block split into parts (postsplit.jl) writes a 3-byte header per part,
+    # more than the callers' per-block reservation allows for when many parts
+    # fall back to raw, so make room here.
+    need = pos + 3 + min(n, csize)
+    length(out) < need && resize!(out, max(need, length(out) + length(out) >> 1))
     if csize >= n || csize > BLOCK_SIZE_MAX
         # raw block; the decoder's entropy state does not change
         cc.rep = snap.rep
@@ -2324,6 +2331,7 @@ mutable struct StreamCompressor
     jobs::Vector{Task}   # jobs in flight, in output order
     pool::Vector{CompressionContext}
     pool_lock::ReentrantLock
+    failed::Union{Nothing,Exception}   # a job failed: the frame cannot be completed
 end
 
 function StreamCompressor(; level::Union{Nothing,Integer}=nothing, checksum::Bool=false,
@@ -2346,7 +2354,8 @@ function StreamCompressor(; level::Union{Nothing,Integer}=nothing, checksum::Boo
     sc = StreamCompressor(CompressionContext(), level, checksum, dict, UInt8[], 0, 1, 0, 0,
                           UInt8[], 0, false, false, ChecksumState(), -1, 0, params, BLOCK_SIZE_MAX,
                           frame, size_hint === nothing ? -1 : Int(size_hint), 0, long, nothing,
-                          Int(nthreads), LEVEL_TABLE[4], 0, 0, Task[], CompressionContext[], ReentrantLock())
+                          Int(nthreads), LEVEL_TABLE[4], 0, 0, Task[], CompressionContext[], ReentrantLock(),
+                          nothing)
     pledged_size === nothing || stream_pledge!(sc, pledged_size)
     return sc
 end
@@ -2516,22 +2525,39 @@ end
 # more than `keep` are in flight.
 function collect_jobs!(sc::StreamCompressor, keep::Int)
     while !isempty(sc.jobs) && (length(sc.jobs) > keep || istaskdone(sc.jobs[1]))
-        append_out!(sc, fetch(popfirst!(sc.jobs)))
+        part = try
+            fetch(sc.jobs[1])
+        catch e
+            # The job's blocks are lost, so no later call may finish the frame.
+            sc.failed = e
+            rethrow()
+        end
+        popfirst!(sc.jobs)
+        append_out!(sc, part)
     end
     return sc
 end
 
+function check_failed(sc::StreamCompressor)
+    sc.failed === nothing ||
+        throw(ArgumentError("a compression job of this frame failed earlier ($(sc.failed)); " *
+                            "the frame cannot be completed"))
+    return nothing
+end
+
 # Compress the next `n` pending bytes as a job on another task.
 function dispatch_job!(sc::StreamCompressor, n::Int, last::Bool)
-    first_job = sc.pend == 1
-    hist = first_job ? 0 : min(sc.overlap, sc.pend - 1)
+    # Copy a whole window of history, as one-shot jobs see the whole input:
+    # only `overlap` bytes of it are indexed, but matches found there may
+    # extend backwards into the rest (offsets never exceed the window).
+    hist = min(1 << sc.p.window_log, sc.pend - 1)
     jd = sc.buf[sc.pend - hist:sc.pend + n - 1]          # own copy: the buffer moves on
-    p = sc.p; level = sc.level
+    p = sc.p; level = sc.level; overlap = sc.overlap
     collect_jobs!(sc, sc.nthreads - 1)
     t = Threads.@spawn begin
         cc = lock(() -> isempty(sc.pool) ? CompressionContext() : pop!(sc.pool), sc.pool_lock)
         try
-            compress_job!(cc, p, level, jd, hist + 1, length(jd), hist, last)
+            compress_job!(cc, p, level, jd, hist + 1, length(jd), overlap, last)
         finally
             lock(() -> push!(sc.pool, cc), sc.pool_lock)
         end
@@ -2550,6 +2576,7 @@ Feed input. Full blocks are compressed as soon as more input follows them.
 """
 function stream_write!(sc::StreamCompressor, data::AbstractVector{UInt8})
     sc.finished && error("stream already finished")
+    check_failed(sc)
     sc.started || stream_begin!(sc)
     if sc.pledged >= 0 && sc.total + length(data) > sc.pledged
         throw(ArgumentError("writing $(length(data)) more bytes exceeds the pledged content size " *
@@ -2583,6 +2610,7 @@ end
 function stream_flush!(sc::StreamCompressor)
     sc.started || stream_begin!(sc)
     sc.finished && return sc
+    check_failed(sc)
     if sc.nthreads > 1
         n = sc.len - sc.pend + 1
         n > 0 && dispatch_job!(sc, n, false)
@@ -2598,6 +2626,7 @@ end
 """Finish the frame: compress remaining input as the last block and append the checksum."""
 function stream_finish!(sc::StreamCompressor)
     sc.finished && return sc
+    check_failed(sc)
     sc.started || stream_begin!(sc)
     if sc.pledged >= 0 && sc.total != sc.pledged
         throw(ArgumentError("frame finished after $(sc.total) bytes, but $(sc.pledged) were pledged"))

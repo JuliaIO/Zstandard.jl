@@ -62,8 +62,10 @@ end
 
 """
 Default largest window a streaming decoder accepts: 128 MiB, as libzstd's
-default `windowLogMax` of 27. Every frame Zstandard.jl writes (`long=true`
-included) stays within it.
+default `windowLogMax` of 27. Frames Zstandard.jl writes stay within it
+(`long=true` included) unless `window_log` above 27 is passed explicitly; such
+frames need a larger `max_window_size` here (or `--long=N` / `windowLogMax`
+with libzstd).
 """
 const DEFAULT_MAX_WINDOW_SIZE = 1 << 27
 
@@ -462,8 +464,8 @@ less when a smaller `pledged_size` or `size_hint` is given). With
 `nthreads > 1`, input is cut into jobs compressed in parallel tasks (as
 libzstd's `nbWorkers`; jobs are four windows long, so the stream buffers
 that much); output is written as jobs complete, in order, and `flush` and
-`close` wait for them. Neither is combined with `dict` or `prefix`, and
-`long` not with `nthreads`.
+`close` wait for them. `nthreads > 1` is not combined with `dict`, `prefix`
+or `long`.
 
 `close` finishes the frame and, if `close_io` is true, closes `io` (pass
 `close_io=false` to keep writing to `io`, e.g. an `IOBuffer` read afterwards).
@@ -531,10 +533,15 @@ Base.iswritable(s::ZstdCompressorStream) = !s.closed
 
 function Base.close(s::ZstdCompressorStream)
     s.closed && return
-    stream_finish!(s.sc)
-    drain!(s)
-    s.closed = true
-    s.close_io ? close(s.io) : flush(s.io)
+    # Close (or flush) the wrapped io even if finishing the frame throws (a
+    # pledge mismatch, a failed job): the frame cannot be completed anyway.
+    try
+        stream_finish!(s.sc)
+        drain!(s)
+    finally
+        s.closed = true
+        s.close_io ? close(s.io) : flush(s.io)
+    end
     return nothing
 end
 

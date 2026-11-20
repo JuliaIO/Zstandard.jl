@@ -61,7 +61,8 @@ just a range, touching only the frames it overlaps. With `checksum=true` the
 seek table records an XXH64-based checksum of each frame's content, verified
 on decoding. Frames are compressed in parallel on up to `nthreads` tasks.
 Other keywords (`level`, `dict`, `window_log`, ...) are passed to
-[`compress`](@ref) for each frame.
+[`compress`](@ref) for each frame, except `prefix` and `magicless=true`,
+which [`decompress_range`](@ref) could not read back.
 """
 function compress_seekable(data::Union{AbstractVector{UInt8},AbstractString}; frame_size::Integer=1 << 20,
                            checksum::Bool=true, nthreads::Integer=1, kwargs...)
@@ -69,7 +70,10 @@ function compress_seekable(data::Union{AbstractVector{UInt8},AbstractString}; fr
     1 <= frame_size <= SEEKABLE_MAX_FRAME_SIZE ||
         throw(ArgumentError("frame_size must be in 1:$(SEEKABLE_MAX_FRAME_SIZE)"))
     nthreads < 1 && throw(ArgumentError("nthreads must be at least 1"))
-    haskey(kwargs, :magicless) && throw(ArgumentError("seekable archives cannot use magicless frames"))
+    get(kwargs, :magicless, false) && throw(ArgumentError("seekable archives cannot use magicless frames"))
+    # decompress_range takes a dictionary but no prefix: the archive would be unreadable
+    get(kwargs, :prefix, nothing) === nothing ||
+        throw(ArgumentError("seekable archives cannot use a prefix; use dict"))
     n = length(src)
     nf = cld(n, Int(frame_size))
     nf > SEEKABLE_MAX_FRAMES && throw(ArgumentError("too many frames; use a larger frame_size"))
