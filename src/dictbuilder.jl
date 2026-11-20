@@ -233,6 +233,8 @@ function finalize_dictionary(content::AbstractVector{UInt8}, samples::AbstractVe
     length(content) > room && (content = content[end-room+1:end])
     length(content) < 8 && throw(ArgumentError("dictionary content must be at least 8 bytes"))
     # dictionary IDs use the native XXH64 (an ID, not a format checksum)
+    dict_id === nothing || 0 <= dict_id <= typemax(UInt32) ||
+        throw(ArgumentError("dict_id must be in 0:$(typemax(UInt32)), got $dict_id"))
     id = dict_id === nothing ? UInt32(xxh64(content) % UInt64((1 << 31) - 32768) + 32768) : UInt32(dict_id)
     for k in 0:3
         hdr[5 + k] = (id >> (8k)) % UInt8
@@ -250,7 +252,7 @@ frequent segments of the samples, then entropy tables are added
 ([`finalize_dictionary`](@ref)). Use the result with `parse_dictionary`.
 
 `algorithm=:fastcover` (libzstd's default) counts hashed dmers of `d` bytes
-(`2^f` buckets); `algorithm=:cover` counts each distinct dmer exactly, once per
+(`2^f` buckets, `f` in 1:31); `algorithm=:cover` counts each distinct dmer exactly, once per
 sample (`ZDICT_trainFromBuffer_cover`; slower, sometimes better).
 Parameters not given are optimized, as `ZDICT_optimizeTrainFromBuffer_*`:
 segment sizes `k` from 50 to 2000 in `steps` steps and dmer sizes `d` of 6
@@ -263,6 +265,10 @@ function train_dictionary(samples::AbstractVector{<:AbstractVector{UInt8}}; dict
                           steps::Integer=8, f::Integer=20, nthreads::Integer=Threads.nthreads())
     algorithm in (:fastcover, :cover) || throw(ArgumentError("algorithm must be :fastcover or :cover"))
     d === nothing || d in (6, 8) || throw(ArgumentError("d must be 6 or 8"))
+    # as libzstd: 0 < f <= 31 (dmer ids are Int32), and d <= k
+    1 <= f <= 31 || throw(ArgumentError("f must be in 1:31, got $f"))
+    k === nothing || k >= (d === nothing ? 6 : d) ||
+        throw(ArgumentError("k must be at least d ($(d === nothing ? 6 : d)), got $k"))
     steps >= 1 || throw(ArgumentError("steps must be at least 1"))
     nthreads >= 1 || throw(ArgumentError("nthreads must be at least 1"))
     ns = length(samples)
