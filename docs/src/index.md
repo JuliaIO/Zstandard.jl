@@ -52,5 +52,10 @@ compressed = compress(data, checksum=true)
 
 - [CodecZstd.jl](https://github.com/JuliaIO/CodecZstd.jl) -- wraps the C libzstd library via [TranscodingStreams.jl](https://github.com/JuliaIO/TranscodingStreams.jl), providing a mature and battle-tested streaming interface.
 - [ChunkCodecsLibZstd.jl](https://github.com/JuliaIO/ChunkCodecs.jl/tree/main/libs/ChunkCodecsLibZstd) -- wraps the C libzstd library via [ChunkCodecs.jl](https://github.com/JuliaIO/ChunkCodecs.jl), providing chunk-based encoding and decoding.
+- [ZstdInflate.jl](https://github.com/BioTurboNick/ZstdInflate.jl) -- a pure Julia Zstandard decompressor (no compression), with in-memory and streaming decoding and parallel decoding of concatenated frames.
 
-For production use, these C-backed packages are likely more reliable and performant. Zstandard.jl is useful when a pure Julia implementation is preferred, such as for environments where C dependencies are unavailable or for educational purposes.
+The C-backed packages wrap libzstd, which has years of production use and fuzzing behind it;
+prefer them where that matters most. Zstandard.jl is a complete pure Julia implementation
+(compression and decompression) for environments where C dependencies are unavailable or
+undesirable; its compression ratios match libzstd's and its decompression is about as fast or
+faster (see the README's performance section).
