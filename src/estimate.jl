@@ -62,7 +62,7 @@ function estimate_compression_memory(; level::Union{Nothing,Integer}=nothing, sr
     workers = 1
     if nthreads > 1 && n >= 0 && !streaming
         _, job, _ = mt_layout(n, lvl, ov)
-        workers = min(Int(nthreads), cld(n, job))
+        workers = clamp(cld(n, job), 1, Int(nthreads))
     end
     return workers * one
 end

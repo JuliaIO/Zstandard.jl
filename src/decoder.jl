@@ -972,22 +972,32 @@ function read_frame_info(p::Ptr{UInt8}, len::Int)
     return FrameInfo(hs, window, fcs, did, checksum, single)
 end
 
-# Upper bound on a frame's content from its block headers, starting at 1-based
-# position `pos` of the input at `p` (last valid index `n`); stops quietly at
-# malformed data (decoding reports it).
-function frame_blocks_bound(p::Ptr{UInt8}, pos::Int, n::Int, window::Int)
+# Pre-size estimate of a frame's content from its block headers, starting at
+# 1-based position `pos` of the input at `p` (last valid index `n`). Raw and
+# RLE sizes are exact (they are what decoding will produce); a compressed
+# block counts as at most a block, but no more than 64 times its compressed
+# size plus 4 KiB, so that forged headers cannot claim gigabytes from a few
+# bytes (larger outputs grow as they decode). Stops quietly at malformed data,
+# which decoding reports.
+function frame_presize(p::Ptr{UInt8}, pos::Int, n::Int, window::Int)
     bmax = min(BLOCK_SIZE_MAX, window)
     total = 0
     while pos + 2 <= n
         bh = Int(unsafe_load(p, pos)) | (Int(unsafe_load(p, pos + 1)) << 8) | (Int(unsafe_load(p, pos + 2)) << 16)
         btype = (bh >> 1) & 3; bsize = bh >> 3
-        btype == 3 && break
-        total += btype == 2 ? bmax : bsize
+        (btype == 3 || bsize > bmax) && break
         pos += 3 + (btype == 1 ? 1 : bsize)
+        pos - 1 > n && break
+        total += btype == 2 ? min(bmax, 64 * bsize + 4096) : bsize
         bh & 1 == 1 && break
     end
     return total
 end
+
+# Size hint from untrusted recorded sizes when the blocks are not at hand
+# (TranscodingStreams' expectedsize): 64 MiB, or 64 bytes per input byte.
+presize_limit(remaining::Int) = min(max(1 << 26, 64 * remaining),
+                                    remaining * (BLOCK_SIZE_MAX >> 2) + BLOCK_SIZE_MAX)
 
 @inline function ensure_capacity!(out::Vector{UInt8}, need::Int)
     if length(out) < need
@@ -1039,20 +1049,17 @@ function decompress_frames(data::AbstractVector{UInt8}, st::DecoderState=Decoder
             end
             reset_frame!(st, dict)
             frame_start = produced
-            # Pre-size the output. A declared content size is trusted only up
-            # to what the remaining input could possibly expand to (an RLE
-            # block turns 4 bytes into 128KB), so a corrupt header cannot
-            # trigger a huge allocation.
-            max_expand = (n - pos + 1) * (BLOCK_SIZE_MAX >> 2) + BLOCK_SIZE_MAX
+            # Pre-size the output from the block headers, and from the
+            # recorded content size when it is smaller. Both are untrusted, so
+            # frame_presize limits what junk can claim; outputs larger than
+            # the guess grow as they decode.
+            guess = frame_presize(p, pos, n, fi.window_size)
+            fi.content_size >= 0 && (guess = min(guess, Int(fi.content_size)))
             if first
-                # without a recorded size, bound this frame by its block headers
-                # (raw and RLE sizes are exact, compressed blocks at most a block)
-                guess = fi.content_size >= 0 ? min(Int(fi.content_size), max_expand) :
-                        min(frame_blocks_bound(p, pos, n, fi.window_size), max_expand)
                 length(out) < guess + WILDCOPY_SLACK && resize!(out, guess + WILDCOPY_SLACK)
                 first = false
-            elseif fi.content_size >= 0
-                ensure_capacity!(out, produced + min(Int(fi.content_size), max_expand) + WILDCOPY_SLACK)
+            else
+                ensure_capacity!(out, produced + guess + WILDCOPY_SLACK)
             end
             # Block_Maximum_Size = min(Window_Size, 128 KiB) bounds both the
             # block content and its decoded size (RFC 8878 section 3.1.1.2.3)

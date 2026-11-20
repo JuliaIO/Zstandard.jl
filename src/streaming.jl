@@ -62,8 +62,10 @@ end
 
 """
 Default largest window a streaming decoder accepts: 128 MiB, as libzstd's
-default `windowLogMax` of 27. Every frame Zstandard.jl writes (`long=true`
-included) stays within it.
+default `windowLogMax` of 27. Frames Zstandard.jl writes stay within it
+(`long=true` included) unless `window_log` above 27 is passed explicitly; such
+frames need a larger `max_window_size` here (or `--long=N` / `windowLogMax`
+with libzstd).
 """
 const DEFAULT_MAX_WINDOW_SIZE = 1 << 27
 
@@ -424,7 +426,13 @@ function Base.read(s::ZstdDecompressorStream)
     return out
 end
 
-Base.read(s::ZstdDecompressorStream, nb::Integer) = (b = Vector{UInt8}(undef, nb); resize!(b, readbytes!(s, b, nb)))
+# At most `nb` bytes: start small and let readbytes! grow the vector as data
+# arrives, rather than allocating `nb` bytes up front.
+function Base.read(s::ZstdDecompressorStream, nb::Integer)
+    nb < 0 && throw(ArgumentError("nb must be non-negative, got $nb"))
+    b = Vector{UInt8}(undef, min(Int(nb), 1 << 16))
+    return resize!(b, readbytes!(s, b, nb))
+end
 
 # ---------------------------------------------------------------------------
 # ZstdCompressorStream
@@ -531,10 +539,15 @@ Base.iswritable(s::ZstdCompressorStream) = !s.closed
 
 function Base.close(s::ZstdCompressorStream)
     s.closed && return
-    stream_finish!(s.sc)
-    drain!(s)
-    s.closed = true
-    s.close_io ? close(s.io) : flush(s.io)
+    # Close (or flush) the wrapped io even if finishing the frame throws (a
+    # pledge mismatch, a failed job): the frame cannot be completed anyway.
+    try
+        stream_finish!(s.sc)
+        drain!(s)
+    finally
+        s.closed = true
+        s.close_io ? close(s.io) : flush(s.io)
+    end
     return nothing
 end
 

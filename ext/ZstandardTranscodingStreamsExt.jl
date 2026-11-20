@@ -119,14 +119,18 @@ function TranscodingStreams.expectedsize(c::ZstandardDecompressorCodec, input::M
     try
         data = unsafe_wrap(Array, input.ptr, n)
         s = Zstandard.decompressed_size(data)
-        return s === nothing ? 4n : Int(s)
+        # the recorded sizes are untrusted: the hint only pre-sizes the
+        # buffer, which TranscodingStreams grows as needed
+        return s === nothing ? 4n : min(Int(s), Zstandard.Decoder.presize_limit(n))
     catch
         return 4n
     end
 end
 
 function TranscodingStreams.startproc(c::ZstandardDecompressorCodec, mode::Symbol, err::Error)
-    if !at_boundary(c.d)
+    # Keep the decoder (and its buffers) only at a clean frame boundary: mid-frame,
+    # or with decoded bytes that were never read, it belongs to an abandoned stream.
+    if !at_boundary(c.d) || available(c.d) > 0
         c.d = StreamDecoder(c.dict; max_window_size=c.max_window_size, magicless=c.magicless)
         c.frames_reported = 0
     end

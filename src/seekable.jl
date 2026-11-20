@@ -61,7 +61,8 @@ just a range, touching only the frames it overlaps. With `checksum=true` the
 seek table records an XXH64-based checksum of each frame's content, verified
 on decoding. Frames are compressed in parallel on up to `nthreads` tasks.
 Other keywords (`level`, `dict`, `window_log`, ...) are passed to
-[`compress`](@ref) for each frame.
+[`compress`](@ref) for each frame, except `prefix` and `magicless=true`,
+which [`decompress_range`](@ref) could not read back.
 """
 function compress_seekable(data::Union{AbstractVector{UInt8},AbstractString}; frame_size::Integer=1 << 20,
                            checksum::Bool=true, nthreads::Integer=1, kwargs...)
@@ -69,7 +70,10 @@ function compress_seekable(data::Union{AbstractVector{UInt8},AbstractString}; fr
     1 <= frame_size <= SEEKABLE_MAX_FRAME_SIZE ||
         throw(ArgumentError("frame_size must be in 1:$(SEEKABLE_MAX_FRAME_SIZE)"))
     nthreads < 1 && throw(ArgumentError("nthreads must be at least 1"))
-    haskey(kwargs, :magicless) && throw(ArgumentError("seekable archives cannot use magicless frames"))
+    get(kwargs, :magicless, false) && throw(ArgumentError("seekable archives cannot use magicless frames"))
+    # decompress_range takes a dictionary but no prefix: the archive would be unreadable
+    get(kwargs, :prefix, nothing) === nothing ||
+        throw(ArgumentError("seekable archives cannot use a prefix; use dict"))
     n = length(src)
     nf = cld(n, Int(frame_size))
     nf > SEEKABLE_MAX_FRAMES && throw(ArgumentError("too many frames; use a larger frame_size"))
@@ -121,6 +125,9 @@ function _parse_seek_table(total::Int, read_at)
     for i in 1:nf
         p = 9 + (i - 1) * esz
         csize[i] = Int(_le32(tab, p)); dsize[i] = Int(_le32(tab, p + 4))
+        # the writer's limit, also enforced on reading: sizes are untrusted
+        dsize[i] > SEEKABLE_MAX_FRAME_SIZE && zerr("seek table: frame $i claims $(dsize[i]) bytes, " *
+                                                   "more than the maximum frame size")
         checksum && (sums[i] = _le32(tab, p + 8))
         coff[i] = c; doff[i] = d
         c += csize[i]; d += dsize[i]
@@ -174,10 +181,11 @@ function decompress_range(src::Union{AbstractVector{UInt8},IO}, range::AbstractU
     lo = first(range) - 1; hi = last(range)           # 0-based [lo, hi)
     i = searchsortedlast(t.doff, lo)
     while i > 1 && t.dsize[i] == 0 && t.doff[i] == lo; i -= 1; end
-    out = Vector{UInt8}(undef, hi - lo)
+    # grown per decoded frame, not allocated from the (untrusted) seek table
+    out = UInt8[]
     pos = 1
     _with_state() do st
-        while pos <= length(out)
+        while pos <= hi - lo
             if t.dsize[i] > 0
                 raw = src isa IO ? (seek(src, t.coff[i]); read(src, t.csize[i])) :
                       Vector{UInt8}(view(src, firstindex(src) + t.coff[i]:firstindex(src) + t.coff[i] + t.csize[i] - 1))
@@ -185,7 +193,7 @@ function decompress_range(src::Union{AbstractVector{UInt8},IO}, range::AbstractU
                 content = _seekable_frame(raw, t, i, dict, st)
                 a = max(lo, t.doff[i]) - t.doff[i] + 1
                 b = min(hi, t.doff[i] + t.dsize[i]) - t.doff[i]
-                copyto!(out, pos, content, a, b - a + 1)
+                append!(out, view(content, a:b))
                 pos += b - a + 1
             end
             i += 1
