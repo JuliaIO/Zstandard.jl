@@ -7,22 +7,70 @@ const DICT_MAGIC_W = 0xEC30A437
     d == 6 ? Int(((load64(p) << 16) * PRIME6) >> (64 - f)) : Int((load64(p) * PRIME8) >> (64 - f))
 
 """
-Build dictionary content from `buf` (training samples concatenated; at least 8
-bytes of padding after `ntrain`) with the fastCover algorithm. Returns the
-content (most useful segments last).
+Dmer ids for fastCover: a hash of the `d` bytes at each position (2^f ids);
+`freqs[id]` counts every occurrence.
 """
-function fastcover_content(buf::Vector{UInt8}, ntrain::Int, capacity::Int, k::Int, d::Int, f::Int)
-    nbdmers = ntrain - max(d, 8) + 1
-    nbdmers < 1 && return UInt8[]
+function fastcover_ids(buf::Vector{UInt8}, nbdmers::Int, d::Int, f::Int)
+    ids = Vector{Int32}(undef, nbdmers)
     freqs = zeros(UInt32, 1 << f)
-    segfreqs = zeros(UInt16, 1 << f)
+    GC.@preserve buf begin
+        p = pointer(buf)
+        @inbounds for i in 0:nbdmers-1
+            h = fc_hash(p + i, f, d)
+            ids[i + 1] = h % Int32
+            freqs[h + 1] += 1
+        end
+    end
+    return ids, freqs
+end
+
+"""
+Dmer ids for COVER (ZDICT_trainFromBuffer_cover): one id per distinct dmer of
+`d` bytes (no hash collisions); `freqs[id]` counts the samples containing it,
+so a dmer repeated within one sample is not over-weighted.
+"""
+function cover_ids(buf::Vector{UInt8}, nbdmers::Int, d::Int, sample_ends::Vector{Int})
+    ids = Vector{Int32}(undef, nbdmers)
+    seen = Dict{UInt64,Int32}()
+    freqs = UInt32[]
+    last_sample = Int32[]          # last sample counted for each id
+    mask = d == 8 ? typemax(UInt64) : (UInt64(1) << (8d)) - 1
+    s = 1
+    GC.@preserve buf begin
+        p = pointer(buf)
+        @inbounds for i in 0:nbdmers-1
+            while i >= sample_ends[s]; s += 1; end
+            key = load64(p + i) & mask
+            id = get!(seen, key) do
+                push!(freqs, 0); push!(last_sample, 0)
+                Int32(length(freqs) - 1)
+            end
+            ids[i + 1] = id
+            if last_sample[id + 1] != s
+                last_sample[id + 1] = s
+                freqs[id + 1] += 1
+            end
+        end
+    end
+    return ids, freqs
+end
+
+"""
+Build dictionary content of at most `capacity` bytes from `buf` (training
+samples concatenated; at least 8 bytes of padding after them), selecting the
+best segments of `k` bytes epoch by epoch as fastCover / COVER do, given each
+position's dmer id and the ids' frequencies (consumed). Returns the content
+(most useful segments last).
+"""
+function select_segments(buf::Vector{UInt8}, ids::Vector{Int32}, freqs::Vector{UInt32},
+                         capacity::Int, k::Int, d::Int)
+    nbdmers = length(ids)
+    nbdmers < 1 && return UInt8[]
+    segfreqs = zeros(UInt16, length(freqs))
     dict = Vector{UInt8}(undef, capacity)
     tail = capacity
     GC.@preserve buf begin
         p = pointer(buf)
-        @inbounds for i in 0:nbdmers-1
-            freqs[fc_hash(p + i, f, d) + 1] += 1
-        end
         # epochs (FASTCOVER_computeEpochs)
         num = max(1, capacity ÷ k)
         esize = nbdmers ÷ num
@@ -36,18 +84,18 @@ function fastcover_content(buf::Vector{UInt8}, ntrain::Int, capacity::Int, k::In
         epoch = 0
         @inbounds while tail > 0
             ebegin = epoch * esize
-            eend = ebegin + esize
+            eend = min(ebegin + esize, nbdmers)
             epoch = (epoch + 1) % num
             # select the best segment of the epoch (FASTCOVER_selectSegment)
             best_b = 0; best_e = 0; best_s = UInt64(0)
             ab = ebegin; ae = ebegin; as = UInt64(0)
             while ae < eend
-                idx = fc_hash(p + ae, f, d) + 1
+                idx = Int(ids[ae + 1]) + 1
                 segfreqs[idx] == 0 && (as += freqs[idx])
                 ae += 1
                 segfreqs[idx] += 1
                 if ae - ab == dmers_in_k + 1
-                    di = fc_hash(p + ab, f, d) + 1
+                    di = Int(ids[ab + 1]) + 1
                     segfreqs[di] -= 1
                     segfreqs[di] == 0 && (as -= freqs[di])
                     ab += 1
@@ -56,12 +104,12 @@ function fastcover_content(buf::Vector{UInt8}, ntrain::Int, capacity::Int, k::In
                     best_b = ab; best_e = ae; best_s = as
                 end
             end
-            while ab < eend
-                segfreqs[fc_hash(p + ab, f, d) + 1] -= 1
+            while ab < ae
+                segfreqs[Int(ids[ab + 1]) + 1] -= 1
                 ab += 1
             end
             for q in best_b:best_e-1
-                freqs[fc_hash(p + q, f, d) + 1] = 0
+                freqs[Int(ids[q + 1]) + 1] = 0
             end
             if best_s == 0
                 zero_run += 1
@@ -76,6 +124,17 @@ function fastcover_content(buf::Vector{UInt8}, ntrain::Int, capacity::Int, k::In
         end
     end
     return dict[tail+1:end]
+end
+
+"""
+Build dictionary content from `buf` (training samples concatenated; at least
+8 bytes of padding after `ntrain`) with the fastCover algorithm.
+"""
+function fastcover_content(buf::Vector{UInt8}, ntrain::Int, capacity::Int, k::Int, d::Int, f::Int)
+    nbdmers = ntrain - max(d, 8) + 1
+    nbdmers < 1 && return UInt8[]
+    ids, freqs = fastcover_ids(buf, nbdmers, d, f)
+    return select_segments(buf, ids, freqs, capacity, k, d)
 end
 
 """Parse `sample` with `content` as history and accumulate sequence statistics."""
@@ -184,21 +243,34 @@ function finalize_dictionary(content::AbstractVector{UInt8}, samples::AbstractVe
 end
 
 """
-    train_dictionary(samples; dict_size=112640, level=3, k=nothing, d=8, f=20) -> Vector{UInt8}
+    train_dictionary(samples; dict_size=112640, level=3, algorithm=:fastcover,
+                     k=nothing, d=nothing, steps=8, f=20, nthreads=Threads.nthreads()) -> Vector{UInt8}
 
 Train a formatted Zstandard dictionary from `samples` (a vector of byte
-vectors) with the fastCover algorithm and entropy finalization, as
-`zstd --train`. When `k` (segment size) is not given, several values are
-tried and scored by compressing a held-out quarter of the samples.
-dmers of `d` bytes are hashed into `2^f` buckets (`f` in 1:31).
-Use the result with `parse_dictionary`.
+vectors), as `zstd --train`: dictionary content is built from the most
+frequent segments of the samples, then entropy tables are added
+([`finalize_dictionary`](@ref)). Use the result with `parse_dictionary`.
+
+`algorithm=:fastcover` (libzstd's default) counts hashed dmers of `d` bytes
+(`2^f` buckets, `f` in 1:31); `algorithm=:cover` counts each distinct dmer exactly, once per
+sample (`ZDICT_trainFromBuffer_cover`; slower, sometimes better).
+Parameters not given are optimized, as `ZDICT_optimizeTrainFromBuffer_*`:
+segment sizes `k` from 50 to 2000 in `steps` steps and dmer sizes `d` of 6
+and 8 are each tried by compressing a held-out quarter of the samples,
+in parallel on up to `nthreads` tasks (the result does not depend on it).
 """
 function train_dictionary(samples::AbstractVector{<:AbstractVector{UInt8}}; dict_size::Integer=112640,
-                          level::Integer=3, k::Union{Nothing,Integer}=nothing, d::Integer=8, f::Integer=20)
-    d in (6, 8) || throw(ArgumentError("d must be 6 or 8"))
-    # as libzstd: 0 < f <= 31, and d <= k
+                          level::Integer=3, algorithm::Symbol=:fastcover,
+                          k::Union{Nothing,Integer}=nothing, d::Union{Nothing,Integer}=nothing,
+                          steps::Integer=8, f::Integer=20, nthreads::Integer=Threads.nthreads())
+    algorithm in (:fastcover, :cover) || throw(ArgumentError("algorithm must be :fastcover or :cover"))
+    d === nothing || d in (6, 8) || throw(ArgumentError("d must be 6 or 8"))
+    # as libzstd: 0 < f <= 31 (dmer ids are Int32), and d <= k
     1 <= f <= 31 || throw(ArgumentError("f must be in 1:31, got $f"))
-    k === nothing || k >= d || throw(ArgumentError("k must be at least d ($d), got $k"))
+    k === nothing || k >= (d === nothing ? 6 : d) ||
+        throw(ArgumentError("k must be at least d ($(d === nothing ? 6 : d)), got $k"))
+    steps >= 1 || throw(ArgumentError("steps must be at least 1"))
+    nthreads >= 1 || throw(ArgumentError("nthreads must be at least 1"))
     ns = length(samples)
     ns == 0 && throw(ArgumentError("no samples"))
     total = sum(length, samples)
@@ -208,32 +280,48 @@ function train_dictionary(samples::AbstractVector{<:AbstractVector{UInt8}}; dict
     test = ns >= 4 ? samples[ntrain_s+1:end] : samples
     ntrain = sum(length, train)
     buf = Vector{UInt8}(undef, ntrain + 8)
+    ends = Int[]
     pos = 1
     for smp in train
         copyto!(buf, pos, smp, firstindex(smp), length(smp)); pos += length(smp)
+        push!(ends, pos - 1)
     end
     fill!(view(buf, ntrain+1:ntrain+8), 0x00)
     cap = Int(dict_size)
-    ks = k === nothing ? (50, 537, 1024, 1511, 1998) : (Int(k),)
-    best = UInt8[]
-    best_size = typemax(Int)
-    cc = CompressionContext()
-    for kk in ks
-        kk > cap && continue
-        content = fastcover_content(buf, ntrain, cap, kk, Int(d), Int(f))
-        length(content) < 8 && continue
-        if length(ks) == 1
-            best = content; break
-        end
+    ks = k === nothing ? unique(round.(Int, range(50, 2000; length=Int(steps) + 1))) : [Int(k)]
+    ds = d === nothing ? [8, 6] : [Int(d)]
+    single = length(ks) == 1 && length(ds) == 1
+    # dmer ids for each d (shared by all k)
+    idsets = Dict{Int,Tuple{Vector{Int32},Vector{UInt32}}}()
+    for dd in ds
+        nb = ntrain - max(dd, 8) + 1
+        nb < 1 && continue
+        idsets[dd] = algorithm == :cover ? cover_ids(buf, nb, dd, push!(copy(ends), typemax(Int))) :
+                                           fastcover_ids(buf, nb, dd, Int(f))
+    end
+    cands = [(kk, dd) for dd in ds for kk in ks if kk <= cap && kk >= dd && haskey(idsets, dd)]
+    isempty(cands) && throw(ArgumentError("could not build a dictionary from these samples"))
+    function trial(c)
+        kk, dd = c
+        ids, freqs = idsets[dd]
+        content = select_segments(buf, ids, copy(freqs), cap, kk, dd)
+        length(content) < 8 && return (typemax(Int), content)
+        single && return (0, content)
         rd = ZstdDictionary(content)
+        cc = CompressionContext()
         sz = 0
         for smp in test
             sz += length(compress_frame!(cc, smp, level; dict=rd))
         end
-        if sz < best_size
-            best_size = sz; best = content
-        end
+        return (sz, content)
     end
-    isempty(best) && throw(ArgumentError("could not build a dictionary from these samples"))
-    return finalize_dictionary(best, samples; level, dict_size=cap)
+    results = if nthreads > 1 && length(cands) > 1
+        sem = Base.Semaphore(Int(nthreads))
+        fetch.([Threads.@spawn Base.acquire(() -> trial(c), sem) for c in cands])
+    else
+        map(trial, cands)
+    end
+    best = argmin(first.(results))         # first of equal scores: independent of nthreads
+    first(results[best]) == typemax(Int) && throw(ArgumentError("could not build a dictionary from these samples"))
+    return finalize_dictionary(last(results[best]), samples; level, dict_size=cap)
 end

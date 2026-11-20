@@ -25,7 +25,7 @@ function main()
     @printf("%-12s %5s | %8s %8s | %9s %9s | %8s\n", "Dataset", "level", "ratio jl", "ratio C", "MB/s jl", "MB/s C", "slowdown")
     println("-"^84)
     for (name, data) in (("text 4MB", text), ("binary", bin))
-        for lvl in (1, 3, 6, 9, 16, 19)
+        for lvl in (-5, 1, 3, 6, 9, 13, 16, 19)
             cj = compress(data; level=lvl)
             @assert transcode(ZstdDecompressor, cj) == data
             cc = transcode(ZstdCompressor(level=lvl), data)

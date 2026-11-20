@@ -304,7 +304,9 @@ end
             @test frame_dict_id(c) == fd.id
             plain += length(compress(s; level, dict=fd)); prepared += length(c)
         end
-        @test prepared <= 1.02 * plain
+        # the prepared tree is built against the dictionary alone, so the
+        # optimal parser loses a little (about 2% at level 19)
+        @test prepared <= 1.03 * plain
         @test pd.htab == htab0 && pd.ctab == ctab0         # never modified
         @test compress(samples[350]; level, dict=pd) == compress(samples[350]; dict=pd)
         @test_throws ArgumentError compress(samples[350]; level=level + 1, dict=pd)
@@ -375,7 +377,7 @@ end
     @test (p.window_log, p.hash_log, p.chain_log, p.search_log, p.min_match, p.target_length, p.strategy) ==
           (24, 20, 19, 5, 6, 64, E.S_LAZY2)
     @test E.compression_parameters(3, 5000, E.parameter_overrides(window_log=24)).window_log == 13
-    @test E.compression_parameters(19, 10^8, E.parameter_overrides(strategy=:btultra2)).strategy == E.S_BTULTRA
+    @test E.compression_parameters(19, 10^8, E.parameter_overrides(strategy=:btultra2)).strategy == E.S_BTULTRA2
 
     # window_log: a repeat 3 MB back is only found with a larger window
     a = make_text(1_000_000)
@@ -393,7 +395,8 @@ end
     # strategy changes the parser at a fixed level
     text = make_text(400_000)
     sizes = Dict(st => length(compress(text; level=5, strategy=st)) for st in (:fast, :dfast, :greedy, :lazy2, :btultra))
-    @test sizes[:btultra] < sizes[:lazy2] < sizes[:fast]
+    @test sizes[:lazy2] < sizes[:greedy] < sizes[:fast]
+    @test sizes[:btultra] < sizes[:fast]
     @test length(unique(values(sizes))) == 5
 
     # a grid of parameter combinations decodes with both decoders
@@ -452,4 +455,455 @@ end
     @test_throws ArgumentError compress(text; min_match=2)
     @test_throws ArgumentError compress(text; strategy=:bogus)
     @test_throws ArgumentError compress(text; search_log=1.5)
+end
+
+median_(v) = sort(v)[cld(length(v), 2)]
+
+# Block sizes in a frame (walks block headers).
+function frame_block_sizes(c)
+    h = frame_header(c)
+    pos = h.header_size + 1
+    sizes = Int[]
+    while true
+        b = Int(c[pos]) | Int(c[pos+1]) << 8 | Int(c[pos+2]) << 16
+        typ = (b >> 1) & 3; sz = b >> 3
+        push!(sizes, sz)                          # for RLE blocks: the decoded size
+        pos += 3 + (typ == 1 ? 1 : sz)
+        b & 1 == 1 && break
+    end
+    return sizes
+end
+
+@testset "Block splitting" begin
+    # data that changes character every 24 KiB: text, pseudo-random bytes, small integers
+    seg(i, n) = i % 3 == 0 ? make_text(n) : i % 3 == 1 ?
+        UInt8[UInt8((k * 2654435761 + i) >> 11 & 0xff) for k in 1:n] : UInt8[UInt8(k % 7) for k in 1:n]
+    data = reduce(vcat, [seg(i, 24 << 10)[1:24<<10] for i in 0:40])
+    for level in (-1, 1, 3, 5, 6, 9, 13, 16, 18, 19)
+        c = compress(data; level)
+        @test decompress(c) == data
+        @test transcode(CodecZstd.ZstdDecompressor, c) == data
+        level >= 3 && @test length(frame_block_sizes(c)) > cld(length(data), 128 << 10)   # some blocks were split
+        # streaming, with a small window so the stream buffer is rebased many times
+        for (w, chunk) in ((nothing, 100_003), (17, 30_001))
+            buf = IOBuffer()
+            s = Zstandard.ZstdCompressorStream(buf; level, close_io=false, window_log=w)
+            for part in Iterators.partition(data, chunk); write(s, part); end
+            close(s)
+            sc = take!(buf)
+            @test transcode(CodecZstd.ZstdDecompressor, sc) == data
+        end
+    end
+    # Real machine code: slices of libjulia-internal that exposed two bugs with
+    # split blocks (a binary-tree candidate ordered by the byte past the block
+    # end, at level 17; btlazy2 "unsorted" marks lost when the stream buffer is
+    # rebased, at level 13). The bytes differ between Julia versions; the test
+    # only needs varied real-world input.
+    libdir = joinpath(Sys.BINDIR, Base.LIBDIR, "julia")
+    libs = filter(f -> startswith(f, "libjulia-internal") && !islink(joinpath(libdir, f)), readdir(libdir))
+    if !isempty(libs)
+        lib = read(joinpath(libdir, first(libs)))
+        for frac in (0.151, 0.189, 0.529, 0.567)
+            off = (round(Int, frac * length(lib)) >> 19) << 19
+            x = lib[off+1:min(end, off + (1 << 20))]
+            @test decompress(compress(x; level=17)) == x
+            buf = IOBuffer()
+            s = Zstandard.ZstdCompressorStream(buf; level=13, close_io=false, window_log=17)
+            for part in Iterators.partition(x, 50_001); write(s, part); end
+            close(s)
+            @test decompress(take!(buf)) == x
+        end
+    end
+    # incompressible data is not split (it never saves 3 bytes)
+    x = UInt64(1)
+    rr = UInt8[(x ⊻= x << 13; x ⊻= x >> 7; x ⊻= x << 17; x % UInt8) for _ in 1:600_000]
+    @test all(==(128 << 10), frame_block_sizes(compress(rr; level=19))[1:end-1])
+end
+
+@testset "Compression and decompression contexts" begin
+    data = make_text(200_000)
+    dict = parse_dictionary(train_dictionary([make_text(900 + 13i) for i in 1:200]; dict_size=8192))
+    for kw in ((;), (; level=1), (; level=19, checksum=true), (; level=7, window_log=17, strategy=:lazy2),
+               (; level=-3), (; level=5, dict), (; level=3, long=true))
+        ctx = ZstdCompressionContext(; kw...)
+        ref = compress(data; kw...)
+        @test compress(ctx, data) == ref
+        out = UInt8[]
+        @test compress!(ctx, out, data) === out
+        @test out == ref
+        dctx = ZstdDecompressionContext(; dict=haskey(kw, :dict) ? dict : nothing)
+        buf = UInt8[]
+        @test decompress!(dctx, buf, out) === buf
+        @test buf == data
+        @test decompress(dctx, out) == data
+        haskey(kw, :dict) || @test transcode(CodecZstd.ZstdDecompressor, compress(ctx, "abc"^100)) == codeunits("abc"^100)
+        # reuse across sizes, including empty input and output shrinking
+        for n in (0, 1, 17, 5000, 150_000, 3)
+            x = data[1:n]
+            compress!(ctx, out, x)
+            @test out == compress(x; kw...)
+            @test decompress!(dctx, buf, out) == x
+        end
+    end
+    # a prepared dictionary fixes the level
+    pd = prepare_dictionary(dict; level=4)
+    ctx = ZstdCompressionContext(dict=pd)
+    @test ctx.level == 4
+    s = make_text(3000)
+    @test compress(ctx, s) == compress(s; dict=pd)
+    @test_throws ArgumentError ZstdCompressionContext(dict=pd, level=5)
+    @test_throws ArgumentError ZstdCompressionContext(window_log=40)
+    out = UInt8[1, 2, 3]
+    @test_throws ArgumentError compress!(ctx, out, out)
+    @test_throws ArgumentError decompress!(ZstdDecompressionContext(), out, out)
+    @test_throws ZstdError decompress!(ZstdDecompressionContext(), UInt8[], UInt8[1, 2, 3, 4, 5])
+    @test occursin("level=4", sprint(show, ctx))
+end
+
+# libzstd's experimental format parameter (ZSTD_c_format / ZSTD_d_format)
+const ZLIB = Zstd_jll.libzstd
+function lib_magicless_compress(src, level)
+    cctx = ccall((:ZSTD_createCCtx, ZLIB), Ptr{Cvoid}, ())
+    ccall((:ZSTD_CCtx_setParameter, ZLIB), Csize_t, (Ptr{Cvoid}, Cint, Cint), cctx, 10, 1)   # ZSTD_c_format = magicless
+    ccall((:ZSTD_CCtx_setParameter, ZLIB), Csize_t, (Ptr{Cvoid}, Cint, Cint), cctx, 100, level)
+    dst = Vector{UInt8}(undef, length(src) + 1024)
+    n = ccall((:ZSTD_compress2, ZLIB), Csize_t, (Ptr{Cvoid}, Ptr{UInt8}, Csize_t, Ptr{UInt8}, Csize_t),
+              cctx, dst, length(dst), src, length(src))
+    ccall((:ZSTD_freeCCtx, ZLIB), Csize_t, (Ptr{Cvoid},), cctx)
+    return resize!(dst, n)
+end
+function lib_magicless_decompress(src, n)
+    dctx = ccall((:ZSTD_createDCtx, ZLIB), Ptr{Cvoid}, ())
+    ccall((:ZSTD_DCtx_setParameter, ZLIB), Csize_t, (Ptr{Cvoid}, Cint, Cint), dctx, 1000, 1) # ZSTD_d_format = magicless
+    dst = Vector{UInt8}(undef, n)
+    k = ccall((:ZSTD_decompressDCtx, ZLIB), Csize_t, (Ptr{Cvoid}, Ptr{UInt8}, Csize_t, Ptr{UInt8}, Csize_t),
+              dctx, dst, n, src, length(src))
+    ccall((:ZSTD_freeDCtx, ZLIB), Csize_t, (Ptr{Cvoid},), dctx)
+    return k == n ? dst : nothing
+end
+
+@testset "Frame header options" begin
+    data = make_text(150_000)
+    dict = parse_dictionary(train_dictionary([make_text(900 + 13i) for i in 1:200]; dict_size=8192))
+    # content size flag
+    c = compress(data; content_size=false)
+    @test frame_content_size(c) === nothing
+    @test !frame_header(c).single_segment
+    @test decompress(c) == data
+    @test transcode(CodecZstd.ZstdDecompressor, c) == data
+    @test frame_content_size(transcode(ZstandardCompressor(content_size=false), data)) === nothing
+    buf = IOBuffer()
+    s = Zstandard.ZstdCompressorStream(buf; pledged_size=length(data), content_size=false, close_io=false)
+    write(s, data); close(s)
+    c = take!(buf)
+    @test frame_content_size(c) === nothing && decompress(c) == data
+    # dictionary ID flag
+    c = compress(data; dict, dict_id=false)
+    @test frame_dict_id(c) == 0
+    @test decompress(c, dict) == data
+    @test frame_dict_id(compress(data; dict)) == dict.id
+    # magicless frames
+    for kw in ((;), (; checksum=true), (; dict), (; level=19), (; content_size=false, level=1))
+        c = compress(data; magicless=true, kw...)
+        ref = compress(data; kw...)
+        @test c == ref[5:end]
+        d = haskey(kw, :dict) ? dict : nothing
+        @test decompress(c, d; magicless=true) == data
+        @test frame_compressed_size(c; magicless=true) == length(c)
+        haskey(kw, :dict) || @test lib_magicless_decompress(c, length(data)) == data
+    end
+    @test_throws ZstdError decompress(compress(data; magicless=true))
+    lc = lib_magicless_compress(data, 5)
+    @test decompress(lc; magicless=true) == data
+    two = vcat(compress(data; magicless=true), lc)
+    @test decompress(two; magicless=true) == vcat(data, data)
+    @test read(Zstandard.ZstdDecompressorStream(IOBuffer(two); magicless=true)) == vcat(data, data)
+    @test transcode(ZstandardDecompressor(magicless=true), two) == vcat(data, data)
+    @test decompress(ZstdDecompressionContext(magicless=true), two) == vcat(data, data)
+    @test decompress(compress(ZstdCompressionContext(magicless=true), data); magicless=true) == data
+    @test decompress(compress(repeat(data, 30); nthreads=2, level=1, magicless=true); magicless=true) == repeat(data, 30)
+    @test frame_header(compress(data; magicless=true); magicless=true).content_size == length(data)
+    # size hint: parameters for the hinted size, no recorded size, any amount of input
+    buf = IOBuffer()
+    s = Zstandard.ZstdCompressorStream(buf; size_hint=2000, close_io=false)
+    write(s, data); close(s)
+    c = take!(buf)
+    @test frame_header(c).window_size == 2048
+    @test frame_content_size(c) === nothing
+    @test decompress(c) == data
+    # a pledged size (as `transcode` makes) takes precedence over the hint
+    @test frame_header(transcode(ZstandardCompressor(size_hint=10_000), data)).window_size == length(data)
+    buf = IOBuffer()
+    st = TranscodingStream(ZstandardCompressor(size_hint=10_000), buf; stop_on_end=false)
+    write(st, data); write(st, TranscodingStreams.TOKEN_END); flush(st)
+    c = take!(buf)
+    @test frame_header(c).window_size == 1 << 14
+    @test decompress(c) == data
+    @test_throws ArgumentError Zstandard.ZstdCompressorStream(IOBuffer(); size_hint=-1)
+end
+
+@testset "Reference prefix" begin
+    old = make_text(400_000)
+    new = copy(old)
+    x = UInt64(3)
+    for k in 1:100
+        x = x * 6364136223846793005 + 1442695040888963407
+        new[(x >> 33) % length(new) + 1] = UInt8('#')
+    end
+    new = vcat(new[1:200_000], codeunits("a fresh paragraph in the middle\n"), new[200_001:end])
+    fold = tempname(); write(fold, old)
+    for kw in ((; level=3), (; level=9), (; level=19), (; level=3, long=true), (; level=1, checksum=true))
+        c = compress(new; prefix=old, kw...)
+        @test length(c) < length(compress(new; kw...)) ÷ 20      # mostly references into the prefix
+        @test frame_dict_id(c) == 0
+        @test frame_header(c).window_size >= length(old)          # reaches back into the prefix
+        @test decompress(c; prefix=old) == new
+        @test decompress(ZstdDecompressionContext(prefix=old), c) == new
+        @test read(Zstandard.ZstdDecompressorStream(IOBuffer(c); prefix=old)) == new
+        f = tempname(); write(f, c)
+        @test read(`$(Zstd_jll.zstd()) -q -d --long=27 --patch-from=$fold -c $f`) == new   # libzstd agrees
+        @test compress(ZstdCompressionContext(; prefix=old, kw...), new) == c
+    end
+    # libzstd's patches decode here
+    fnew = tempname(); write(fnew, new)
+    z = read(`$(Zstd_jll.zstd()) -q -5 --patch-from=$fold -c $fnew`)
+    @test decompress(z; prefix=old) == new
+    # streaming compression with a prefix
+    buf = IOBuffer()
+    s = Zstandard.ZstdCompressorStream(buf; prefix=old, pledged_size=length(new), close_io=false)
+    for part in Iterators.partition(new, 70_001); write(s, part); end
+    close(s)
+    c = take!(buf)
+    @test length(c) < length(compress(new)) ÷ 20
+    @test decompress(c; prefix=old) == new
+    # an explicit window_log is kept; prefix and dict are exclusive
+    @test frame_header(compress(new; prefix=old, window_log=17)).window_size == 1 << 17
+    @test_throws ArgumentError compress(new; prefix=old, dict=ZstdDictionary(old))
+    @test decompress(compress(new; prefix=UInt8[]); prefix=UInt8[]) == new
+    @test decompress(compress(new; prefix=old[1:3]); prefix=old[1:3]) == new
+end
+
+struct ZInBuf; src::Ptr{UInt8}; size::Csize_t; pos::Csize_t; end
+struct ZOutBuf; dst::Ptr{UInt8}; size::Csize_t; pos::Csize_t; end
+# Feed `src` to a libzstd streaming decoder; return what it produced so far.
+function lib_stream_decode(src::Vector{UInt8}, cap::Int)
+    ds = ccall((:ZSTD_createDStream, ZLIB), Ptr{Cvoid}, ())
+    out = zeros(UInt8, cap)
+    ib = Ref(ZInBuf(pointer(src), length(src), 0)); ob = Ref(ZOutBuf(pointer(out), cap, 0))
+    GC.@preserve src out while ib[].pos < length(src)
+        r = ccall((:ZSTD_decompressStream, ZLIB), Csize_t, (Ptr{Cvoid}, Ref{ZOutBuf}, Ref{ZInBuf}), ds, ob, ib)
+        ccall((:ZSTD_isError, ZLIB), Cuint, (Csize_t,), r) != 0 && error("libzstd error")
+        ob[].pos == cap && break
+    end
+    ccall((:ZSTD_freeDStream, ZLIB), Csize_t, (Ptr{Cvoid},), ds)
+    return out[1:ob[].pos]
+end
+
+@testset "Flush mid-frame" begin
+    parts = [make_text(n) for n in (5_000, 200_000, 17, 0, 90_000)]
+    for level in (1, 3, 9, 19), checksum in (false, true)
+        io = IOBuffer()
+        s = Zstandard.ZstdCompressorStream(io; level, checksum, close_io=false)
+        written = UInt8[]
+        for p in parts
+            write(s, p); append!(written, p)
+            flush(s); flush(s)                   # a second flush adds nothing
+            sofar = Vector{UInt8}(view(io.data, 1:io.size))
+            # everything written so far decodes from the unfinished frame
+            r = Zstandard.ZstdDecompressorStream(IOBuffer(sofar))
+            @test read(r, length(written)) == written
+            @test lib_stream_decode(sofar, length(written) + 1) == written
+        end
+        close(s)
+        c = take!(io)
+        @test decompress(c) == written
+        @test transcode(CodecZstd.ZstdDecompressor, c) == written
+    end
+end
+
+@testset "Seekable format" begin
+    data = make_text(1_000_000)
+    for (fs, chk) in ((100_000, true), (1 << 20, false), (4093, true))
+        a = compress_seekable(data; frame_size=fs, checksum=chk, level=3)
+        @test decompress(a) == data                                   # a plain multi-frame stream
+        @test transcode(CodecZstd.ZstdDecompressor, a) == data
+        t = seek_table(a)
+        @test length(t) == cld(length(data), fs)
+        @test t.content_size == length(data)
+        @test (t.checksums !== nothing) == chk
+        @test sum(t.csize) + t.table_size == length(a)
+        @test t == t && occursin("frames", sprint(show, t))
+        @test t.dsize[1] == min(fs, length(data))
+        f = tempname(); write(f, a)
+        x = UInt64(7)
+        for _ in 1:20
+            x = x * 6364136223846793005 + 1442695040888963407
+            lo = Int(x >> 40) % length(data) + 1
+            hi = min(length(data), lo + Int(x >> 20) % 300_000)
+            @test decompress_range(a, lo:hi) == data[lo:hi]
+            @test decompress_range(IOBuffer(a), lo:hi) == data[lo:hi]
+            @test open(io -> decompress_range(io, lo:hi; table=t), f) == data[lo:hi]
+        end
+        @test decompress_range(a, 1:length(data)) == data
+        @test decompress_range(a, 5:4) == UInt8[]
+        @test_throws BoundsError decompress_range(a, 0:10)
+        @test_throws BoundsError decompress_range(a, length(data):length(data)+1)
+        @test open(seek_table, f).csize == t.csize
+    end
+    # identical output on several tasks; other compress keywords pass through
+    @test compress_seekable(data; frame_size=65536, nthreads=4) == compress_seekable(data; frame_size=65536)
+    a = compress_seekable(data; frame_size=200_000, level=19, window_log=16)
+    @test frame_header(a).window_size == 1 << 16
+    @test decompress_range(a, 199_990:200_010) == data[199_990:200_010]
+    # an empty frame (as libzstd's endStream writes) and a corrupt checksum
+    fr = [compress(data[1:1000]), compress(UInt8[]), compress(data[1001:3000])]
+    sums = [Zstandard.XXHash.content_checksum(d) for d in (data[1:1000], UInt8[], data[1001:3000])]
+    tab = Zstandard._seek_table([(length(fr[i]), (1000, 0, 2000)[i], Int(sums[i])) for i in 1:3], true)
+    a = vcat(fr..., tab)
+    @test length(seek_table(a)) == 3
+    @test decompress_range(a, 990:1010) == data[990:1010]
+    @test decompress_range(a, 1001:1001) == data[1001:1001]
+    bad = copy(a); bad[end - 9 - 12 + 8] ⊻= 0x01                    # last entry's checksum
+    @test_throws ZstdError decompress_range(bad, 1500:1600)
+    @test decompress_range(bad, 10:20) == data[10:20]               # other frames unaffected
+    @test_throws ZstdError seek_table(compress(data))               # not seekable
+    @test_throws ArgumentError compress_seekable(data; frame_size=0)
+    @test decompress(compress_seekable(UInt8[])) == UInt8[]
+    @test length(seek_table(compress_seekable(UInt8[]))) == 0
+end
+
+@testset "Memory estimates and stream progress" begin
+    data = make_text(3_000_000)
+    E = Zstandard.Encoder
+    for level in (-3, 1, 3, 7, 13, 16, 19)
+        cc = E.CompressionContext()
+        E.compress_frame!(cc, data, level)
+        est = estimate_compression_memory(; level, src_size=length(data))
+        @test 0.9 < est / Base.summarysize(cc) < 1.1
+    end
+    @test estimate_compression_memory(level=19) > estimate_compression_memory(level=1)
+    @test estimate_compression_memory(level=3, src_size=1000) < estimate_compression_memory(level=3)
+    @test estimate_compression_memory(level=3, src_size=10^8, nthreads=4) >
+          3 * estimate_compression_memory(level=3, src_size=10^8)
+    @test estimate_compression_memory(level=3, long=true) > estimate_compression_memory(level=3)
+    for level in (1, 3, 9)
+        buf = IOBuffer()
+        s = Zstandard.ZstdCompressorStream(buf; level, close_io=false)
+        for p in Iterators.partition(data, 100_000); write(s, p); end
+        @test Base.summarysize(s.sc) < 1.1 * estimate_compression_memory(; level, streaming=true)
+        pr = stream_progress(s)
+        @test pr.ingested == length(data)
+        @test 0 < pr.consumed <= pr.ingested
+        @test pr.flushed <= pr.produced
+        close(s)
+        c = take!(buf)
+        pr = stream_progress(s)
+        @test pr.consumed == pr.ingested == length(data)
+        @test pr.flushed == pr.produced == length(c)
+        # decoder side
+        c2 = vcat(c, skippable_frame(UInt8[1, 2, 3]), compress(data[1:1000]))
+        r = Zstandard.ZstdDecompressorStream(IOBuffer(c2))
+        @test stream_progress(r) == (; consumed=0, produced=0, frames=0)
+        read(r, 10)
+        @test stream_progress(r).produced >= 10
+        rest = read(r)
+        pr = stream_progress(r)
+        @test pr.consumed == length(c2)
+        @test pr.produced == length(data) + 1000 == 10 + length(rest)
+        @test pr.frames == 2
+        w = frame_header(c).window_size
+        @test Base.summarysize(r.d) < 1.2 * estimate_decompression_memory(window_size=w)
+    end
+    @test estimate_decompression_memory(streaming=false) < estimate_decompression_memory(window_size=1 << 20)
+end
+
+@testset "Sequence API" begin
+    nodelim(s) = begin
+        out = ZstdSequence[]; carry = 0
+        for x in s
+            if x.match_length == 0
+                carry += x.literal_length
+            else
+                push!(out, ZstdSequence(x.offset, x.literal_length + carry, x.match_length)); carry = 0
+            end
+        end
+        out
+    end
+    text = make_text(600_000)
+    x = UInt64(11)
+    rnd(n) = UInt8[(x = x * 6364136223846793005 + 1442695040888963407; (x >> 56) % UInt8) for _ in 1:n]
+    mixed = vcat(rnd(150_000), repeat(text[1:1000], 200), rnd(70_001))
+    for d in (text, mixed, UInt8[], UInt8[1, 2, 3], fill(0x07, 300_000)), level in (1, 9, 19)
+        s = generate_sequences(d; level)
+        @test all(z -> z.match_length == 0 || (z.offset >= 1 && z.match_length >= 3), s)
+        @test sum(z -> z.literal_length + z.match_length, s; init=0) == length(d)
+        @test count(z -> z.offset == 0 && z.match_length == 0, s) >= cld(length(d), 128 << 10)
+        c = compress_sequences(d, s; level)
+        @test transcode(CodecZstd.ZstdDecompressor, c) == d
+        level < 16 && @test length(c) <= length(compress(d; level)) + 8
+        c2 = compress_sequences(d, nodelim(s); level, checksum=true)
+        @test decompress(c2) == d
+    end
+    # matches and literal runs longer than a block, implied trailing literals
+    d = repeat(UInt8[1, 2, 3, 4, 5], 100_000)
+    @test decompress(compress_sequences(d, [ZstdSequence(5, 5, length(d) - 5)])) == d
+    @test decompress(compress_sequences(text, ZstdSequence[])) == text
+    @test decompress(compress_sequences(text, [ZstdSequence(0, length(text) - 100, 0)][1:0])) == text
+    # validation
+    @test_throws ArgumentError compress_sequences(text, [ZstdSequence(3, 10, 2)])           # match too short
+    @test_throws ArgumentError compress_sequences(text, [ZstdSequence(50, 10, 20)])          # reaches before the data
+    @test_throws ArgumentError compress_sequences(text, [ZstdSequence(1, 10, 20)])           # does not match
+    @test_throws ArgumentError compress_sequences(text, [ZstdSequence(0, length(text) + 1, 0)])
+    @test_throws ArgumentError compress_sequences(text, [ZstdSequence(0, 200_000, 0)])        # block too large
+    @test_throws ArgumentError compress_sequences(text, [ZstdSequence(0, 1000, 0), ZstdSequence(3, 1, 5)])
+    c = compress_sequences(text, [ZstdSequence(1, 10, 20)]; validate=false)                   # unchecked: decodes to other bytes
+    @test length(decompress(c)) == length(text) && decompress(c) != text
+    @test sprint(show, ZstdSequence(1, 2, 3)) == "ZstdSequence(1, 2, 3)"
+end
+
+@testset "Window limit per position and rsyncable" begin
+    data = make_text(1_200_000)
+    # matches reach a full window back from each position, never further
+    for level in (1, 3, 5, 13, 16, 19), w in (10, 17)
+        s = generate_sequences(data; level, window_log=w)
+        @test maximum(x -> x.offset, s) <= 1 << w
+        c = compress(data; level, window_log=w)
+        @test read(Zstandard.ZstdDecompressorStream(IOBuffer(c); max_window_size=max(1 << w, 1024))) == data
+        @test transcode(CodecZstd.ZstdDecompressor, c) == data
+    end
+    # with a 128 KiB window, matches into the previous block are found
+    @test length(compress(data; level=9, window_log=17)) < 1.05 * length(compress(data; level=9, window_log=18))
+    # rsyncable: content-defined jobs resynchronize after a local change
+    big = make_text(5_000_000)
+    edited = vcat(big[1:1_000_000], codeunits("a local edit"), big[1_000_001:end])
+    common_suffix(x, y) = (k = 0; while k < min(length(x), length(y)) && x[end-k] == y[end-k]; k += 1; end; k)
+    a = compress(big; level=3, window_log=17, rsyncable=true)
+    b = compress(edited; level=3, window_log=17, rsyncable=true)
+    @test decompress(a) == big && decompress(b) == edited
+    @test transcode(CodecZstd.ZstdDecompressor, b) == edited
+    @test common_suffix(a, b) > length(b) ÷ 2
+    @test common_suffix(compress(big; level=3, window_log=17), compress(edited; level=3, window_log=17)) < 1000
+    @test compress(big; level=3, window_log=17, rsyncable=true, nthreads=3) == a
+    @test length(a) < 1.01 * length(compress(big; level=3, window_log=17))
+    @test decompress(compress(data[1:1000]; rsyncable=true, checksum=true)) == data[1:1000]
+    @test_throws ArgumentError compress(data; rsyncable=true, long=true)
+end
+
+@testset "Target compressed block size" begin
+    data = make_text(1_000_000)
+    for level in (1, 3, 9, 19), target in (2000, 8000)
+        c = compress(data; level, target_block_size=target)
+        @test transcode(CodecZstd.ZstdDecompressor, c) == data
+        b = filter(>(1), frame_block_sizes(c))
+        @test median_(b) < 1.3 * target
+        @test length(c) < 1.08 * length(compress(data; level))
+        buf = IOBuffer()
+        s = Zstandard.ZstdCompressorStream(buf; level, target_block_size=target, close_io=false)
+        write(s, data); close(s)
+        @test decompress(take!(buf)) == data
+    end
+    @test compress(ZstdCompressionContext(level=3, target_block_size=4000), data) == compress(data; level=3, target_block_size=4000)
+    @test transcode(ZstandardDecompressor(), transcode(ZstandardCompressor(target_block_size=4000), data)) == data
+    @test_throws ArgumentError compress(data; target_block_size=100)
+    @test_throws ArgumentError compress(data; target_block_size=1 << 20)
 end

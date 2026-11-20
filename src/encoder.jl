@@ -32,7 +32,7 @@ const MIN_MATCH = 3
 # Compression parameters (after ZSTD_defaultCParameters for large inputs)
 # ---------------------------------------------------------------------------
 
-@enum Strategy S_FAST S_DFAST S_GREEDY S_LAZY S_LAZY2 S_BTOPT S_BTULTRA
+@enum Strategy S_FAST S_DFAST S_GREEDY S_LAZY S_LAZY2 S_BTLAZY2 S_BTOPT S_BTULTRA S_BTULTRA2
 
 struct CParams
     window_log::Int
@@ -44,39 +44,121 @@ struct CParams
     strategy::Strategy
 end
 
-# window, chain, hash, search, minMatch, targetLength, strategy
-# Levels 13-15 use lazy2 (libzstd: btlazy2); 16-17 the optimal parser with
-# static-ish pricing (btopt), 18-22 the full optimal parser (btultra).
+# window, chain, hash, search, minMatch, targetLength, strategy: libzstd's
+# tables, one per input size class (ZSTD_defaultCParameters).
 # Greedy/lazy levels find matches with libzstd's row-based match finder (rows
-# of 2^clamp(searchLog, 4, 6) entries; chainLog is unused). The optimal parser
-# takes candidates from a hash chain rather than a binary tree; search depth is
-# capped where deeper chains stopped paying for themselves on real data.
-# For the optimal parser, targetLength is the "sufficient" match length.
+# of 2^clamp(searchLog, 4, 6) entries; chainLog is unused); btlazy2 and the
+# optimal parser use a binary tree of 2^(chainLog-1) positions. For the optimal
+# parser, targetLength is the "sufficient" match length.
+# libzstd 1.5.7 parameters for inputs over 256 KiB (or of unknown size)
 const LEVEL_TABLE = CParams[
-    CParams(19, 12, 13, 1, 6, 1, S_FAST),     # base for negative levels
-    CParams(19, 13, 14, 1, 7, 0, S_FAST),     # 1
-    CParams(20, 15, 16, 1, 6, 0, S_FAST),     # 2
-    CParams(21, 16, 17, 1, 5, 0, S_DFAST),    # 3
-    CParams(21, 18, 18, 1, 5, 0, S_DFAST),    # 4
-    CParams(21, 18, 19, 3, 5, 2, S_GREEDY),   # 5
-    CParams(21, 18, 19, 3, 5, 4, S_LAZY),     # 6
-    CParams(21, 19, 20, 4, 5, 8, S_LAZY),     # 7
-    CParams(21, 19, 20, 4, 5, 16, S_LAZY2),   # 8
-    CParams(22, 20, 21, 4, 5, 16, S_LAZY2),   # 9
-    CParams(22, 21, 22, 5, 5, 16, S_LAZY2),   # 10
-    CParams(22, 21, 22, 6, 5, 16, S_LAZY2),   # 11
-    CParams(22, 22, 23, 6, 5, 32, S_LAZY2),   # 12
-    CParams(22, 22, 22, 6, 5, 32, S_LAZY2),   # 13
-    CParams(22, 22, 23, 6, 5, 48, S_LAZY2),   # 14
-    CParams(22, 23, 23, 7, 5, 64, S_LAZY2),   # 15
-    CParams(22, 22, 22, 5, 4, 48, S_BTOPT),   # 16
-    CParams(23, 23, 22, 6, 4, 64, S_BTOPT),   # 17
-    CParams(23, 23, 22, 6, 3, 64, S_BTULTRA), # 18
-    CParams(23, 24, 22, 7, 3, 256, S_BTULTRA),# 19
-    CParams(25, 25, 23, 7, 3, 256, S_BTULTRA),# 20
-    CParams(26, 26, 24, 8, 3, 512, S_BTULTRA),# 21
-    CParams(27, 27, 25, 9, 3, 999, S_BTULTRA),# 22
+    CParams(19, 12, 13, 1, 6, 1, S_FAST),       # base for negative levels
+    CParams(19, 13, 14, 1, 7, 0, S_FAST),       # level  1
+    CParams(20, 15, 16, 1, 6, 0, S_FAST),       # level  2
+    CParams(21, 16, 17, 1, 5, 0, S_DFAST),      # level  3
+    CParams(21, 18, 18, 1, 5, 0, S_DFAST),      # level  4
+    CParams(21, 18, 19, 3, 5, 2, S_GREEDY),     # level  5
+    CParams(21, 18, 19, 3, 5, 4, S_LAZY),       # level  6
+    CParams(21, 19, 20, 4, 5, 8, S_LAZY),       # level  7
+    CParams(21, 19, 20, 4, 5, 16, S_LAZY2),     # level  8
+    CParams(22, 20, 21, 4, 5, 16, S_LAZY2),     # level  9
+    CParams(22, 21, 22, 5, 5, 16, S_LAZY2),     # level 10
+    CParams(22, 21, 22, 6, 5, 16, S_LAZY2),     # level 11
+    CParams(22, 22, 23, 6, 5, 32, S_LAZY2),     # level 12
+    CParams(22, 22, 22, 4, 5, 32, S_BTLAZY2),   # level 13
+    CParams(22, 22, 23, 5, 5, 32, S_BTLAZY2),   # level 14
+    CParams(22, 23, 23, 6, 5, 32, S_BTLAZY2),   # level 15
+    CParams(22, 22, 22, 5, 5, 48, S_BTOPT),     # level 16
+    CParams(23, 23, 22, 5, 4, 64, S_BTOPT),     # level 17
+    CParams(23, 23, 22, 6, 3, 64, S_BTULTRA),   # level 18
+    CParams(23, 24, 22, 7, 3, 256, S_BTULTRA2), # level 19
+    CParams(25, 25, 23, 7, 3, 256, S_BTULTRA2), # level 20
+    CParams(26, 26, 24, 7, 3, 512, S_BTULTRA2), # level 21
+    CParams(27, 27, 25, 9, 3, 999, S_BTULTRA2), # level 22
 ]
+
+# libzstd 1.5.7 parameters for inputs up to 256 KiB
+const LEVEL_TABLE_256K = CParams[
+    CParams(18, 12, 13, 1, 5, 1, S_FAST),       # base for negative levels
+    CParams(18, 13, 14, 1, 6, 0, S_FAST),       # level  1
+    CParams(18, 14, 14, 1, 5, 0, S_DFAST),      # level  2
+    CParams(18, 16, 16, 1, 4, 0, S_DFAST),      # level  3
+    CParams(18, 16, 17, 3, 5, 2, S_GREEDY),     # level  4
+    CParams(18, 17, 18, 5, 5, 2, S_GREEDY),     # level  5
+    CParams(18, 18, 19, 3, 5, 4, S_LAZY),       # level  6
+    CParams(18, 18, 19, 4, 4, 4, S_LAZY),       # level  7
+    CParams(18, 18, 19, 4, 4, 8, S_LAZY2),      # level  8
+    CParams(18, 18, 19, 5, 4, 8, S_LAZY2),      # level  9
+    CParams(18, 18, 19, 6, 4, 8, S_LAZY2),      # level 10
+    CParams(18, 18, 19, 5, 4, 12, S_BTLAZY2),   # level 11
+    CParams(18, 19, 19, 7, 4, 12, S_BTLAZY2),   # level 12
+    CParams(18, 18, 19, 4, 4, 16, S_BTOPT),     # level 13
+    CParams(18, 18, 19, 4, 3, 32, S_BTOPT),     # level 14
+    CParams(18, 18, 19, 6, 3, 128, S_BTOPT),    # level 15
+    CParams(18, 19, 19, 6, 3, 128, S_BTULTRA),  # level 16
+    CParams(18, 19, 19, 8, 3, 256, S_BTULTRA),  # level 17
+    CParams(18, 19, 19, 6, 3, 128, S_BTULTRA2), # level 18
+    CParams(18, 19, 19, 8, 3, 256, S_BTULTRA2), # level 19
+    CParams(18, 19, 19, 10, 3, 512, S_BTULTRA2),# level 20
+    CParams(18, 19, 19, 12, 3, 512, S_BTULTRA2),# level 21
+    CParams(18, 19, 19, 13, 3, 999, S_BTULTRA2),# level 22
+]
+
+# libzstd 1.5.7 parameters for inputs up to 128 KiB
+const LEVEL_TABLE_128K = CParams[
+    CParams(17, 12, 12, 1, 5, 1, S_FAST),       # base for negative levels
+    CParams(17, 12, 13, 1, 6, 0, S_FAST),       # level  1
+    CParams(17, 13, 15, 1, 5, 0, S_FAST),       # level  2
+    CParams(17, 15, 16, 2, 5, 0, S_DFAST),      # level  3
+    CParams(17, 17, 17, 2, 4, 0, S_DFAST),      # level  4
+    CParams(17, 16, 17, 3, 4, 2, S_GREEDY),     # level  5
+    CParams(17, 16, 17, 3, 4, 4, S_LAZY),       # level  6
+    CParams(17, 16, 17, 3, 4, 8, S_LAZY2),      # level  7
+    CParams(17, 16, 17, 4, 4, 8, S_LAZY2),      # level  8
+    CParams(17, 16, 17, 5, 4, 8, S_LAZY2),      # level  9
+    CParams(17, 16, 17, 6, 4, 8, S_LAZY2),      # level 10
+    CParams(17, 17, 17, 5, 4, 8, S_BTLAZY2),    # level 11
+    CParams(17, 18, 17, 7, 4, 12, S_BTLAZY2),   # level 12
+    CParams(17, 18, 17, 3, 4, 12, S_BTOPT),     # level 13
+    CParams(17, 18, 17, 4, 3, 32, S_BTOPT),     # level 14
+    CParams(17, 18, 17, 6, 3, 256, S_BTOPT),    # level 15
+    CParams(17, 18, 17, 6, 3, 128, S_BTULTRA),  # level 16
+    CParams(17, 18, 17, 8, 3, 256, S_BTULTRA),  # level 17
+    CParams(17, 18, 17, 10, 3, 512, S_BTULTRA), # level 18
+    CParams(17, 18, 17, 5, 3, 256, S_BTULTRA2), # level 19
+    CParams(17, 18, 17, 7, 3, 512, S_BTULTRA2), # level 20
+    CParams(17, 18, 17, 9, 3, 512, S_BTULTRA2), # level 21
+    CParams(17, 18, 17, 11, 3, 999, S_BTULTRA2),# level 22
+]
+
+# libzstd 1.5.7 parameters for inputs up to 16 KiB
+const LEVEL_TABLE_16K = CParams[
+    CParams(14, 12, 13, 1, 5, 1, S_FAST),       # base for negative levels
+    CParams(14, 14, 15, 1, 5, 0, S_FAST),       # level  1
+    CParams(14, 14, 15, 1, 4, 0, S_FAST),       # level  2
+    CParams(14, 14, 15, 2, 4, 0, S_DFAST),      # level  3
+    CParams(14, 14, 14, 4, 4, 2, S_GREEDY),     # level  4
+    CParams(14, 14, 14, 3, 4, 4, S_LAZY),       # level  5
+    CParams(14, 14, 14, 4, 4, 8, S_LAZY2),      # level  6
+    CParams(14, 14, 14, 6, 4, 8, S_LAZY2),      # level  7
+    CParams(14, 14, 14, 8, 4, 8, S_LAZY2),      # level  8
+    CParams(14, 15, 14, 5, 4, 8, S_BTLAZY2),    # level  9
+    CParams(14, 15, 14, 9, 4, 8, S_BTLAZY2),    # level 10
+    CParams(14, 15, 14, 3, 4, 12, S_BTOPT),     # level 11
+    CParams(14, 15, 14, 4, 3, 24, S_BTOPT),     # level 12
+    CParams(14, 15, 14, 5, 3, 32, S_BTULTRA),   # level 13
+    CParams(14, 15, 15, 6, 3, 64, S_BTULTRA),   # level 14
+    CParams(14, 15, 15, 7, 3, 256, S_BTULTRA),  # level 15
+    CParams(14, 15, 15, 5, 3, 48, S_BTULTRA2),  # level 16
+    CParams(14, 15, 15, 6, 3, 128, S_BTULTRA2), # level 17
+    CParams(14, 15, 15, 7, 3, 256, S_BTULTRA2), # level 18
+    CParams(14, 15, 15, 8, 3, 256, S_BTULTRA2), # level 19
+    CParams(14, 15, 15, 8, 3, 512, S_BTULTRA2), # level 20
+    CParams(14, 15, 15, 9, 3, 512, S_BTULTRA2), # level 21
+    CParams(14, 15, 15, 10, 3, 999, S_BTULTRA2),# level 22
+]
+
+const LEVEL_TABLES = (LEVEL_TABLE, LEVEL_TABLE_256K, LEVEL_TABLE_128K, LEVEL_TABLE_16K)
 
 """
     ParameterOverrides
@@ -96,11 +178,55 @@ end
 
 const NO_OVERRIDES = ParameterOverrides(-1, -1, -1, -1, -1, -1, -1)
 
-# libzstd strategy names; btlazy2 and btultra2 are not implemented and use
-# the nearest strategy here.
+# Reference prefix (libzstd's ZSTD_CCtx_refPrefix): raw content serving as
+# history, recorded in the frame by nothing (no dictionary ID). As
+# `zstd --patch-from`, the window is widened (up to 128 MiB) to reach back into
+# the whole prefix, unless `window_log` is given.
+function prefix_dict(prefix, dict)
+    prefix === nothing && return dict
+    dict === nothing || throw(ArgumentError("prefix and dict cannot be combined"))
+    return ZstdDictionary(prefix)
+end
+
+function prefix_params(params::ParameterOverrides, prefix, level, n::Integer)
+    (prefix === nothing || params.window_log >= 0) && return params
+    need = 64 - leading_zeros(UInt64(max(length(prefix) + n - 1, 1)))
+    lvl = level === nothing ? 3 : Int(level)
+    have = compression_parameters(lvl, length(prefix) + n, params).window_log
+    need <= have && return params
+    o = params
+    return ParameterOverrides(min(need, 27), o.chain_log, o.hash_log, o.search_log, o.min_match,
+                                      o.target_length, o.strategy)
+end
+
+"""
+    FrameOptions(; content_size=true, dict_id=true, magicless=false)
+
+Frame header options (libzstd's `ZSTD_c_contentSizeFlag`, `ZSTD_c_dictIDFlag`
+and the `ZSTD_f_zstd1_magicless` format): whether the header records the
+content size and the dictionary ID, and whether the frame starts with the
+magic number. A magicless frame can only be read by a decoder told to
+expect it.
+"""
+struct FrameOptions
+    content_size::Bool
+    dict_id::Bool
+    magicless::Bool
+    target_block_size::Int      # aim for compressed blocks of about this size (0: off)
+end
+function FrameOptions(; content_size::Bool=true, dict_id::Bool=true, magicless::Bool=false,
+                      target_block_size::Union{Nothing,Integer}=nothing)
+    t = target_block_size === nothing ? 0 : Int(target_block_size)
+    (t == 0 || 1340 <= t <= BLOCK_SIZE_MAX) ||
+        throw(ArgumentError("target_block_size must be in 1340:$(BLOCK_SIZE_MAX) (as libzstd)"))
+    return FrameOptions(content_size, dict_id, magicless, t)
+end
+const DEFAULT_FRAME = FrameOptions()
+
+# libzstd strategy names
 const STRATEGY_NAMES = Dict(:fast => S_FAST, :dfast => S_DFAST, :greedy => S_GREEDY,
-                            :lazy => S_LAZY, :lazy2 => S_LAZY2, :btlazy2 => S_LAZY2,
-                            :btopt => S_BTOPT, :btultra => S_BTULTRA, :btultra2 => S_BTULTRA)
+                            :lazy => S_LAZY, :lazy2 => S_LAZY2, :btlazy2 => S_BTLAZY2,
+                            :btopt => S_BTOPT, :btultra => S_BTULTRA, :btultra2 => S_BTULTRA2)
 
 function checked_param(name::Symbol, v, lo::Int, hi::Int)
     v === nothing && return -1
@@ -125,11 +251,10 @@ with the meaning of libzstd's `ZSTD_c_*` parameters:
 - `min_match` (3-7): minimum match length searched for (the match finders
   use 4-7 for fast/dfast, 4-6 for greedy/lazy, 3-4 for btopt/btultra)
 - `target_length` (0-131072): for fast, a step size (acceleration); for
-  lazy, a length beyond which no better match is sought; for btopt/btultra,
-  a length taken without optimizing
-- `strategy`: `:fast`, `:dfast`, `:greedy`, `:lazy`, `:lazy2`, `:btopt`,
-  `:btultra` (libzstd's `:btlazy2` and `:btultra2` are accepted and use
-  `:lazy2` and `:btultra`)
+  btopt/btultra, a length taken without optimizing (unused by greedy/lazy,
+  as in libzstd)
+- `strategy`: `:fast`, `:dfast`, `:greedy`, `:lazy`, `:lazy2`, `:btlazy2`,
+  `:btopt`, `:btultra` or `:btultra2` (libzstd's strategies)
 
 Parameters are adapted to the input size afterwards, as in libzstd (e.g.
 the window shrinks for small inputs).
@@ -178,20 +303,25 @@ nothing).
 function compression_parameters(level::Integer, src_size::Integer,
                                 ov::ParameterOverrides=NO_OVERRIDES)
     level = normalize_level(level)
-    p = level < 0 ? LEVEL_TABLE[1] : LEVEL_TABLE[level + 1]
+    # table by size class (ZSTD_getCParams_internal)
+    tid = src_size < 0 ? 0 : (src_size <= 256 << 10) + (src_size <= 128 << 10) + (src_size <= 16 << 10)
+    tab = LEVEL_TABLES[tid + 1]
+    p = level < 0 ? tab[1] : tab[level + 1]
     target = level < 0 ? -level : p.target_length
     # explicit parameters replace the level's, then everything is adapted to
-    # the input size (as ZSTD_getCParamsFromCCtxParams + ZSTD_adjustCParams)
+    # the input size (as ZSTD_getCParamsFromCCtxParams + ZSTD_adjustCParams_internal)
     p = apply_overrides(p, ov)
     ov.target_length >= 0 && (target = ov.target_length)
-    wlog = p.window_log
+    wlog = p.window_log; clog = p.chain_log; hlog = p.hash_log
     if src_size >= 0
-        src_log = max(10, 64 - leading_zeros(UInt64(max(src_size - 1, 1))))
+        src_log = src_size < 64 ? 6 : 64 - leading_zeros(UInt64(src_size - 1))
         wlog = min(wlog, src_log)
+        hlog = min(hlog, wlog + 1)
+        btscale = p.strategy >= S_BTLAZY2 ? 1 : 0          # ZSTD_cycleLog
+        clog - btscale > wlog && (clog = wlog + btscale)
     end
-    btplus = p.strategy >= S_GREEDY
-    clog = min(p.chain_log, wlog + (btplus ? 1 : 0))
-    hlog = min(p.hash_log, wlog + 1)
+    wlog = max(wlog, 10)                                  # ZSTD_WINDOWLOG_ABSOLUTEMIN
+    hlog = max(hlog, 6); clog = max(clog, 6)
     return CParams(wlog, clog, hlog, p.search_log, p.min_match, target, p.strategy)
 end
 
@@ -254,15 +384,25 @@ mutable struct SeqStore
     ml::Vector{UInt32}
     off::Vector{UInt32}     # raw match distance
     nseq::Int
+    wlimit::Ptr{UInt8}      # literals ending at or before this may be copied in 16-byte chunks
 end
 SeqStore() = SeqStore(Vector{UInt8}(undef, BLOCK_SIZE_MAX + 32), 0,
                       Vector{UInt32}(undef, BLOCK_SIZE_MAX ÷ 3 + 2),
                       Vector{UInt32}(undef, BLOCK_SIZE_MAX ÷ 3 + 2),
-                      Vector{UInt32}(undef, BLOCK_SIZE_MAX ÷ 3 + 2), 0)
+                      Vector{UInt32}(undef, BLOCK_SIZE_MAX ÷ 3 + 2), 0, C_NULL)
 
 @inline function store_seq!(ss::SeqStore, anchor::Ptr{UInt8}, ll::Int, offset::Int, ml::Int)
     if ll > 0
-        GC.@preserve ss unsafe_copyto!(pointer(ss.lit) + ss.nlit, anchor, ll)
+        GC.@preserve ss begin
+            dst = pointer(ss.lit) + ss.nlit
+            if anchor + ll <= ss.wlimit && ll <= 32
+                # wildcopy: may write up to 15 bytes past (the literal buffer has slack)
+                unsafe_store!(Ptr{UInt128}(dst), unsafe_load(Ptr{UInt128}(anchor)))
+                ll > 16 && unsafe_store!(Ptr{UInt128}(dst + 16), unsafe_load(Ptr{UInt128}(anchor + 16)))
+            else
+                unsafe_copyto!(dst, anchor, ll)
+            end
+        end
         ss.nlit += ll
     end
     n = ss.nseq + 1
@@ -293,133 +433,207 @@ const HASH_READ_SIZE = 8
 @inline pos_of(p::Ptr{UInt8}, base::Ptr{UInt8}) = Int(p - base) + 1
 @inline ptr_of(i::Integer, base::Ptr{UInt8}) = base + (i - 1)
 
+const K_STEP_INCR = 1 << (K_SEARCH_STRENGTH - 1)
+
+# libzstd 1.5's ZSTD_compressBlock_fast_noDict_generic: two adjacent positions
+# per step (ip0, ip1) with the repcode checked ahead at ip2; the step starts at
+# targetLength + 1 (at least 2) and grows by one every K_STEP_INCR bytes
+# without a match.
 function parse_fast!(ss::SeqStore, htab::Vector{Int32}, hlog::Int, mls::Int, step0::Int,
                      base::Ptr{UInt8}, istart::Ptr{UInt8}, iend::Ptr{UInt8}, lowlimit::Int,
-                     rep1::Int, rep2::Int)
+                     rep1::Int, rep2::Int, window::Int=typemax(Int) >> 2)
     ilimit = iend - HASH_READ_SIZE
     anchor = istart
-    ip = istart
-    ip == base && (ip += 1)
+    ip0 = istart
+    lowp = ptr_of(lowlimit, base)
+    ip0 == lowp && (ip0 += 1)
+    stepsize = max(step0, 2)
+    # repeat offsets reaching before the window are invalid in this block
+    maxrep = pos_of(ip0, base) - lowlimit
+    saved1 = 0; saved2 = 0
+    rep2 > maxrep && (saved2 = rep2; rep2 = 0)
+    rep1 > maxrep && (saved1 = rep1; rep1 = 0)
     GC.@preserve htab begin
         ht = pointer(htab)
-        while ip < ilimit
-            cur = pos_of(ip, base)
-            h = zhash(ip, hlog, mls)
-            midx = Int(unsafe_load(ht, h + 1))
-            unsafe_store!(ht, cur % Int32, h + 1)
-            # repeat offset at ip+1
-            if rep1 > 0 && cur + 1 - rep1 >= lowlimit && load32(ip + 1 - rep1) == load32(ip + 1)
-                ml = zcount(ip + 5, ip + 5 - rep1, iend) + 4
-                ip += 1
-                store_seq!(ss, anchor, Int(ip - anchor), rep1, ml)
-            elseif midx >= lowlimit && midx > 0 && load32(ptr_of(midx, base)) == load32(ip)
-                m = ptr_of(midx, base)
-                ml = zcount(ip + 4, m + 4, iend) + 4
-                while ip > anchor && m > ptr_of(lowlimit, base) && unsafe_load(ip - 1) == unsafe_load(m - 1)
-                    ip -= 1; m -= 1; ml += 1
+        @inbounds while true
+            # _start
+            step = stepsize
+            nextstep = ip0 + K_STEP_INCR
+            ip1 = ip0 + 1
+            ip2 = ip0 + step
+            ip3 = ip2 + 1
+            ip3 >= ilimit && break
+            hash0 = zhash(ip0, hlog, mls)
+            hash1 = zhash(ip1, hlog, mls)
+            midx = Int(unsafe_load(ht, hash0 + 1))
+            found = 0          # 1: repcode at ip0 (match0 set), 2: new offset at ip0 (midx)
+            cur0 = 0
+            match0 = ip0
+            while true
+                cur0 = pos_of(ip0, base)
+                unsafe_store!(ht, cur0 % Int32, hash0 + 1)
+                if rep1 > 0 && load32(ip2) == load32(ip2 - rep1)
+                    ip0 = ip2
+                    match0 = ip0 - rep1
+                    if match0 > lowp && unsafe_load(ip0 - 1) == unsafe_load(match0 - 1)
+                        ip0 -= 1; match0 -= 1
+                    end
+                    unsafe_store!(ht, pos_of(ip1, base) % Int32, hash1 + 1)
+                    found = 1
+                    break
                 end
-                offset = Int(ip - m)
-                rep2 = rep1; rep1 = offset
-                store_seq!(ss, anchor, Int(ip - anchor), offset, ml)
-            else
-                ip += ((Int(ip - anchor) >> K_SEARCH_STRENGTH) + step0)
-                continue
+                if midx >= lowlimit && midx > 0 && cur0 - midx <= window && load32(ptr_of(midx, base)) == load32(ip0)
+                    unsafe_store!(ht, pos_of(ip1, base) % Int32, hash1 + 1)
+                    found = 2
+                    break
+                end
+                midx = Int(unsafe_load(ht, hash1 + 1))
+                hash0 = hash1
+                hash1 = zhash(ip2, hlog, mls)
+                ip0 = ip1; ip1 = ip2; ip2 = ip3
+                cur0 = pos_of(ip0, base)
+                unsafe_store!(ht, cur0 % Int32, hash0 + 1)
+                if midx >= lowlimit && midx > 0 && cur0 - midx <= window && load32(ptr_of(midx, base)) == load32(ip0)
+                    step <= 4 && unsafe_store!(ht, pos_of(ip1, base) % Int32, hash1 + 1)
+                    found = 2
+                    break
+                end
+                midx = Int(unsafe_load(ht, hash1 + 1))
+                hash0 = hash1
+                hash1 = zhash(ip2, hlog, mls)
+                ip0 = ip1; ip1 = ip2
+                ip2 = ip0 + step
+                ip3 = ip1 + step
+                if ip2 >= nextstep
+                    step += 1
+                    nextstep += K_STEP_INCR
+                end
+                ip3 < ilimit || break
             end
-            ip += ml
-            anchor = ip
-            if ip <= ilimit
-                # fill the table with a position inside the match
-                p2 = ip - 2
-                unsafe_store!(ht, pos_of(p2, base) % Int32, zhash(p2, hlog, mls) + 1)
-                # immediate repcode (ll == 0)
-                while ip <= ilimit && rep2 > 0 && pos_of(ip, base) - rep2 >= lowlimit &&
-                      load32(ip) == load32(ip - rep2)
-                    rl = zcount(ip + 4, ip + 4 - rep2, iend) + 4
+            found == 0 && break
+            if found == 2
+                match0 = ptr_of(midx, base)
+                rep2 = rep1
+                rep1 = Int(ip0 - match0)
+                while ip0 > anchor && match0 > lowp && unsafe_load(ip0 - 1) == unsafe_load(match0 - 1)
+                    ip0 -= 1; match0 -= 1
+                end
+            end
+            # _match
+            ml = zcount(ip0, match0, iend)
+            store_seq!(ss, anchor, Int(ip0 - anchor), Int(ip0 - match0), ml)
+            ip0 += ml
+            anchor = ip0
+            if ip0 <= ilimit
+                p2 = ptr_of(cur0 + 2, base)
+                unsafe_store!(ht, (cur0 + 2) % Int32, zhash(p2, hlog, mls) + 1)
+                unsafe_store!(ht, pos_of(ip0 - 2, base) % Int32, zhash(ip0 - 2, hlog, mls) + 1)
+                while rep2 > 0 && ip0 <= ilimit && load32(ip0) == load32(ip0 - rep2)
+                    rl = zcount(ip0 + 4, ip0 + 4 - rep2, iend) + 4
                     rep1, rep2 = rep2, rep1
-                    unsafe_store!(ht, pos_of(ip, base) % Int32, zhash(ip, hlog, mls) + 1)
+                    unsafe_store!(ht, pos_of(ip0, base) % Int32, zhash(ip0, hlog, mls) + 1)
                     store_seq!(ss, anchor, 0, rep1, rl)
-                    ip += rl
-                    anchor = ip
+                    ip0 += rl
+                    anchor = ip0
                 end
             end
         end
     end
     store_last_literals!(ss, anchor, Int(iend - anchor))
-    return rep1, rep2
+    saved2 = (saved1 != 0 && rep1 != 0) ? saved1 : saved2
+    return (rep1 != 0 ? rep1 : saved1), (rep2 != 0 ? rep2 : saved2)
 end
 
+# libzstd 1.5's ZSTD_compressBlock_doubleFast_noDict_generic: a long (8-byte)
+# and a short (mls-byte) hash table; the long hash of the next position is
+# computed ahead, and the step grows by one every 256 bytes without a match.
 function parse_dfast!(ss::SeqStore, hlong::Vector{Int32}, hllog::Int, hsmall::Vector{Int32},
                       hslog::Int, mls::Int, base::Ptr{UInt8}, istart::Ptr{UInt8}, iend::Ptr{UInt8},
-                      lowlimit::Int, rep1::Int, rep2::Int)
+                      lowlimit::Int, rep1::Int, rep2::Int, window::Int=typemax(Int) >> 2)
     ilimit = iend - HASH_READ_SIZE
     anchor = istart
     ip = istart
-    ip == base && (ip += 1)
-    lowp = ptr_of(max(lowlimit, 1), base)
+    lowp = ptr_of(lowlimit, base)
+    ip == lowp && (ip += 1)
+    maxrep = pos_of(ip, base) - lowlimit
+    saved1 = 0; saved2 = 0
+    rep2 > maxrep && (saved2 = rep2; rep2 = 0)
+    rep1 > maxrep && (saved1 = rep1; rep1 = 0)
+    kstep = 1 << K_SEARCH_STRENGTH
     GC.@preserve hlong hsmall begin
         hl = pointer(hlong); hs = pointer(hsmall)
-        while ip < ilimit
-            cur = pos_of(ip, base)
-            h8 = zhash(ip, hllog, 8)
-            hsm = zhash(ip, hslog, mls)
-            ml_idx = Int(unsafe_load(hl, h8 + 1))
-            ms_idx = Int(unsafe_load(hs, hsm + 1))
-            unsafe_store!(hl, cur % Int32, h8 + 1)
-            unsafe_store!(hs, cur % Int32, hsm + 1)
-            if rep1 > 0 && cur + 1 - rep1 >= lowlimit && load32(ip + 1 - rep1) == load32(ip + 1)
+        @inbounds while true
+            step = 1
+            nextstep = ip + kstep
+            ip1 = ip + step
+            ip1 > ilimit && break
+            hl0 = zhash(ip, hllog, 8)
+            idxl0 = Int(unsafe_load(hl, hl0 + 1))
+            kind = 0              # 1: repcode stored, 2: long match at ip, 3: short match at ip
+            cur = 0; hl1 = 0; idxl1 = 0; idxs0 = 0
+            while true
+                hs0 = zhash(ip, hslog, mls)
+                idxs0 = Int(unsafe_load(hs, hs0 + 1))
+                cur = pos_of(ip, base)
+                unsafe_store!(hl, cur % Int32, hl0 + 1)
+                unsafe_store!(hs, cur % Int32, hs0 + 1)
+                if rep1 > 0 && load32(ip + 1 - rep1) == load32(ip + 1)
+                    kind = 1; break
+                end
+                hl1 = zhash(ip1, hllog, 8)
+                if idxl0 > lowlimit && cur - idxl0 <= window && load64(ptr_of(idxl0, base)) == load64(ip)
+                    kind = 2; break
+                end
+                idxl1 = Int(unsafe_load(hl, hl1 + 1))
+                if idxs0 > lowlimit && cur - idxs0 <= window && load32(ptr_of(idxs0, base)) == load32(ip)
+                    kind = 3; break
+                end
+                if ip1 >= nextstep
+                    step += 1
+                    nextstep += kstep
+                end
+                ip = ip1
+                ip1 += step
+                hl0 = hl1
+                idxl0 = idxl1
+                ip1 <= ilimit || break
+            end
+            kind == 0 && break
+            if kind == 1
                 ml = zcount(ip + 5, ip + 5 - rep1, iend) + 4
                 ip += 1
                 store_seq!(ss, anchor, Int(ip - anchor), rep1, ml)
             else
-                found = false
-                ml = 0; offset = 0
-                if ml_idx >= lowlimit && ml_idx > 0 && load64(ptr_of(ml_idx, base)) == load64(ip)
-                    m = ptr_of(ml_idx, base)
+                if kind == 2
+                    m = ptr_of(idxl0, base)
                     ml = zcount(ip + 8, m + 8, iend) + 8
-                    offset = Int(ip - m)
-                    while ip > anchor && m > lowp && unsafe_load(ip - 1) == unsafe_load(m - 1)
-                        ip -= 1; m -= 1; ml += 1
+                else
+                    m = ptr_of(idxs0, base)
+                    ml = zcount(ip + 4, m + 4, iend) + 4
+                    if idxl1 > lowlimit && pos_of(ip1, base) - idxl1 <= window && load64(ptr_of(idxl1, base)) == load64(ip1)
+                        l1 = zcount(ip1 + 8, ptr_of(idxl1, base) + 8, iend) + 8
+                        if l1 > ml
+                            ip = ip1; ml = l1; m = ptr_of(idxl1, base)
+                        end
                     end
-                    found = true
-                elseif ms_idx >= lowlimit && ms_idx > 0 && load32(ptr_of(ms_idx, base)) == load32(ip)
-                    # check for a long match at ip+1
-                    h3 = zhash(ip + 1, hllog, 8)
-                    l3 = Int(unsafe_load(hl, h3 + 1))
-                    unsafe_store!(hl, (cur + 1) % Int32, h3 + 1)
-                    if l3 >= lowlimit && l3 > 0 && load64(ptr_of(l3, base)) == load64(ip + 1)
-                        ip += 1
-                        m = ptr_of(l3, base)
-                        ml = zcount(ip + 8, m + 8, iend) + 8
-                    else
-                        m = ptr_of(ms_idx, base)
-                        ml = zcount(ip + 4, m + 4, iend) + 4
-                    end
-                    offset = Int(ip - m)
-                    while ip > anchor && m > lowp && unsafe_load(ip - 1) == unsafe_load(m - 1)
-                        ip -= 1; m -= 1; ml += 1
-                    end
-                    found = true
                 end
-                if !found
-                    ip += ((Int(ip - anchor) >> K_SEARCH_STRENGTH) + 1)
-                    continue
+                while ip > anchor && m > lowp && unsafe_load(ip - 1) == unsafe_load(m - 1)
+                    ip -= 1; m -= 1; ml += 1
                 end
+                offset = Int(ip - m)
                 rep2 = rep1; rep1 = offset
+                step < 4 && unsafe_store!(hl, pos_of(ip1, base) % Int32, hl1 + 1)
                 store_seq!(ss, anchor, Int(ip - anchor), offset, ml)
             end
             ip += ml
             anchor = ip
             if ip <= ilimit
-                # fill tables at positions inside the match
                 ins = ptr_of(cur + 2, base)
-                if ins < ip
-                    unsafe_store!(hl, pos_of(ins, base) % Int32, zhash(ins, hllog, 8) + 1)
-                    unsafe_store!(hs, pos_of(ins, base) % Int32, zhash(ins, hslog, mls) + 1)
-                end
+                unsafe_store!(hl, (cur + 2) % Int32, zhash(ins, hllog, 8) + 1)
                 unsafe_store!(hl, pos_of(ip - 2, base) % Int32, zhash(ip - 2, hllog, 8) + 1)
+                unsafe_store!(hs, (cur + 2) % Int32, zhash(ins, hslog, mls) + 1)
                 unsafe_store!(hs, pos_of(ip - 1, base) % Int32, zhash(ip - 1, hslog, mls) + 1)
-                while ip <= ilimit && rep2 > 0 && pos_of(ip, base) - rep2 >= lowlimit &&
-                      load32(ip) == load32(ip - rep2)
+                while ip <= ilimit && rep2 > 0 && load32(ip) == load32(ip - rep2)
                     rl = zcount(ip + 4, ip + 4 - rep2, iend) + 4
                     rep1, rep2 = rep2, rep1
                     unsafe_store!(hs, pos_of(ip, base) % Int32, zhash(ip, hslog, mls) + 1)
@@ -432,7 +646,8 @@ function parse_dfast!(ss::SeqStore, hlong::Vector{Int32}, hllog::Int, hsmall::Ve
         end
     end
     store_last_literals!(ss, anchor, Int(iend - anchor))
-    return rep1, rep2
+    saved2 = (saved1 != 0 && rep1 != 0) ? saved1 : saved2
+    return (rep1 != 0 ? rep1 : saved1), (rep2 != 0 ? rep2 : saved2)
 end
 
 # Row-based match finder (libzstd's ZSTD_row_*), used by the greedy and lazy
@@ -509,7 +724,7 @@ end
 # Best match at ip via the row table. Returns (length, offset, next).
 @inline function row_find_best(pos::Ptr{Int32}, tags::Ptr{UInt8}, rbits::Int, rlog::Int, mls::Int,
                                attempts::Int, base::Ptr{UInt8}, ip::Ptr{UInt8}, iend::Ptr{UInt8},
-                               lowlimit::Int, next::Int)
+                               lowlimit::Int, next::Int, window::Int=typemax(Int) >> 2)
     ilimit = iend - HASH_READ_SIZE
     cur = pos_of(ip, base)
     row_insert!(pos, tags, rbits, rlog, mls, base, next, cur)
@@ -525,7 +740,19 @@ end
     m = ((m >> hd) | (m << ((nent - hd) & 63))) & emask
     best = 3
     bestoff = 0
-    lowl = max(lowlimit, 1)
+    lowl = max(lowlimit, cur - window, 1)          # the window, from this position
+    # first pass: prefetch the candidates' data, so the comparisons below
+    # overlap their cache misses (as libzstd's match buffer does)
+    mm = m; k = attempts
+    while mm != 0 && k > 0
+        j = trailing_zeros(mm)
+        mm &= mm - 1
+        midx = Int(unsafe_load(pos, rows + ((hd + j) & (nent - 1)) + 1))
+        if lowl <= midx < cur
+            prefetch(ptr_of(midx, base))
+            k -= 1
+        end
+    end
     while m != 0 && attempts > 0
         j = trailing_zeros(m)
         m &= m - 1
@@ -545,10 +772,12 @@ end
     return (bestoff == 0 ? 0 : best), bestoff, cur
 end
 
-function parse_lazy!(ss::SeqStore, htab::Vector{Int32}, hlog::Int, ctab::Vector{Int32}, rlog::Int,
-                     mls::Int, attempts::Int, depth::Int, target_len::Int, base::Ptr{UInt8},
+const K_LAZY_SKIPPING_STEP = 8
+
+function parse_lazy!(::Val{BT}, ss::SeqStore, htab::Vector{Int32}, hlog::Int, ctab::Vector{Int32}, rlog::Int,
+                     mls::Int, attempts::Int, depth::Int, base::Ptr{UInt8},
                      istart::Ptr{UInt8}, iend::Ptr{UInt8}, lowlimit::Int, rep1::Int, rep2::Int,
-                     next::Int)
+                     next::Int, window::Int=typemax(Int) >> 2) where {BT}
     ilimit = iend - HASH_READ_SIZE
     anchor = istart
     ip = istart
@@ -556,9 +785,9 @@ function parse_lazy!(ss::SeqStore, htab::Vector{Int32}, hlog::Int, ctab::Vector{
     lowp = ptr_of(max(lowlimit, 1), base)
     rbits = hlog - rlog
     GC.@preserve htab ctab begin
-        ht = pointer(htab); ch = Ptr{UInt8}(pointer(ctab))
+        ht = pointer(htab); ch = BT ? pointer(ctab) : Ptr{UInt8}(pointer(ctab))
         while ip < ilimit
-            ml = 0; offset = 0; start = ip + 1
+            ml = 0; offset = 0; start = ip + 1; isrep = true
             cur = pos_of(ip, base)
             # repcode at ip+1
             if rep1 > 0 && cur + 1 - rep1 >= lowlimit && load32(ip + 1 - rep1) == load32(ip + 1)
@@ -567,54 +796,65 @@ function parse_lazy!(ss::SeqStore, htab::Vector{Int32}, hlog::Int, ctab::Vector{
                 start = ip + 1
             end
             if !(depth == 0 && ml > 0)
-                l2, o2, nxt = row_find_best(ht, ch, rbits, rlog, mls, attempts, base, ip, iend, lowlimit, next)
+                l2, o2, nxt = (BT ? bt_find_best(ht, ch, hlog, rlog, mls, attempts, base, ip, iend, lowlimit, next, window) :
+                                row_find_best(ht, ch, rbits, rlog, mls, attempts, base, ip, iend, lowlimit, next, window))
                 next = nxt
                 if l2 > ml
-                    ml = l2; offset = o2; start = ip
+                    ml = l2; offset = o2; start = ip; isrep = false
                 end
             end
             if ml < 4
-                ip += ((Int(ip - anchor) >> K_SEARCH_STRENGTH) + 1)
+                step = (Int(ip - anchor) >> K_SEARCH_STRENGTH) + 1
+                ip += step
+                # long literal runs: stop inserting the skipped positions
+                # (libzstd's lazySkipping)
+                step > K_LAZY_SKIPPING_STEP && (next = pos_of(ip, base))
                 continue
             end
             # lazy evaluation
-            if depth >= 1 && ml < target_len
+            if depth >= 1
                 while ip < ilimit
                     ip += 1
                     cur2 = pos_of(ip, base)
+                    ocost = isrep ? 0 : highbit(offset + 3)
                     if rep1 > 0 && cur2 - rep1 >= lowlimit && load32(ip) == load32(ip - rep1)
                         mlr = zcount(ip + 4, ip + 4 - rep1, iend) + 4
                         gain2 = mlr * 3
-                        gain1 = ml * 3 - highbit(offset + 3) + 1
+                        gain1 = ml * 3 - ocost + 1
                         if gain2 > gain1
-                            ml = mlr; offset = rep1; start = ip
+                            ml = mlr; offset = rep1; start = ip; isrep = true
                         end
                     end
-                    l2, o2, nxt = row_find_best(ht, ch, rbits, rlog, mls, attempts, base, ip, iend, lowlimit, next)
+                    l2, o2, nxt = (BT ? bt_find_best(ht, ch, hlog, rlog, mls, attempts, base, ip, iend, lowlimit, next, window) :
+                                row_find_best(ht, ch, rbits, rlog, mls, attempts, base, ip, iend, lowlimit, next, window))
                     next = nxt
                     gain2 = l2 * 4 - highbit(o2 + 3)
-                    gain1 = ml * 4 - highbit(offset + 3) + 4
+                    ocost = isrep ? 0 : highbit(offset + 3)
+                    gain1 = ml * 4 - ocost + 4
                     if l2 >= 4 && gain2 > gain1
-                        ml = l2; offset = o2; start = ip
+                        ml = l2; offset = o2; start = ip; isrep = false
                         continue
                     end
                     if depth == 2 && ip < ilimit
                         ip += 1
                         cur2 = pos_of(ip, base)
+                        ocost = isrep ? 0 : highbit(offset + 3)
                         if rep1 > 0 && cur2 - rep1 >= lowlimit && load32(ip) == load32(ip - rep1)
                             mlr = zcount(ip + 4, ip + 4 - rep1, iend) + 4
                             gain2 = mlr * 4
-                            gain1 = ml * 4 - highbit(offset + 3) + 1
+                            gain1 = ml * 4 - ocost + 1
                             if gain2 > gain1
                                 ml = mlr; offset = rep1; start = ip
                             end
                         end
-                        l2, o2, nxt = row_find_best(ht, ch, rbits, rlog, mls, attempts, base, ip, iend, lowlimit, next)
+                        l2, o2, nxt = (BT ? bt_find_best(ht, ch, hlog, rlog, mls, attempts, base, ip, iend, lowlimit, next, window) :
+                                row_find_best(ht, ch, rbits, rlog, mls, attempts, base, ip, iend, lowlimit, next, window))
                         next = nxt
                         gain2 = l2 * 4 - highbit(o2 + 3)
-                        gain1 = ml * 4 - highbit(offset + 3) + 7
+                        ocost = isrep ? 0 : highbit(offset + 3)
+                        gain1 = ml * 4 - ocost + 7
                         if l2 >= 4 && gain2 > gain1
-                            ml = l2; offset = o2; start = ip
+                            ml = l2; offset = o2; start = ip; isrep = false
                             continue
                         end
                     end
@@ -622,7 +862,7 @@ function parse_lazy!(ss::SeqStore, htab::Vector{Int32}, hlog::Int, ctab::Vector{
                 end
             end
             # catch up: extend the match backwards
-            if offset != rep1
+            if !isrep
                 m = start - offset
                 while start > anchor && m > lowp && unsafe_load(start - 1) == unsafe_load(m - 1)
                     start -= 1; m -= 1; ml += 1
@@ -648,6 +888,7 @@ function parse_lazy!(ss::SeqStore, htab::Vector{Int32}, hlog::Int, ctab::Vector{
 end
 
 include("encoder_opt.jl")
+include("presplit.jl")
 
 # ---------------------------------------------------------------------------
 # Backward bit writer (BIT_CStream)
@@ -822,21 +1063,23 @@ function normalize_counts!(norm::Vector{Int16}, counts::Vector{Int}, total::Int,
     return norm
 end
 
+@inline function fse_hdr_put(dst::Vector{UInt8}, pos::Int, bits::UInt64, nbits::Int, v::Int, n::Int)
+    bits |= UInt64(v) << nbits
+    nbits += n
+    while nbits >= 8
+        @inbounds dst[pos] = bits % UInt8
+        pos += 1
+        bits >>= 8
+        nbits -= 8
+    end
+    return bits, nbits, pos
+end
+
 """Write an FSE table description (normalized counts) at dst[pos]. Returns new pos."""
 function write_fse_header!(dst::Vector{UInt8}, pos::Int, norm::Vector{Int16}, maxsym::Int, al::Int)
     bits = UInt64(0); nbits = 0
-    @inline function put(bits, nbits, v, n)
-        bits |= UInt64(v) << nbits
-        nbits += n
-        while nbits >= 8
-            dst[pos] = bits % UInt8
-            pos += 1
-            bits >>= 8
-            nbits -= 8
-        end
-        return bits, nbits
-    end
-    bits, nbits = put(bits, nbits, al - 5, 4)
+    # (a plain function: a closure assigning to `pos` would box it)
+    bits, nbits, pos = fse_hdr_put(dst, pos, bits, nbits, al - 5, 4)
     remaining = 1 << al
     s = 1
     @inbounds while remaining > 0 && s <= maxsym + 1
@@ -847,11 +1090,11 @@ function write_fse_header!(dst::Vector{UInt8}, pos::Int, norm::Vector{Int16}, ma
         threshold = (1 << nb) - max_value - 1
         val = prob + 1
         if val < threshold
-            bits, nbits = put(bits, nbits, val, lower)
+            bits, nbits, pos = fse_hdr_put(dst, pos, bits, nbits, val, lower)
         elseif val < (1 << lower)
-            bits, nbits = put(bits, nbits, val, nb)                    # top bit 0
+            bits, nbits, pos = fse_hdr_put(dst, pos, bits, nbits, val, nb)             # top bit 0
         else
-            bits, nbits = put(bits, nbits, val - (1 << lower) + threshold + (1 << lower), nb)
+            bits, nbits, pos = fse_hdr_put(dst, pos, bits, nbits, val - (1 << lower) + threshold + (1 << lower), nb)
         end
         remaining -= prob == -1 ? 1 : prob
         s += 1
@@ -862,7 +1105,7 @@ function write_fse_header!(dst::Vector{UInt8}, pos::Int, norm::Vector{Int16}, ma
             end
             while true
                 c = min(run, 3)
-                bits, nbits = put(bits, nbits, c, 2)
+                bits, nbits, pos = fse_hdr_put(dst, pos, bits, nbits, c, 2)
                 run -= c
                 c < 3 && break
             end
@@ -899,8 +1142,10 @@ mutable struct HufCTable
     tl::Int
     nbits::Vector{UInt8}
     code::Vector{UInt16}
+    nper::Vector{Int}       # huf_codes! scratch
+    valper::Vector{Int}
 end
-HufCTable() = HufCTable(-1, 0, zeros(UInt8, 256), zeros(UInt16, 256))
+HufCTable() = HufCTable(-1, 0, zeros(UInt8, 256), zeros(UInt16, 256), zeros(Int, 16), zeros(Int, 16))
 
 """Huffman code lengths for `counts[1:maxsym+1]`, limited to `maxbits`."""
 function huf_lengths!(lens::Vector{UInt8}, counts::Vector{Int}, maxsym::Int, maxbits::Int,
@@ -913,10 +1158,16 @@ function huf_lengths!(lens::Vector{UInt8}, counts::Vector{Int}, maxsym::Int, max
             syms[n] = s
         end
     end
-    sort!(view(syms, 1:n), by = s -> counts[s], alg = InsertionSort)
+    # sort by count, ties by symbol (packed keys: same order as a stable sort)
+    @inbounds for i in 1:n
+        freq[i] = (counts[syms[i]] << 9) | (syms[i] - 1)
+    end
+    sort!(view(freq, 1:n))
     # Two-queue Huffman construction. Nodes 1..n are leaves (sorted), n+1.. internal.
     @inbounds for i in 1:n
-        freq[i] = counts[syms[i]]
+        k = freq[i]
+        syms[i] = (k & 511) + 1
+        freq[i] = k >> 9
     end
     leaf = 1; node = n + 1; nint = n
     @inbounds for _ in 1:n-1
@@ -939,7 +1190,9 @@ function huf_lengths!(lens::Vector{UInt8}, counts::Vector{Int}, maxsym::Int, max
     @inbounds for i in nint-1:-1:1
         depth[i] = depth[parent[i]] + 1
     end
-    lengths = zeros(Int, maxsym + 1)
+    # `parent` is no longer needed: build the lengths there (no allocation)
+    lengths = view(parent, 1:maxsym+1)
+    fill!(lengths, 0)
     @inbounds for i in 1:n
         lengths[syms[i]] = depth[i]
     end
@@ -951,7 +1204,7 @@ function huf_lengths!(lens::Vector{UInt8}, counts::Vector{Int}, maxsym::Int, max
 end
 
 """Limit code lengths to `maxbits` while keeping the prefix code complete."""
-function limit_lengths!(lengths::Vector{Int}, maxbits::Int)
+function limit_lengths!(lengths::AbstractVector{Int}, maxbits::Int)
     any(>(maxbits), lengths) || return lengths
     for i in eachindex(lengths)
         lengths[i] > maxbits && (lengths[i] = maxbits)
@@ -994,12 +1247,12 @@ end
 function huf_codes!(t::HufCTable, lens::Vector{UInt8}, maxsym::Int, tl::Int)
     t.maxsym = maxsym
     t.tl = tl
-    nper = zeros(Int, tl + 2)
+    nper = t.nper; fill!(nper, 0)
     @inbounds for s in 1:maxsym+1
         l = Int(lens[s])
         l > 0 && (nper[l + 1] += 1)
     end
-    valper = zeros(Int, tl + 2)
+    valper = t.valper; fill!(valper, 0)
     v = 0
     @inbounds for l in tl:-1:1
         valper[l + 1] = v
@@ -1061,6 +1314,8 @@ function huf_cost(counts::Vector{Int}, maxsym::Int, t::HufCTable)
     return bits >> 3
 end
 
+include("postsplit.jl")
+
 # ---------------------------------------------------------------------------
 # Compression context
 # ---------------------------------------------------------------------------
@@ -1071,6 +1326,8 @@ end
 Reusable compression state (match-finder tables, entropy tables, scratch
 buffers). Not thread-safe; use one per task.
 """
+const OUT_SCRATCH_MAX = 1 << 26     # 64 MiB
+
 mutable struct CompressionContext
     params::CParams
     level::Int
@@ -1105,6 +1362,14 @@ mutable struct CompressionContext
     blk::Vector{UInt8}
     tmp::Vector{UInt8}
     opt::OptState
+    savings::Int              # input minus output bytes so far in the frame (block splitting)
+    fp_past::Vector{Int}      # block-splitter fingerprints
+    fp_new::Vector{Int}
+    fp_mid::Vector{Int}
+    split::Union{Nothing,SplitState}   # post-splitting scratch, created on first use
+    target_block::Int         # target compressed block size (0: none)
+    counts4::Vector{Int32}    # interleaved histogram scratch
+    outbuf::Vector{UInt8}     # one-shot output scratch (see OUT_SCRATCH_MAX)
 end
 
 function default_ctable(norm, al, tabsym, cumul)
@@ -1127,7 +1392,8 @@ function CompressionContext()
         HufCTable(), HufCTable(), false,
         zeros(UInt8, 256), zeros(Int, 256), zeros(Int, 512), zeros(Int, 512),
         zeros(Int16, 16), FSECTable(), zeros(Int, 16), zeros(UInt8, 256),
-        zeros(UInt8, 1024), zeros(UInt8, 1024), OptState())
+        zeros(UInt8, 1024), zeros(UInt8, 1024), OptState(), 0, zeros(Int, 1024), zeros(Int, 1024),
+        zeros(Int, 256), nothing, 0, zeros(Int32, 4 * 64), UInt8[])
 end
 
 function reset_context!(cc::CompressionContext, p::CParams, level::Int; clear::Bool=true)
@@ -1147,6 +1413,17 @@ function reset_context!(cc::CompressionContext, p::CParams, level::Int; clear::B
     cc.ll_prev_ok = cc.ml_prev_ok = cc.of_prev_ok = false
     cc.huf_prev_ok = false
     cc.opt.have_stats = false
+    # 3-byte hash table for the optimal parser with minMatch 3 (ZSTD_hashLog3)
+    o = cc.opt
+    if p.strategy >= S_BTOPT && p.min_match == 3
+        o.h3log = min(HASHLOG3_MAX, p.window_log)
+        length(o.h3) != 1 << o.h3log && resize!(o.h3, 1 << o.h3log)
+        fill!(o.h3, Int32(0))
+    else
+        empty!(o.h3); o.h3log = 0
+    end
+    cc.savings = 0
+    cc.target_block = 0
     return cc
 end
 
@@ -1314,6 +1591,9 @@ end
 function encode_literals!(cc::CompressionContext, dst::Vector{UInt8}, pos::Int, lit::Vector{UInt8}, n::Int)
     GC.@preserve lit begin
         lp = pointer(lit)
+        # As libzstd (ZSTD_literalsCompressionIsDisabled): the accelerated fast
+        # levels (negative levels, or fast with a target length) store literals raw.
+        cc.params.strategy == S_FAST && cc.params.target_length > 0 && return write_raw_literals!(dst, pos, lp, n)
         # Very small literal runs are not worth a table.
         if n <= 63 && !cc.huf_prev_ok
             n > 0 && all(==(lit[1]), view(lit, 1:n)) && n > 2 && return write_rle_literals!(dst, pos, lit[1], n)
@@ -1330,19 +1610,42 @@ function encode_literals!(cc::CompressionContext, dst::Vector{UInt8}, pos::Int, 
         largest = maximum(counts)
         largest == n && return write_rle_literals!(dst, pos, lit[1], n)
         largest <= (n >> 7) + 4 && return write_raw_literals!(dst, pos, lp, n)
-        min_gain = (n >> 6) + 2
+        # ZSTD_minGain: compressed literals must save this much (less for btultra/btultra2)
+        strat = Int(cc.params.strategy) + 1                 # libzstd's numbering
+        min_gain = (n >> (strat >= 8 ? strat - 1 : 6)) + 2
         single = n < 256
         hs = single || n < 1024 ? 3 : (n < 16384 ? 4 : 5)
         # Option A: reuse previous table (treeless)
         reuse_cost = cc.huf_prev_ok ? huf_cost(counts, maxsym, cc.huf_prev) : typemax(Int)
-        # Option B: new table
-        tl = huf_lengths!(cc.lens, counts, maxsym, HUF_MAX_BITS, cc.hsyms, cc.hfreq, cc.hparent)
+        # Option B: new table. For btultra and stronger, as libzstd's
+        # HUF_flags_optimalDepth, try each maximum code length and keep the one
+        # with the smallest description plus encoded size.
+        tmp = cc.tmp
+        maxbits = HUF_MAX_BITS
+        if cc.params.strategy >= S_BTULTRA
+            nsym = count(>(0), view(counts, 1:maxsym+1))
+            best_total = typemax(Int)
+            for mb in max(highbit(max(nsym - 1, 1)) + 1, 5):HUF_MAX_BITS
+                t0 = huf_lengths!(cc.lens, counts, maxsym, mb, cc.hsyms, cc.hfreq, cc.hparent)
+                huf_codes!(cc.huf, cc.lens, maxsym, t0)
+                hdr = write_huf_tree!(cc, tmp, 1, cc.huf) - 1
+                hdr < 0 && continue
+                total = huf_cost(counts, maxsym, cc.huf) + hdr
+                if total < best_total
+                    best_total = total; maxbits = mb
+                end
+            end
+        end
+        tl = huf_lengths!(cc.lens, counts, maxsym, maxbits, cc.hsyms, cc.hfreq, cc.hparent)
         huf_codes!(cc.huf, cc.lens, maxsym, tl)
         new_cost = huf_cost(counts, maxsym, cc.huf)
-        tmp = cc.tmp
         # Huffman output can exceed n (codes up to 11 bits) before the raw fallback.
         length(tmp) < (11n >> 3) + 1024 && resize!(tmp, (11n >> 3) + 1024)
-        treeless = reuse_cost < typemax(Int) && reuse_cost <= new_cost + 40 + (maxsym >> 1)
+        # reuse the previous table when it costs no more than a new one with its
+        # description (HUF_compress_internal: oldSize <= hSize + newSize)
+        hdr = write_huf_tree!(cc, tmp, 1, cc.huf) - 1
+        hdr < 0 && (hdr = typemax(Int) >> 2)
+        treeless = reuse_cost < typemax(Int) && (reuse_cost <= new_cost + hdr || hdr + 12 >= n)
         t = treeless ? cc.huf_prev : cc.huf
         tpos = 1
         if !treeless
@@ -1398,15 +1701,44 @@ const MODE_RLE = 1
 const MODE_FSE = 2
 const MODE_REPEAT = 3
 
+"""
+Histogram of the first `n` codes (values `0:maxcode`) into `counts`, using four
+interleaved tables so runs of one code do not serialize on the increments
+(as libzstd's HIST_count).
+"""
+function count_codes!(counts::Vector{Int}, c4::Vector{Int32}, codes::Vector{UInt8}, n::Int, maxcode::Int)
+    w = maxcode + 1
+    fill!(view(c4, 1:4w), Int32(0))
+    GC.@preserve c4 codes begin
+        pc = pointer(c4); pk = pointer(codes)
+        i = 1
+        @inbounds while i + 3 <= n
+            a = Int(unsafe_load(pk, i)); b = Int(unsafe_load(pk, i + 1))
+            c = Int(unsafe_load(pk, i + 2)); d = Int(unsafe_load(pk, i + 3))
+            unsafe_store!(pc, unsafe_load(pc, a + 1) + Int32(1), a + 1)
+            unsafe_store!(pc, unsafe_load(pc, w + b + 1) + Int32(1), w + b + 1)
+            unsafe_store!(pc, unsafe_load(pc, 2w + c + 1) + Int32(1), 2w + c + 1)
+            unsafe_store!(pc, unsafe_load(pc, 3w + d + 1) + Int32(1), 3w + d + 1)
+            i += 4
+        end
+        @inbounds while i <= n
+            a = Int(unsafe_load(pk, i))
+            unsafe_store!(pc, unsafe_load(pc, a + 1) + Int32(1), a + 1)
+            i += 1
+        end
+    end
+    @inbounds for s in 1:w
+        counts[s] = Int(c4[s]) + Int(c4[w + s]) + Int(c4[2w + s]) + Int(c4[3w + s])
+    end
+    return counts
+end
+
 """Pick the coding mode for one sequence field and prepare its CTable."""
 function select_mode!(cc::CompressionContext, codes::Vector{UInt8}, nseq::Int, maxcode::Int,
                       max_al::Int, cur::FSECTable, prev::FSECTable, prev_ok::Bool,
                       def::FSECTable, def_al::Int, dst::Vector{UInt8}, pos::Int)
     counts = cc.counts
-    fill!(view(counts, 1:maxcode+1), 0)
-    @inbounds for i in 1:nseq
-        counts[Int(codes[i]) + 1] += 1
-    end
+    count_codes!(counts, cc.counts4, codes, nseq, maxcode)
     maxsym = maxcode
     while maxsym > 0 && counts[maxsym + 1] == 0; maxsym -= 1; end
     largest = maximum(view(counts, 1:maxsym+1))
@@ -1457,8 +1789,8 @@ function encode_sequences!(cc::CompressionContext, dst::Vector{UInt8}, pos::Int)
     llc = cc.llc; mlc = cc.mlc; ofc = cc.ofc; ofv = cc.ofv
     @inbounds for i in 1:nseq
         ll = Int(ss.ll[i]); off = Int(ss.off[i])
-        llc[i] = UInt8(ll_code(ll))
-        mlc[i] = UInt8(ml_code(Int(ss.ml[i]) - MIN_MATCH))
+        llc[i] = ll_code(ll) % UInt8
+        mlc[i] = ml_code(Int(ss.ml[i]) - MIN_MATCH) % UInt8
         if ll > 0
             v = off == r1 ? 1 : off == r2 ? 2 : off == r3 ? 3 : off + 3
         else
@@ -1477,8 +1809,8 @@ function encode_sequences!(cc::CompressionContext, dst::Vector{UInt8}, pos::Int)
                 r3 = r2; r2 = r1; r1 = off
             end
         end
-        ofv[i] = UInt32(v)
-        ofc[i] = UInt8(highbit(v))
+        ofv[i] = v % UInt32
+        ofc[i] = highbit(v) % UInt8
     end
     cc.rep = (r1, r2, r3)
     modes_pos = pos
@@ -1505,17 +1837,41 @@ function encode_sequences!(cc::CompressionContext, dst::Vector{UInt8}, pos::Int)
             b = bitc_flush(b)
             b = bitc_add(b, ofv[n], oc)
             b = bitc_flush(b)
-            for i in n-1:-1:1
-                lc = Int(llc[i]); mc = Int(mlc[i]); oc = Int(ofc[i])
-                ofrle || ((b, sof) = fse_encode(b, sof, oft, oc))
-                mlrle || ((b, sml) = fse_encode(b, sml, mlt, mc))
-                llrle || ((b, sll) = fse_encode(b, sll, llt, lc))
-                b = bitc_flush(b)
-                b = bitc_add(b, Int(ss.ll[i]) - Int(LL_BASE[lc + 1]), Int(LL_BITS[lc + 1]))
-                b = bitc_add(b, Int(ss.ml[i]) - Int(ML_BASE[mc + 1]), Int(ML_BITS[mc + 1]))
-                b = bitc_flush(b)
-                b = bitc_add(b, ofv[i], oc)
-                b = bitc_flush(b)
+            # Raw pointers: stores into the output through pointers would otherwise
+            # force the table fields to be reloaded on every iteration.
+            GC.@preserve llc mlc ofc ofv llt mlt oft begin
+                pllc = pointer(llc); pmlc = pointer(mlc); pofc = pointer(ofc); pofv = pointer(ofv)
+                pll = pointer(ss.ll); pml = pointer(ss.ml)
+                lst = pointer(llt.state); ldn = pointer(llt.dnb); ldf = pointer(llt.dfs)
+                mst = pointer(mlt.state); mdn = pointer(mlt.dnb); mdf = pointer(mlt.dfs)
+                ost = pointer(oft.state); odn = pointer(oft.dnb); odf = pointer(oft.dfs)
+                pllb = pointer(LL_BITS); pllbase = pointer(LL_BASE); pmlb = pointer(ML_BITS); pmlbase = pointer(ML_BASE)
+                for i in n-1:-1:1
+                    lc = Int(unsafe_load(pllc, i)); mc = Int(unsafe_load(pmlc, i)); oc = Int(unsafe_load(pofc, i))
+                    if !ofrle
+                        nb = (sof + Int(unsafe_load(odn, oc + 1))) >> 16
+                        b = bitc_add(b, sof, nb)
+                        sof = Int(unsafe_load(ost, (sof >> nb) + Int(unsafe_load(odf, oc + 1)) + 1))
+                    end
+                    if !mlrle
+                        nb = (sml + Int(unsafe_load(mdn, mc + 1))) >> 16
+                        b = bitc_add(b, sml, nb)
+                        sml = Int(unsafe_load(mst, (sml >> nb) + Int(unsafe_load(mdf, mc + 1)) + 1))
+                    end
+                    if !llrle
+                        nb = (sll + Int(unsafe_load(ldn, lc + 1))) >> 16
+                        b = bitc_add(b, sll, nb)
+                        sll = Int(unsafe_load(lst, (sll >> nb) + Int(unsafe_load(ldf, lc + 1)) + 1))
+                    end
+                    # at most 7 + 26 bits pending here
+                    llb = Int(unsafe_load(pllb, lc + 1)); mlb = Int(unsafe_load(pmlb, mc + 1))
+                    b.pos + llb + mlb > 63 && (b = bitc_flush(b))
+                    b = bitc_add(b, Int(unsafe_load(pll, i)) - Int(unsafe_load(pllbase, lc + 1)), llb)
+                    b = bitc_add(b, Int(unsafe_load(pml, i)) - Int(unsafe_load(pmlbase, mc + 1)), mlb)
+                    b.pos + oc > 63 && (b = bitc_flush(b))
+                    b = bitc_add(b, Int(unsafe_load(pofv, i)), oc)
+                    b = bitc_flush(b)
+                end
             end
             mlrle || (b = fse_flush_state(b, sml, mlt))
             ofrle || (b = fse_flush_state(b, sof, oft))
@@ -1562,8 +1918,25 @@ function write_block_header!(out::Vector{UInt8}, pos::Int, last::Bool, btype::In
     return pos + 3
 end
 
+const PREDEF_THRESHOLD = 1024
+
+# btultra2 (ZSTD_initStats_ultra): on the first block of a frame with no
+# history, a first pass only seeds the optimal parser's statistics; its
+# sequences and table entries are then forgotten.
+function seed_stats_ultra!(cc::CompressionContext, base::Ptr{UInt8}, bstart::Ptr{UInt8}, bend::Ptr{UInt8})
+    if cc.params.strategy == S_BTULTRA2 && !cc.opt.have_stats && pos_of(bstart, base) == 1 &&
+       bend - bstart > PREDEF_THRESHOLD
+        parse_range!(cc, base, bstart, bend, true)
+        cc.ss.nlit = 0; cc.ss.nseq = 0
+        fill!(cc.htab, Int32(0)); fill!(cc.ctab, Int32(0)); fill!(cc.opt.h3, Int32(0))
+        cc.next_to_update = 1
+    end
+    return
+end
+
 function parse_block!(cc::CompressionContext, base::Ptr{UInt8}, bstart::Ptr{UInt8}, bend::Ptr{UInt8})
     cc.ss.nlit = 0; cc.ss.nseq = 0
+    seed_stats_ultra!(cc, base, bstart, bend)
     parse_range!(cc, base, bstart, bend, true)
 end
 
@@ -1576,8 +1949,11 @@ function parse_range!(cc::CompressionContext, base::Ptr{UInt8}, bstart::Ptr{UInt
                       first::Bool)
     p = cc.params
     ss = cc.ss
+    ss.wlimit = bend - 32
     window = 1 << p.window_log
-    lowlimit = max(1, pos_of(bend, base) - window)
+    # matches may reach `window` bytes back from each position (checked per
+    # position); none can reach before this
+    lowlimit = max(1, pos_of(bstart, base) - window)
     n = Int(bend - bstart)
     if n < HASH_READ_SIZE + 4
         store_last_literals!(ss, bstart, n)
@@ -1587,22 +1963,28 @@ function parse_range!(cc::CompressionContext, base::Ptr{UInt8}, bstart::Ptr{UInt
     if p.strategy == S_FAST
         step = p.target_length + 1
         cc.prep1, cc.prep2 = parse_fast!(ss, cc.htab, p.hash_log, mls, step, base, bstart, bend,
-                                         lowlimit, cc.prep1, cc.prep2)
+                                         lowlimit, cc.prep1, cc.prep2, window)
     elseif p.strategy == S_DFAST
         cc.prep1, cc.prep2 = parse_dfast!(ss, cc.htab, p.hash_log, cc.ctab, p.chain_log, mls,
-                                          base, bstart, bend, lowlimit, cc.prep1, cc.prep2)
+                                          base, bstart, bend, lowlimit, cc.prep1, cc.prep2, window)
     elseif p.strategy >= S_BTOPT
         cc.next_to_update = max(cc.next_to_update, lowlimit)
         cc.next_to_update = parse_opt!(ss, cc.opt, cc.htab, p.hash_log, cc.ctab, p.chain_log,
-            clamp(p.min_match, 3, 4), 1 << p.search_log, max(p.target_length, 8), p.strategy == S_BTULTRA,
-            base, bstart, bend, lowlimit, cc.rep, cc.next_to_update, first)
+            clamp(p.min_match, 3, 4), 1 << p.search_log, max(p.target_length, 8), p.strategy >= S_BTULTRA,
+            base, bstart, bend, lowlimit, cc.rep, cc.next_to_update, first, window)
     else
         depth = p.strategy == S_GREEDY ? 0 : p.strategy == S_LAZY ? 1 : 2
         mls = clamp(p.min_match, 4, 6)
         cc.next_to_update = max(cc.next_to_update, lowlimit)
-        cc.prep1, cc.prep2, cc.next_to_update = parse_lazy!(ss, cc.htab, p.hash_log, cc.ctab,
-            row_log(p), mls, 1 << min(p.search_log, row_log(p)), depth, max(p.target_length, 4), base, bstart, bend,
-            lowlimit, cc.prep1, cc.prep2, cc.next_to_update)
+        if p.strategy == S_BTLAZY2
+            cc.prep1, cc.prep2, cc.next_to_update = parse_lazy!(Val(true), ss, cc.htab, p.hash_log, cc.ctab,
+                p.chain_log - 1, mls, 1 << p.search_log, depth, base, bstart, bend,
+                lowlimit, cc.prep1, cc.prep2, cc.next_to_update, window)
+        else
+            cc.prep1, cc.prep2, cc.next_to_update = parse_lazy!(Val(false), ss, cc.htab, p.hash_log, cc.ctab,
+                row_log(p), mls, 1 << min(p.search_log, row_log(p)), depth, base, bstart, bend,
+                lowlimit, cc.prep1, cc.prep2, cc.next_to_update, window)
+        end
     end
     return
 end
@@ -1611,6 +1993,14 @@ end
 function compress_block!(cc::CompressionContext, out::Vector{UInt8}, pos::Int, base::Ptr{UInt8},
                          bstart::Ptr{UInt8}, bend::Ptr{UInt8}, last::Bool,
                          ldm::Union{Nothing,LdmCursor}=nothing)
+    newpos = compress_block_body!(cc, out, pos, base, bstart, bend, last, ldm)
+    cc.savings += Int(bend - bstart) - (newpos - pos)
+    return newpos
+end
+
+function compress_block_body!(cc::CompressionContext, out::Vector{UInt8}, pos::Int, base::Ptr{UInt8},
+                              bstart::Ptr{UInt8}, bend::Ptr{UInt8}, last::Bool,
+                              ldm::Union{Nothing,LdmCursor})
     n = Int(bend - bstart)
     # RLE block
     if n > 0
@@ -1630,6 +2020,20 @@ function compress_block!(cc::CompressionContext, out::Vector{UInt8}, pos::Int, b
         end
     end
     ldm === nothing ? parse_block!(cc, base, bstart, bend) : parse_block_ldm!(cc, base, bstart, bend, ldm)
+    if cc.target_block > 0
+        p2 = emit_target_blocks!(cc, out, pos, bstart, n, last, cc.target_block)
+        p2 != 0 && return p2
+    elseif cc.params.strategy >= S_BTOPT && cc.params.window_log >= 17
+        cc.split === nothing && (cc.split = SplitState())
+        p2 = emit_split_block!(cc, out, pos, bstart, n, last)
+        p2 != 0 && return p2
+    end
+    return emit_parsed_block!(cc, out, pos, bstart, n, last)
+end
+
+"""Encode the parsed sequences in cc.ss for source [bstart, bstart+n) as one block."""
+function emit_parsed_block!(cc::CompressionContext, out::Vector{UInt8}, pos::Int,
+                            bstart::Ptr{UInt8}, n::Int, last::Bool)
     snap = EntropySnapshot(cc.rep, cc.ll_prev_ok, cc.ml_prev_ok, cc.of_prev_ok, cc.huf_prev_ok)
     blk = cc.blk
     need = 2n + 1024
@@ -1637,6 +2041,11 @@ function compress_block!(cc::CompressionContext, out::Vector{UInt8}, pos::Int, b
     q = encode_literals!(cc, blk, 1, cc.ss.lit, cc.ss.nlit)
     q = encode_sequences!(cc, blk, q)
     csize = q - 1
+    # A block split into parts (postsplit.jl) writes a 3-byte header per part,
+    # more than the callers' per-block reservation allows for when many parts
+    # fall back to raw, so make room here.
+    need = pos + 3 + min(n, csize)
+    length(out) < need && resize!(out, max(need, length(out) + length(out) >> 1))
     if csize >= n || csize > BLOCK_SIZE_MAX
         # raw block; the decoder's entropy state does not change
         cc.rep = snap.rep
@@ -1658,11 +2067,15 @@ Write a frame header. `src_size < 0` means unknown (no Frame_Content_Size);
 `dict_id == 0` omits the dictionary ID.
 """
 function write_frame_header!(out::Vector{UInt8}, pos::Int, src_size::Int, window_log::Int,
-                             checksum::Bool, dict_id::UInt32=UInt32(0))
-    for k in 0:3
-        out[pos + k] = (MAGIC_NUMBER >> (8k)) % UInt8
+                             checksum::Bool, dict_id::UInt32=UInt32(0), fo::FrameOptions=DEFAULT_FRAME)
+    if !fo.magicless
+        for k in 0:3
+            out[pos + k] = (MAGIC_NUMBER >> (8k)) % UInt8
+        end
+        pos += 4
     end
-    pos += 4
+    fo.content_size || (src_size = -1)
+    fo.dict_id || (dict_id = UInt32(0))
     window = 1 << window_log
     known = src_size >= 0
     single = known && src_size <= window
@@ -1704,7 +2117,8 @@ Compress `data` as a single Zstandard frame.
 function compress_frame!(cc::CompressionContext, data::AbstractVector{UInt8}, level::Integer;
                          checksum::Bool=false,
                          dict::Union{Nothing,ZstdDictionary,PreparedDictionary}=nothing,
-                         long::Bool=false, params::ParameterOverrides=NO_OVERRIDES)
+                         long::Bool=false, params::ParameterOverrides=NO_OVERRIDES,
+                         dest::Union{Nothing,Vector{UInt8}}=nothing, frame::FrameOptions=DEFAULT_FRAME)
     prepared = nothing
     if dict isa PreparedDictionary
         level = dict.level
@@ -1737,8 +2151,22 @@ function compress_frame!(cc::CompressionContext, data::AbstractVector{UInt8}, le
         dict === nothing || apply_dict_entropy!(cc, dict)
     end
     bound = n + (n >> 7) + 64 + 3 * (n ÷ BLOCK_SIZE_MAX + 1)
-    out = Vector{UInt8}(undef, bound)
-    pos = write_frame_header!(out, 1, n, p.window_log, checksum, dict === nothing ? UInt32(0) : dict.id)
+    # Compress into the context's scratch buffer (reused across calls, up to
+    # OUT_SCRATCH_MAX) and copy out the exact result: allocating the worst-case
+    # size on every call costs more in GC than the copy.
+    # (`dest`: write into the caller's vector instead, resized to the frame)
+    scratch = dest === nothing && bound <= OUT_SCRATCH_MAX
+    if dest !== nothing
+        out = dest
+        length(out) < bound && resize!(out, bound)
+    elseif scratch
+        length(cc.outbuf) < bound && resize!(cc.outbuf, bound)
+        out = cc.outbuf
+    else
+        out = Vector{UInt8}(undef, bound)
+    end
+    pos = write_frame_header!(out, 1, n, p.window_log, checksum, dict === nothing ? UInt32(0) : dict.id, frame)
+    cc.target_block = frame.target_block_size
     GC.@preserve src begin
         base = pointer(src)
         dlen > 0 && prepared === nothing && load_dict!(cc, base, dlen)
@@ -1746,7 +2174,7 @@ function compress_frame!(cc::CompressionContext, data::AbstractVector{UInt8}, le
         if long && n >= 1 << 16
             mm = p.strategy >= S_BTULTRA ? 32 : 64
             ldm = ldm_sequences(base, dlen + 1, dlen + n, 1 << p.window_log, mm,
-                                max(6, min(20, p.window_log - 7)))
+                                max(6, min(20, p.window_log - 7)), 1)   # dictionary content indexed too
         end
         bmax = block_size(p)
         if n == 0
@@ -1754,7 +2182,7 @@ function compress_frame!(cc::CompressionContext, data::AbstractVector{UInt8}, le
         else
             off = dlen
             while off < dlen + n
-                bn = min(bmax, dlen + n - off)
+                bn = next_block_size(cc, base + off, dlen + n - off, bmax)
                 last = off + bn == dlen + n
                 length(out) < pos + bn + 16 && resize!(out, pos + bn + 1024)
                 pos = compress_block!(cc, out, pos, base, base + off, base + off + bn, last, ldm)
@@ -1770,6 +2198,7 @@ function compress_frame!(cc::CompressionContext, data::AbstractVector{UInt8}, le
         end
         pos += 4
     end
+    scratch && return out[1:pos-1]
     resize!(out, pos - 1)
     return out
 end
@@ -1782,15 +2211,18 @@ end
     mt_layout(n, level) -> (params, job_size, overlap)
 
 Job layout for multithreaded compression of `n` bytes, after libzstd's
-defaults: jobs of at least one window (min 1 MiB; four windows for the
-optimal parser, whose history is expensive to load), each loading part of the
-preceding data as history (window/8 for fast..lazy2, more for optimal parsing).
+defaults: jobs of four windows (at least 1 MiB), each loading part of the
+preceding data as history (libzstd's overlapLog: window/8 for fast..lazy,
+window/4 for lazy2 and btlazy2, window/2 for btopt and btultra, the whole
+window for btultra2).
 """
 function mt_layout(n::Int, level::Integer, ov::ParameterOverrides=NO_OVERRIDES)
     p = compression_parameters(level, n, ov)
     window = 1 << p.window_log
-    job = max(1 << 20, p.strategy >= S_BTOPT ? 4window : window)
-    overlap = window >> (p.strategy == S_BTULTRA ? 1 : p.strategy == S_BTOPT ? 2 : 3)
+    job = max(1 << 20, 4window)          # libzstd: jobLog = max(20, windowLog + 2)
+    # libzstd's default overlapLog: 9 for btultra2, 8 btopt/btultra, 7 lazy2/btlazy2, 6 otherwise
+    overlap = window >> (p.strategy >= S_BTULTRA2 ? 0 : p.strategy >= S_BTOPT ? 1 :
+                         p.strategy >= S_LAZY2 ? 2 : 3)
     return p, job, overlap
 end
 
@@ -1819,7 +2251,7 @@ function compress_job!(cc::CompressionContext, p::CParams, level::Integer, data:
         off = job_start - 1
         bmax = block_size(p)
         while off < job_end
-            bn = min(bmax, job_end - off)
+            bn = next_block_size(cc, base + off, job_end - off, bmax)
             lastb = last && off + bn == job_end
             length(out) < pos + bn + 16 && resize!(out, pos + bn + 1024)
             pos = compress_block!(cc, out, pos, base, base + off, base + off + bn, lastb)
@@ -1831,9 +2263,9 @@ function compress_job!(cc::CompressionContext, p::CParams, level::Integer, data:
 end
 
 """Frame header bytes (as written by compress_frame!) for an input of n bytes."""
-function frame_header_bytes(n::Int, p::CParams, checksum::Bool)
+function frame_header_bytes(n::Int, p::CParams, checksum::Bool, frame::FrameOptions=DEFAULT_FRAME)
     out = Vector{UInt8}(undef, 32)
-    pos = write_frame_header!(out, 1, n, p.window_log, checksum)
+    pos = write_frame_header!(out, 1, n, p.window_log, checksum, UInt32(0), frame)
     return resize!(out, pos - 1)
 end
 
@@ -1872,13 +2304,18 @@ mutable struct StreamCompressor
     total::Int           # bytes written to the current frame
     params::ParameterOverrides
     bsize::Int           # block size of the current frame
+    frame::FrameOptions
+    size_hint::Int       # expected input size when none is pledged (-1: none)
+    consumed::Int        # input bytes of the current frame compressed so far
     deferred::Bool       # prepared dictionary, no pledge: tables chosen at the first block
 end
 
 function StreamCompressor(; level::Union{Nothing,Integer}=nothing, checksum::Bool=false,
                           dict::Union{Nothing,ZstdDictionary,PreparedDictionary}=nothing,
                           pledged_size::Union{Nothing,Integer}=nothing,
-                          params::ParameterOverrides=NO_OVERRIDES)
+                          params::ParameterOverrides=NO_OVERRIDES, frame::FrameOptions=DEFAULT_FRAME,
+                          size_hint::Union{Nothing,Integer}=nothing)
+    size_hint === nothing || size_hint >= 0 || throw(ArgumentError("size_hint must be non-negative"))
     if dict isa PreparedDictionary
         use_prepared(dict, 0, level, params)    # checks level and parameters
         level = dict.level
@@ -1886,7 +2323,8 @@ function StreamCompressor(; level::Union{Nothing,Integer}=nothing, checksum::Boo
     end
     level = level === nothing ? 3 : Int(level)
     sc = StreamCompressor(CompressionContext(), level, checksum, dict, UInt8[], 0, 1, 0, 0,
-                          UInt8[], 0, false, false, ChecksumState(), -1, 0, params, BLOCK_SIZE_MAX, false)
+                          UInt8[], 0, false, false, ChecksumState(), -1, 0, params, BLOCK_SIZE_MAX,
+                          frame, size_hint === nothing ? -1 : Int(size_hint), 0, false)
     pledged_size === nothing || stream_pledge!(sc, pledged_size)
     return sc
 end
@@ -1930,6 +2368,7 @@ function stream_begin!(sc::StreamCompressor)
     end
     sc.xxh = ChecksumState()
     sc.total = 0
+    sc.consumed = 0
     sc.started = true
     sc.finished = false
     return sc
@@ -1947,7 +2386,9 @@ function stream_setup!(sc::StreamCompressor, pd::Union{Nothing,PreparedDictionar
         p = pd.params
         use_prepared!(cc, pd)
     else
-        p = compression_parameters(sc.level, sc.pledged < 0 ? -1 : sc.pledged + dlen, sc.params)
+        # parameters for the pledged size, else the size hint (ZSTD_c_srcSizeHint)
+        expect = sc.pledged >= 0 ? sc.pledged : sc.size_hint
+        p = compression_parameters(sc.level, expect < 0 ? -1 : expect + dlen, sc.params)
         reset_context!(cc, p, sc.level)
         dict === nothing || apply_dict_entropy!(cc, dict)
     end
@@ -1967,7 +2408,8 @@ function stream_setup!(sc::StreamCompressor, pd::Union{Nothing,PreparedDictionar
     dlen > 0 && pd === nothing && GC.@preserve sc load_dict!(cc, pointer(sc.buf), dlen)
     out_reserve!(sc, 32)
     sc.olen = write_frame_header!(sc.out, sc.olen + 1, sc.pledged, p.window_log, sc.checksum,
-                                  dict === nothing ? UInt32(0) : dict.id) - 1
+                                  dict === nothing ? UInt32(0) : dict.id, sc.frame) - 1
+    cc.target_block = sc.frame.target_block_size
     sc.deferred = false
     return sc
 end
@@ -1975,12 +2417,28 @@ end
 # Shift tables and buffer down by `d` bytes (a multiple of sc.gran).
 function rebase!(sc::StreamCompressor, d::Int)
     cc = sc.cc
+    dubt = cc.params.strategy == S_BTLAZY2
     for t in (is_row(cc.params) ? (cc.htab,) : (cc.htab, cc.ctab))   # row tags are not positions
+        marks = dubt && t === cc.ctab
         @inbounds for i in eachindex(t)
-            v = Int(t[i]) - d
-            t[i] = v < 1 ? Int32(0) : v % Int32
+            if marks && iseven(i)
+                # DUBT: keep the "unsorted" marks (second slot of each pair), and
+                # never turn a shifted position into one
+                t[i] == DUBT_UNSORTED && continue
+                v = Int(t[i]) - d
+                t[i] = v <= 1 ? Int32(0) : v % Int32
+            else
+                v = Int(t[i]) - d
+                t[i] = v < 1 ? Int32(0) : v % Int32
+            end
         end
     end
+    h3 = cc.opt.h3
+    @inbounds for i in eachindex(h3)
+        v = Int(h3[i]) - d
+        h3[i] = v < 1 ? Int32(0) : v % Int32
+    end
+    cc.opt.h3next = max(1, cc.opt.h3next - d)
     cc.next_to_update = max(1, cc.next_to_update - d)
     copyto!(sc.buf, 1, sc.buf, d + 1, sc.len - d)
     sc.len -= d
@@ -1989,10 +2447,18 @@ function rebase!(sc::StreamCompressor, d::Int)
 end
 
 # Make room for n more input bytes (n <= BLOCK_SIZE_MAX).
+# Grow a buffer to exactly `n` bytes, keeping its first `keep` bytes (resize!
+# over-allocates, which would make stream memory up to twice the window).
+function grow_exact(v::Vector{UInt8}, n::Int, keep::Int)
+    w = Vector{UInt8}(undef, n)
+    copyto!(w, 1, v, 1, keep)
+    return w
+end
+
 function make_input_room!(sc::StreamCompressor, n::Int)
     sc.len + n <= length(sc.buf) && return sc
     if length(sc.buf) < sc.cap
-        resize!(sc.buf, min(sc.cap, max(2 * length(sc.buf), sc.len + n)))
+        sc.buf = grow_exact(sc.buf, min(sc.cap, max(2 * length(sc.buf), sc.len + n)), sc.len)
         sc.len + n <= length(sc.buf) && return sc
     end
     window = 1 << sc.cc.params.window_log
@@ -2002,6 +2468,14 @@ function make_input_room!(sc::StreamCompressor, n::Int)
     end
     sc.len + n > length(sc.buf) && resize!(sc.buf, sc.len + n)
     return sc
+end
+
+function stream_block_size(sc::StreamCompressor, pending::Int)
+    # deferred start: a block is about to be emitted, the size is still unknown
+    sc.deferred && stream_setup!(sc, nothing, false)
+    GC.@preserve sc begin
+        return next_block_size(sc.cc, pointer(sc.buf, sc.pend), pending, sc.bsize)
+    end
 end
 
 function emit_block!(sc::StreamCompressor, bn::Int, last::Bool)
@@ -2014,6 +2488,7 @@ function emit_block!(sc::StreamCompressor, bn::Int, last::Bool)
                                   base + sc.pend - 1 + bn, last) - 1
     end
     sc.pend += bn
+    sc.consumed += bn
     return sc
 end
 
@@ -2040,7 +2515,7 @@ function stream_write!(sc::StreamCompressor, data::AbstractVector{UInt8})
         i += k
         # keep the last (possibly full) block pending so it can be marked last
         while sc.len - sc.pend + 1 > sc.bsize
-            emit_block!(sc, sc.bsize, false)
+            emit_block!(sc, stream_block_size(sc, sc.len - sc.pend + 1), false)
         end
     end
     sc.checksum && checksum_update!(sc.xxh, data)
@@ -2050,8 +2525,10 @@ end
 """Compress all pending input into a non-final block, so that it can be decoded."""
 function stream_flush!(sc::StreamCompressor)
     sc.started || stream_begin!(sc)
-    n = sc.len - sc.pend + 1
-    n > 0 && !sc.finished && emit_block!(sc, n, false)
+    sc.finished && return sc
+    while (n = sc.len - sc.pend + 1) > 0
+        emit_block!(sc, stream_block_size(sc, n), false)
+    end
     return sc
 end
 
@@ -2066,7 +2543,11 @@ function stream_finish!(sc::StreamCompressor)
     sc.deferred && stream_setup!(sc, use_prepared(sc.dict, sc.total, nothing) ? sc.dict : nothing, false)
     n = sc.len - sc.pend + 1
     if n > 0
-        emit_block!(sc, n, true)
+        while n > 0
+            bn = stream_block_size(sc, n)
+            emit_block!(sc, bn, bn == n)
+            n -= bn
+        end
     else
         out_reserve!(sc, 3)
         sc.olen = write_block_header!(sc.out, sc.olen + 1, true, 0, 0) - 1

@@ -5,7 +5,8 @@ module Streaming
 import ..Decoder: DecoderState, ZstdDictionary, FrameInfo, read_frame_info, reset_frame!,
                   decode_compressed_block!, memset!, zerr, ensure_capacity!, ZstdError,
                   MAGIC_NUMBER, SKIPPABLE_MAGIC_START, SKIPPABLE_MASK, BLOCK_SIZE_MAX, WILDCOPY_SLACK
-import ..Encoder: StreamCompressor, stream_write!, stream_flush!, stream_finish!, PreparedDictionary,
+import ..Encoder: StreamCompressor, stream_write!, stream_flush!, stream_finish!, PreparedDictionary, FrameOptions,
+                  prefix_dict, prefix_params,
                   parameter_overrides
 using ..XXHash: ChecksumState, checksum_update!, checksum_digest
 
@@ -54,6 +55,9 @@ mutable struct StreamDecoder
     frame_produced::Int
     xxh::Union{Nothing,ChecksumState}
     max_window::Int      # largest window size accepted
+    magicless::Bool      # frames have no magic number (libzstd's ZSTD_f_zstd1_magicless)
+    consumed::Int        # input bytes fed
+    produced::Int        # bytes decoded (all frames)
 end
 
 """
@@ -66,18 +70,22 @@ with libzstd).
 const DEFAULT_MAX_WINDOW_SIZE = 1 << 27
 
 function StreamDecoder(dict::Union{Nothing,ZstdDictionary}=nothing;
-                       max_window_size::Integer=DEFAULT_MAX_WINDOW_SIZE)
+                       max_window_size::Integer=DEFAULT_MAX_WINDOW_SIZE, magicless::Bool=false)
     max_window_size >= 1 << 10 || throw(ArgumentError("max_window_size must be at least 1 KiB"))
-    StreamDecoder(dict, DecoderState(), Vector{UInt8}(undef, 64), 0, 4, U_MAGIC, 0, 0, false,
+    StreamDecoder(dict, DecoderState(), Vector{UInt8}(undef, 64), 0, magicless ? 1 : 4,
+        magicless ? U_FHDR1 : U_MAGIC, 0, 0, false,
         UInt8[], 1, 0, 0, false, 0, FrameInfo(0, 0, -1, 0, false, false), 0, nothing,
-        Int(max_window_size))
+        Int(max_window_size), magicless, 0, 0)
 end
+
+# Expect the start of the next frame.
+next_frame_unit!(d::StreamDecoder) = d.magicless ? set_unit!(d, U_FHDR1, 1) : set_unit!(d, U_MAGIC, 4)
 
 """Number of input bytes the decoder wants next (0 never happens)."""
 needed(d::StreamDecoder) = d.ustage == U_SKIP ? d.skip_left : d.want - d.have
 
 """True when the decoder is between frames (input may legitimately end here)."""
-at_boundary(d::StreamDecoder) = d.ustage == U_MAGIC && d.have == 0
+at_boundary(d::StreamDecoder) = (d.magicless ? d.ustage == U_FHDR1 : d.ustage == U_MAGIC) && d.have == 0
 
 available(d::StreamDecoder) = d.wpos - d.rpos + 1
 
@@ -106,7 +114,16 @@ function make_room!(d::StreamDecoder, n::Int)
     need = d.wpos + n + WILDCOPY_SLACK
     if length(d.out) < need
         compact!(d)
-        ensure_capacity!(d.out, d.wpos + n + WILDCOPY_SLACK)
+        need = d.wpos + n + WILDCOPY_SLACK
+        if length(d.out) < need
+            # grow exactly (resize! over-allocates): doubling, but not past
+            # what a frame needs, a window plus two blocks
+            full = d.fi.window_size + 2 * BLOCK_SIZE_MAX + WILDCOPY_SLACK
+            newlen = max(need, min(2 * length(d.out), full))
+            w = Vector{UInt8}(undef, newlen)
+            copyto!(w, 1, d.out, 1, d.wpos)
+            d.out = w
+        end
     end
 end
 
@@ -147,7 +164,7 @@ function end_frame!(d::StreamDecoder)
     else
         d.in_frame = false
         d.frames_done += 1
-        set_unit!(d, U_MAGIC, 4)
+        next_frame_unit!(d)
     end
 end
 
@@ -181,6 +198,7 @@ function decode_body!(d::StreamDecoder)
         end
     end
     d.frame_produced += d.wpos - start
+    d.produced += d.wpos - start
     if d.xxh !== nothing && d.wpos > start
         checksum_update!(d.xxh, view(d.out, start+1:d.wpos))
     end
@@ -250,7 +268,7 @@ function process_unit!(d::StreamDecoder)
         actual != expected && zerr("checksum mismatch")
         d.in_frame = false
         d.frames_done += 1
-        set_unit!(d, U_MAGIC, 4)
+        next_frame_unit!(d)
     end
     return d
 end
@@ -265,12 +283,14 @@ function feed!(d::StreamDecoder, p::Ptr{UInt8}, n::Int)
     if d.ustage == U_SKIP
         k = min(n, d.skip_left)
         d.skip_left -= k
+        d.consumed += k
         d.skip_left == 0 && set_unit!(d, U_MAGIC, 4)
         return k
     end
     k = min(n, d.want - d.have)
     GC.@preserve d unsafe_copyto!(pointer(d.unit, d.have + 1), p, k)
     d.have += k
+    d.consumed += k
     d.have == d.want && process_unit!(d)
     return k
 end
@@ -313,6 +333,9 @@ frame's window size plus one block. Frames declaring a window larger than
 `max_window_size` (default 128 MiB, as libzstd) are rejected with a
 `ZstdError`, so untrusted input cannot make the decoder allocate more; raise
 it to read frames written with a larger window (e.g. `zstd --long=30`).
+With `magicless=true`, frames are read without their magic number, and
+`prefix` decodes frames written with that reference prefix (see
+[`compress`](@ref Zstandard.compress)).
 
 After a decoding error (a `ZstdError`), the stream is unusable: later reads
 rethrow the same error (bytes decoded before it can still be read). Other
@@ -325,8 +348,9 @@ mutable struct ZstdDecompressorStream <: IO
 end
 
 ZstdDecompressorStream(io::IO, dict::Union{Nothing,ZstdDictionary}=nothing;
-                       max_window_size::Integer=DEFAULT_MAX_WINDOW_SIZE) =
-    ZstdDecompressorStream(io, StreamDecoder(dict; max_window_size), nothing)
+                       max_window_size::Integer=DEFAULT_MAX_WINDOW_SIZE, magicless::Bool=false,
+                       prefix::Union{Nothing,AbstractVector{UInt8}}=nothing) =
+    ZstdDecompressorStream(io, StreamDecoder(prefix_dict(prefix, dict); max_window_size, magicless), nothing)
 
 # Decode until at least one unread byte is available. Returns false at end of input.
 function fill_buffer!(s::ZstdDecompressorStream)
@@ -347,10 +371,25 @@ function fill_buffer_unchecked!(s::ZstdDecompressorStream)
             at_boundary(d) && return false
             zerr("truncated input")
         end
-        feed_from!(d, s.io) == 0 && zerr("truncated input")
+        got = feed_from!(d, s.io)
+        got == 0 && zerr("truncated input")
+        d.consumed += got
     end
     return true
 end
+
+"""
+    stream_progress(s::ZstdDecompressorStream) -> (; consumed, produced, frames)
+    stream_progress(s::ZstdCompressorStream) -> (; ingested, consumed, produced, flushed)
+
+Progress of a streaming (de)compressor, as libzstd's `ZSTD_getFrameProgression`.
+For a decompressor: compressed bytes read from the source, bytes decoded so far
+(read or still buffered) and frames completed. For a compressor: bytes written
+to the stream, bytes of those compressed so far, compressed bytes produced and
+compressed bytes written to the underlying IO.
+"""
+stream_progress(s::ZstdDecompressorStream) =
+    (; consumed=s.d.consumed, produced=s.d.produced, frames=s.d.frames_done)
 
 Base.bytesavailable(s::ZstdDecompressorStream) = available(s.d)
 Base.eof(s::ZstdDecompressorStream) = available(s.d) <= 0 && !fill_buffer!(s)
@@ -416,7 +455,8 @@ end
 
 """
     ZstdCompressorStream(io::IO; level=3, checksum=false, dict=nothing, pledged_size=nothing,
-                         close_io=true)
+                         close_io=true, size_hint=nothing, content_size=true, dict_id=true,
+                         magicless=false, window_log, ...)
 
 A streaming Zstandard compressor implementing the writable `IO` interface.
 Data written to the stream is compressed into a single frame and written to
@@ -429,9 +469,16 @@ Without `pledged_size` the frame header does not record the content size. With
 as in one-shot `compress`, and exactly `n` bytes must be written: writing more
 throws an `ArgumentError`, and so does `close` after writing fewer.
 
+Without a pledge, `size_hint = n` sizes the parameters for about `n` bytes
+(libzstd's `ZSTD_c_srcSizeHint`) without recording a size or limiting the
+input.
+
 `window_log`, `hash_log`, `chain_log`, `search_log`, `min_match`,
-`target_length` and `strategy` override the level's parameters, as for
-`compress`.
+`target_length` and `strategy` override the level's parameters,
+`content_size`, `dict_id`, `magicless` and `target_block_size` set frame
+options, and
+`prefix` sets a reference prefix, as for `compress` (the window is sized for
+the prefix plus the pledged size or size hint).
 `close` finishes the frame and, if `close_io` is true, closes `io` (pass
 `close_io=false` to keep writing to `io`, e.g. an `IOBuffer` read afterwards).
 """
@@ -440,22 +487,39 @@ mutable struct ZstdCompressorStream <: IO
     sc::StreamCompressor
     closed::Bool
     close_io::Bool
+    flushed::Int         # compressed bytes written to io
 end
 
 function ZstdCompressorStream(io::IO; level::Union{Nothing,Integer}=nothing, checksum::Bool=false,
                               dict::Union{Nothing,ZstdDictionary,PreparedDictionary}=nothing,
                               pledged_size::Union{Nothing,Integer}=nothing, close_io::Bool=true,
+                              size_hint::Union{Nothing,Integer}=nothing,
+                              content_size::Bool=true, dict_id::Bool=true, magicless::Bool=false,
+                              prefix::Union{Nothing,AbstractVector{UInt8}}=nothing,
+                              target_block_size::Union{Nothing,Integer}=nothing,
                               window_log=nothing, hash_log=nothing, chain_log=nothing, search_log=nothing, min_match=nothing, target_length=nothing, strategy=nothing)
     params = parameter_overrides(; window_log, hash_log, chain_log, search_log, min_match, target_length, strategy)
-    ZstdCompressorStream(io, StreamCompressor(; level, checksum, dict, pledged_size, params), false, close_io)
+    frame = FrameOptions(; content_size, dict_id, magicless, target_block_size)
+    dict = prefix_dict(prefix, dict)
+    expect = pledged_size !== nothing ? Int(pledged_size) : size_hint !== nothing ? Int(size_hint) :
+             prefix === nothing ? 0 : length(prefix)
+    params = prefix_params(params, prefix, level, expect)
+    ZstdCompressorStream(io, StreamCompressor(; level, checksum, dict, pledged_size, params, frame, size_hint),
+                         false, close_io, 0)
 end
 
 function drain!(s::ZstdCompressorStream)
     sc = s.sc
     if sc.olen > 0
         GC.@preserve sc unsafe_write(s.io, pointer(sc.out), sc.olen)
+        s.flushed += sc.olen
         sc.olen = 0
     end
+end
+
+function stream_progress(s::ZstdCompressorStream)
+    sc = s.sc
+    return (; ingested=sc.total, consumed=sc.consumed, produced=s.flushed + sc.olen, flushed=s.flushed)
 end
 
 function Base.unsafe_write(s::ZstdCompressorStream, p::Ptr{UInt8}, n::UInt)

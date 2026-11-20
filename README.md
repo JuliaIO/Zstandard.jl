@@ -4,15 +4,17 @@ A pure Julia implementation of the [Zstandard](https://facebook.github.io/zstd/)
 
 ## Features
 
-- **Compression** at levels -7 to 22 using libzstd-style strategies (fast, dfast, greedy, lazy, lazy2, and binary-tree optimal parsing for levels 16-22) with repeat-offset aware parsing
+- **Compression** at levels -7 to 22 with libzstd 1.5.7's strategies and parameter tables (fast, dfast, greedy/lazy/lazy2 with the row-based match finder, btlazy2, btopt, btultra, btultra2), block pre- and post-splitting, and repeat-offset aware parsing; ratios match or beat libzstd's at nearly every level (3-byte match finder for levels 18-22 included)
 - Huffman literals (direct or FSE-compressed weights, 1 or 4 streams, table reuse across blocks) and FSE sequence coding with predefined/RLE/compressed/repeat table selection
-- Frame content size recorded in the header; optional XXH64 content checksum
 - **Decompression** of all standard frames, including concatenated and skippable frames (decoded in parallel with `nthreads`), raw and formatted dictionaries
-- Streaming decompression via `ZstdDecompressorStream` (implements `IO`, memory bounded by the window size; frames with windows above `max_window_size`, default 128 MiB as in libzstd, are rejected)
-- Streaming compression via `ZstdCompressorStream` (implements `IO`, with `flush` support)
-- Dictionary compression (raw content or formatted dictionaries) and dictionary training (`train_dictionary`, fastCover as `zstd --train`)
-- Long-distance matching (`long=true`, as `zstd --long`) and multithreaded compression (`nthreads`)
-- Frame inspection: `frame_header`, `frame_content_size`, `frame_compressed_size`, `decompressed_size`, skippable frames
+- Streaming compression and decompression (`ZstdCompressorStream`, `ZstdDecompressorStream`, implementing `IO`): pledged sizes, size hints, mid-frame `flush`, a window limit for untrusted input, and progress counters (`stream_progress`)
+- Reusable contexts (`ZstdCompressionContext`, `ZstdDecompressionContext`) with `compress!` / `decompress!` into your own buffers
+- Dictionaries: compression with raw or formatted dictionaries, prepared dictionaries for many small inputs, training (`train_dictionary`: fastCover or exact COVER, with parameter search on several threads)
+- Reference prefixes (`prefix=`, as `zstd --patch-from`), long-distance matching (`long=true`), multithreaded compression (`nthreads`), `rsyncable` output
+- libzstd's advanced parameters (`window_log`, `strategy`, ...), frame header options (`content_size`, `dict_id`, magicless frames) and a target compressed block size
+- The seekable format (`compress_seekable`, `seek_table`, `decompress_range`), compatible with libzstd's `contrib/seekable_format`
+- Sequence-level API: `generate_sequences` and `compress_sequences` (as `ZSTD_generateSequences` / `ZSTD_compressSequences`)
+- Frame inspection (`frame_header`, `frame_content_size`, `frame_compressed_size`, `decompressed_size`, skippable frames) and memory estimates (`estimate_compression_memory`, `estimate_decompression_memory`)
 - [TranscodingStreams.jl](https://github.com/JuliaIO/TranscodingStreams.jl) codecs `ZstandardCompressor` / `ZstandardDecompressor` (package extension, loaded with `using TranscodingStreams`)
 - Malformed input is rejected with a `ZstdError`
 
@@ -81,6 +83,25 @@ frame_content_size(compressed)        # decompressed size from the header (or no
 frame_compressed_size(compressed)     # size of the first frame
 meta = skippable_frame("user metadata")
 
+# Reusable contexts: many small inputs without per-call allocation
+ctx = ZstdCompressionContext(level=3); out = UInt8[]
+for msg in messages
+    compress!(ctx, out, msg)          # `out` holds the frame
+end
+
+# Patches against an earlier version (as zstd --patch-from)
+patch = compress(new_version; prefix=old_version, level=19)
+decompress(patch; prefix=old_version)
+
+# Seekable archives: decode any range without decoding everything before it
+archive = compress_seekable(data; frame_size=1 << 20)
+decompress_range(archive, 5_000_001:5_100_000)
+open(io -> decompress_range(io, 1:1000), "archive.zst")     # reads only the frames needed
+
+# Sequences: inspect what the compressor finds, or encode matches found elsewhere
+seqs = generate_sequences(data; level=9)
+frame = compress_sequences(data, seqs)
+
 # TranscodingStreams codecs
 using TranscodingStreams
 compressed = transcode(ZstandardCompressor(level=3), data)
@@ -119,17 +140,23 @@ TranscodingStreams overhead. Scripts: `test/benchmark/compress_compare.jl` and
 
 | Data | Level | Ratio (Zstandard.jl / libzstd) | MB/s (Zstandard.jl / libzstd) |
 |------|------:|-------------------------------:|------------------------------:|
-| text   |  1 | 3.35 / 3.42 | 255 / 247 |
-| text   |  3 | 3.77 / 3.78 | 151 / 157 |
-| text   |  9 | 4.33 / 4.35 |  20 /  41 |
-| text   | 16 | 4.80 / 4.76 | 2.4 / 3.4 |
-| text   | 19 | 4.86 / 4.87 | 2.1 / 2.1 |
-| binary |  3 | 2.98 / 2.99 | 130 / 179 |
-| binary | 16 | 3.47 / 3.46 | 1.9 / 4.4 |
-| binary | 19 | 3.63 / 3.72 | 1.8 / 2.5 |
+| text   | -5 | 2.32 / 2.33 | 326 / 408 |
+| text   |  1 | 3.42 / 3.42 | 277 / 352 |
+| text   |  3 | 3.80 / 3.78 | 167 / 175 |
+| text   |  9 | 4.36 / 4.35 |  32 /  46 |
+| text   | 13 | 4.48 / 4.47 |  12 /  12 |
+| text   | 16 | 4.80 / 4.76 | 4.4 / 5.3 |
+| text   | 19 | 4.87 / 4.87 | 3.2 / 3.0 |
+| binary |  1 | 2.68 / 2.67 | 292 / 382 |
+| binary |  3 | 3.01 / 2.99 | 155 / 183 |
+| binary |  9 | 3.27 / 3.22 |  41 /  58 |
+| binary | 13 | 3.28 / 3.24 |  14 /  13 |
+| binary | 16 | 3.53 / 3.46 | 5.9 / 8.1 |
+| binary | 19 | 3.72 / 3.72 | 3.1 / 3.9 |
+| binary | 22 | 3.73 / 3.72 | 3.1 / 3.4 |
 
-Ratios are within about 3% of libzstd at all levels. Levels 13-15 use lazy2 (libzstd uses a
-binary-tree lazy parser there); levels 16-22 use an optimal parser with a binary-tree match finder.
+Ratios match or beat libzstd at every level measured (text level -5 is 0.1% behind); speed
+is within about 1.0-1.4x of libzstd's. Timings on this machine vary by about 10% between runs.
 
 ### Decompression (MB/s of output)
 

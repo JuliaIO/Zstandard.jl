@@ -241,3 +241,68 @@ end
     write(s, small); flush(s); write(s, small); close(s)
     @test decompress(take!(io), dict) == vcat(small, small)
 end
+
+@testset "target_block_size on the streaming paths" begin
+    # ~7.8 bits/byte literals with a short match every ~750 bytes: most
+    # 1340-byte parts fall back to raw blocks, each with its own header
+    function skew(seed, n)
+        r = lcg_bytes(3n, seed, 0x00:0xff); k = 0
+        nxt() = (k += 1; r[k])
+        d = UInt8[nxt() < 0x1f ? nxt() & 0x0f : nxt() for _ in 1:n]
+        i = 5000
+        while i + 16 < n
+            src = 1 + (Int(nxt()) << 8 | nxt()) % (i - 100)
+            copyto!(d, i, d, src, 5 + nxt() % 5); i += 600 + Int(nxt())
+        end
+        d
+    end
+    for (seed, n) in ((2, 400_000), (1, 131_072)), level in (5, 16, 19)
+        data = skew(seed, n)
+        io = IOBuffer()
+        s = Zstandard.ZstdCompressorStream(io; level, target_block_size=1340, close_io=false, checksum=true)
+        write(s, data); close(s)
+        c = take!(io)
+        @test decompress(c) == data
+        @test transcode(CodecZstd.ZstdDecompressor, c) == data
+        @test decompress(transcode(ZstandardCompressor(; level, target_block_size=1340), data)) == data
+    end
+end
+
+@testset "compress_sequences rejects oversized lengths" begin
+    S = ZstdSequence
+    @test_throws ArgumentError compress_sequences(UInt8[1, 2, 3, 4, 5, 5, 5, 5, 5],
+        [S(0, 5, 0), S(1, 0, 3), S(0, typemax(Int), 0), S(1, 0, 3), S(0, typemax(Int), 0)])
+    d = lcg_bytes(1000, 6, 0x00:0xff)
+    compress_sequences(d, [S(0, 1000, 0)])                       # compile
+    @test @elapsed(try compress_sequences(d, [S(1, 10^12, 3)]) catch end) < 1
+    @test_throws ArgumentError compress_sequences(d, [S(1, 10^12, 3)])
+    @test_throws ArgumentError compress_sequences(d, [S(1, 10, typemax(Int))])
+end
+
+@testset "Seekable archives" begin
+    # forged frame sizes in the seek table
+    tab = Zstandard._seek_table([(0, 4294967295, 0) for _ in 1:4], false)
+    @test_throws ZstdError seek_table(tab)
+    text = Vector{UInt8}(repeat("seekable archive keyword test ", 500))
+    @test_throws ArgumentError compress_seekable(text; frame_size=1000, prefix=text[1:100])
+    @test_throws ArgumentError compress_seekable(text; frame_size=1000, magicless=true)
+    b = compress_seekable(text; frame_size=1000, magicless=false)
+    @test decompress_range(b, 1:10) == text[1:10]
+    @test decompress_range(b, 1:length(text)) == text
+end
+
+@testset "Dictionary training with f = 32" begin
+    samples = [Vector{UInt8}("sample number $i: the quick brown fox jumps over the lazy dog $(i^2)\n"^8) for i in 1:100]
+    @test_throws ArgumentError train_dictionary(samples; dict_size=4000, f=32)   # segfaulted
+    @test length(train_dictionary(samples; dict_size=4000, f=16, k=200, d=8)) <= 4000
+end
+
+@testset "Small fixes" begin
+    @test decompress(compress(UInt8[]; rsyncable=true)) == UInt8[]
+    @test estimate_compression_memory(src_size=0, nthreads=4) == estimate_compression_memory(src_size=0)
+    ctx = ZstdDecompressionContext()
+    c = compress(lcg_bytes(300_000, 7, UInt8.(0:15)); checksum=true); c[end] ⊻= 0xff
+    out = UInt8[]
+    @test_throws ZstdError decompress!(ctx, out, c)
+    @test isempty(out)
+end

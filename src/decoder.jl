@@ -1028,20 +1028,25 @@ start and end on frame boundaries.
 """
 function decompress_frames(data::AbstractVector{UInt8}, st::DecoderState=DecoderState(),
                            dict::Union{Nothing,ZstdDictionary}=nothing;
-                           range::UnitRange{Int}=1:length(data))
+                           range::UnitRange{Int}=1:length(data),
+                           out::Vector{UInt8}=Vector{UInt8}(undef, 0), magicless::Bool=false,
+                           release::Bool=true)
     src = data isa Vector{UInt8} ? data : Vector{UInt8}(data)
     checkbounds(src, range)
     n = range.stop            # last valid input index
-    out = Vector{UInt8}(undef, 0)
     produced = 0
     pos = range.start
     first = true
     GC.@preserve src begin
         p = pointer(src)
         while pos <= n
-            n - pos + 1 < 4 && zerr("truncated frame (magic number)")
-            magic = load32(p + pos - 1)
-            pos += 4
+            if magicless
+                magic = MAGIC_NUMBER         # frames without magic numbers (no skippable frames)
+            else
+                n - pos + 1 < 4 && zerr("truncated frame (magic number)")
+                magic = load32(p + pos - 1)
+                pos += 4
+            end
             if magic & SKIPPABLE_MASK == SKIPPABLE_MAGIC_START
                 n - pos + 1 < 4 && zerr("truncated skippable frame")
                 sz = Int(load32(p + pos - 1)); pos += 4
@@ -1066,7 +1071,7 @@ function decompress_frames(data::AbstractVector{UInt8}, st::DecoderState=Decoder
             guess = frame_presize(p, pos, n, fi.window_size)
             fi.content_size >= 0 && (guess = min(guess, Int(fi.content_size)))
             if first
-                resize!(out, guess + WILDCOPY_SLACK)
+                length(out) < guess + WILDCOPY_SLACK && resize!(out, guess + WILDCOPY_SLACK)
                 first = false
             else
                 ensure_capacity!(out, produced + guess + WILDCOPY_SLACK)
@@ -1131,7 +1136,8 @@ function decompress_frames(data::AbstractVector{UInt8}, st::DecoderState=Decoder
     cap = length(out)
     resize!(out, produced)
     # release capacity left over from growing (more than a quarter extra)
-    cap > produced + produced >> 2 + (1 << 16) && sizehint!(out, produced)
+    # (not for a caller's `out` reused across calls: `release=false`)
+    release && cap > produced + produced >> 2 + (1 << 16) && sizehint!(out, produced)
     return out
 end
 
