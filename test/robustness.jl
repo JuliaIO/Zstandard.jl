@@ -7,7 +7,7 @@ using Test
     x = UInt64(2)
     data = UInt8[(x = x * 6364136223846793005 + 1442695040888963407; (x >> 60) % UInt8) for _ in 1:1000]
     bad = compress(data; checksum=true); bad[end] ⊻= 0x01
-    s = ZstdDecompressorStream(IOBuffer(bad))
+    s = Zstandard.ZstdDecompressorStream(IOBuffer(bad))
     e1 = try read(s) catch e; e end
     e2 = try read(s) catch e; e end
     @test e1 isa ZstdError
