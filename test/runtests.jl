@@ -78,6 +78,7 @@ end
 
 include("compress.jl")
 include("api.jl")
+include("regressions.jl")
 
 @testset "Aqua.jl" begin
     Aqua.test_all(Zstandard)
