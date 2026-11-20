@@ -74,3 +74,45 @@ end
         @test transcode(CodecZstd.ZstdDecompressor, c) == d
     end
 end
+
+# a frame header with an 8-byte content size field, then an empty raw last block
+forged_fcs(fcs::UInt64) = vcat(reinterpret(UInt8, [0xFD2FB528]), UInt8[0xC0, 0x00],
+                               reinterpret(UInt8, [fcs]), UInt8[0x01, 0x00, 0x00])
+
+@testset "decompressed_size does not wrap" begin
+    big1 = forged_fcs(UInt64(2)^62)
+    @test decompressed_size(big1) == 2^62
+    @test_throws ZstdError decompressed_size(vcat(big1, big1))
+    @test_throws ZstdError decompressed_size(vcat(big1, big1, big1, big1))
+end
+
+@testset "Frame inspection offsets" begin
+    c = compress(lcg_bytes(1000, 3, 0x00:0xff))
+    @test !is_zstd_frame(c; offset=0)
+    @test !is_skippable_frame(c; offset=-3)
+    @test_throws ArgumentError frame_compressed_size(c; offset=0)
+    @test_throws ArgumentError frame_header(c; offset=0)
+    @test_throws ArgumentError frame_content_size(c; offset=0)
+end
+
+@testset "Dictionary training" begin
+    # flat literal statistics: samples covered by the dictionary content, or zeros
+    words = ["alpha", "beta", "gamma", "{\"id\":", "true", "1234"]
+    txt(n, seed) = Vector{UInt8}(join([words[(x % 6) + 1] for x in lcg_bytes(n, seed, 0x00:0xff)], " "))
+    for samples in ([txt(100, 1)], [zeros(UInt8, 100_000)])
+        dict_size = samples[1][1] == 0 ? 1000 : 112640
+        dict = train_dictionary(samples; dict_size)
+        @test length(dict) <= dict_size
+        d = parse_dictionary(dict)
+        @test decompress(compress(samples[1]; dict=d), d) == samples[1]
+    end
+    samples = [Vector{UInt8}("sample number $i: the quick brown fox jumps over the lazy dog $(i^2)\n"^8) for i in 1:100]
+    for f in (0, 32, 65)
+        @test_throws ArgumentError train_dictionary(samples; dict_size=4000, f)
+    end
+    @test_throws ArgumentError train_dictionary(samples; dict_size=4000, k=0)
+    @test_throws ArgumentError train_dictionary(samples; dict_size=4000, k=7, d=8)
+    content = reduce(vcat, samples)[1:3000]
+    @test_throws ArgumentError finalize_dictionary(content, samples; dict_id=-1)
+    @test_throws ArgumentError finalize_dictionary(content, samples; dict_id=Int64(typemax(UInt32)) + 1)
+end
