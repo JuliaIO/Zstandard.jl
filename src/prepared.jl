@@ -18,7 +18,9 @@ const PREPARED_DICT_SRC_HINT = 16 << 10
 A dictionary digested for compression at one level: match-finder tables with
 the dictionary content inserted, and its entropy tables, ready to be copied
 into a compression context. Create with [`prepare_dictionary`](@ref).
-Read-only after creation, so it can be shared between tasks.
+Read-only after creation, so it can be shared between tasks. Use
+[`compression_level`](@ref) and `ZstandardDictionary(pd)` to inspect it; its
+fields are internal.
 """
 struct PreparedDictionary
     dict::ZstandardDictionary
@@ -32,6 +34,20 @@ struct PreparedDictionary
     huf::HufCTable
     has_entropy::Bool
 end
+
+"""
+    compression_level(pd::PreparedDictionary) -> Int
+
+The level `pd` was prepared for, which every compression with it uses.
+"""
+compression_level(pd::PreparedDictionary) = pd.level
+
+"""
+    ZstandardDictionary(pd::PreparedDictionary) -> ZstandardDictionary
+
+The dictionary `pd` was prepared from: the one to decompress its frames with.
+"""
+ZstandardDictionary(pd::PreparedDictionary) = pd.dict
 
 Base.show(io::IO, pd::PreparedDictionary) =
     print(io, "PreparedDictionary(id=", pd.dict.id, ", ", length(pd.dict.content),

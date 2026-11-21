@@ -29,8 +29,8 @@ using CodecZstd
     @test decompressed_size(vcat(a, s, c)) == 1600 + 70_000
     @test decompressed_size(data) === nothing
 
-    @test is_zstd_frame(a) && is_zstd_frame(s)
-    @test !is_zstd_frame(UInt8[1, 2, 3, 4, 5])
+    @test is_zstandard_frame(a) && is_zstandard_frame(s)
+    @test !is_zstandard_frame(UInt8[1, 2, 3, 4, 5])
     @test is_skippable_frame(s) && !is_skippable_frame(a)
     @test read_skippable_frame(data; offset=length(a) + 1) == (7, Vector{UInt8}("metadata"))
     @test decompress(data) == vcat(decompress(a), decompress(c), decompress(b))

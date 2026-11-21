@@ -126,7 +126,7 @@ end
 
 @testset "Frame inspection offsets" begin
     c = compress(lcg_bytes(1000, 3, 0x00:0xff))
-    @test !is_zstd_frame(c; offset=0)
+    @test !is_zstandard_frame(c; offset=0)
     @test !is_skippable_frame(c; offset=-3)
     @test_throws ArgumentError frame_compressed_size(c; offset=0)
     @test_throws ArgumentError frame_header(c; offset=0)

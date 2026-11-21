@@ -162,6 +162,16 @@ const WORDS_B = ["<div class=\"", "\">", "</div>", "<span>", "</span>", "href=",
         @test Zstandard.dictionary_content(da) == da.content
         @test Zstandard.dictionary_id(da) == frame_dict_id(frames[1])
         @test Base.ispublic(Zstandard, :dictionary_id) || VERSION < v"1.11"
+        # Base.parse is parse_dictionary
+        bytes = finalize_dictionary(da.content, samples_a; dict_id=da.id)
+        @test Zstandard.dictionary_id(parse(ZstandardDictionary, bytes)) == da.id
+        @test parse(ZstandardDictionary, view(bytes, 1:length(bytes))).content == parse_dictionary(bytes).content
+        @test Zstandard.dictionary_id(parse(ZstandardDictionary, UInt8[1, 2, 3])) == 0
+        # prepared dictionaries
+        pd = Zstandard.prepare_dictionary(da; level=7)
+        @test Zstandard.compression_level(pd) == 7
+        @test ZstandardDictionary(pd) === da
+        @test decompress(compress(texts[1]; dict=pd); dict=ZstandardDictionary(pd)) == texts[1]
     end
 
     @testset "dict keyword" begin

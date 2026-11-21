@@ -5,27 +5,19 @@
 
 ## Public API
 
+Exported names can be used after `using Zstandard`; the other public names are
+used as `Zstandard.name`.
+
 ```@autodocs
-Modules = [Zstandard]
+Modules = [Zstandard, Zstandard.Decoder, Zstandard.Encoder, Zstandard.Streaming]
+Filter = t -> begin
+    n = try nameof(t) catch; nothing end
+    n isa Symbol && Base.ispublic(Zstandard, n) && isdefined(Zstandard, n) && getfield(Zstandard, n) === t
+end
 ```
 
-### Streams
-
 ```@docs
-ZstandardCompressorStream
-ZstandardDecompressorStream
-Zstandard.stream_progress
-```
-
-### Dictionaries and errors
-
-```@docs
-ZstandardDictionary
-ZstandardDictionarySet
-parse_dictionary
-Zstandard.dictionary_id
-Zstandard.dictionary_content
-ZstandardError
+Base.parse(::Type{ZstandardDictionary}, ::AbstractVector{UInt8})
 ```
 
 ## Internals
@@ -33,10 +25,10 @@ ZstandardError
 These are implementation details and may change without notice.
 
 ```@autodocs
-Modules = [Zstandard.Decoder, Zstandard.Encoder, Zstandard.Streaming, Zstandard.XXHash]
-Filter = t -> !(t in (Zstandard.ZstandardDictionary, Zstandard.ZstandardDictionarySet,
-                      Zstandard.parse_dictionary, Zstandard.ZstandardError,
-                      Zstandard.dictionary_id, Zstandard.dictionary_content,
-                      Zstandard.ZstandardCompressorStream, Zstandard.ZstandardDecompressorStream,
-                      Zstandard.stream_progress))
+Modules = [Zstandard, Zstandard.Decoder, Zstandard.Encoder, Zstandard.Streaming, Zstandard.XXHash]
+Filter = t -> begin
+    n = try nameof(t) catch; nothing end
+    t !== Base.parse &&
+        !(n isa Symbol && Base.ispublic(Zstandard, n) && isdefined(Zstandard, n) && getfield(Zstandard, n) === t)
+end
 ```

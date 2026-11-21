@@ -10,6 +10,12 @@ bytes copied from `offset` bytes back (as libzstd's `ZSTD_Sequence`, with
 `offset` the actual distance, not a repeat-offset code). A sequence with
 `offset == 0` and `match_length == 0` is a block delimiter: its literals end
 the block.
+
+!!! warning "Experimental"
+    The sequence API mirrors an experimental libzstd feature
+    (`ZSTD_generateSequences`, `ZSTD_compressSequences` and `ZSTD_Sequence`,
+    available only with `ZSTD_STATIC_LINKING_ONLY`). It may change in a minor
+    release of Zstandard.jl, for example to follow changes in libzstd.
 """
 struct ZstandardSequence
     offset::Int
@@ -29,6 +35,12 @@ The sequences the compressor finds for `data` at `level` (as libzstd's
 delimiter carrying its trailing literals. `compress_sequences(data, seqs)`
 turns them back into a frame. Parameter keywords are those of
 [`compress`](@ref).
+
+!!! warning "Experimental"
+    The sequence API mirrors an experimental libzstd feature
+    (`ZSTD_generateSequences`, `ZSTD_compressSequences` and `ZSTD_Sequence`,
+    available only with `ZSTD_STATIC_LINKING_ONLY`). It may change in a minor
+    release of Zstandard.jl, for example to follow changes in libzstd.
 """
 function generate_sequences(data::Union{AbstractVector{UInt8},AbstractString}; level::Integer=3,
                             window_log=nothing, hash_log=nothing, chain_log=nothing, search_log=nothing,
@@ -145,6 +157,12 @@ libzstd's `ZSTD_sf_explicitBlockDelimiters` and `ZSTD_sf_noBlockDelimiters`).
 With `validate=true` every match is also
 checked against `data` (otherwise a wrong match silently changes what the
 frame decodes to). `level` selects the entropy coding effort.
+
+!!! warning "Experimental"
+    The sequence API mirrors an experimental libzstd feature
+    (`ZSTD_generateSequences`, `ZSTD_compressSequences` and `ZSTD_Sequence`,
+    available only with `ZSTD_STATIC_LINKING_ONLY`). It may change in a minor
+    release of Zstandard.jl, for example to follow changes in libzstd.
 """
 function compress_sequences(data::Union{AbstractVector{UInt8},AbstractString}, seqs::AbstractVector{ZstandardSequence};
                             level::Integer=3, checksum::Bool=false, validate::Bool=true)

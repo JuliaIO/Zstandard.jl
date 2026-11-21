@@ -41,6 +41,13 @@ ZstandardDictionary(content::AbstractVector{UInt8}) =
                         Vector{UInt8}(content), UInt8[], Int16[], Int16[], Int16[])
 
 """
+    parse(ZstandardDictionary, data::AbstractVector{UInt8}) -> ZstandardDictionary
+
+Same as [`parse_dictionary(data)`](@ref parse_dictionary).
+"""
+Base.parse(::Type{ZstandardDictionary}, data::AbstractVector{UInt8}) = parse_dictionary(data)
+
+"""
     dictionary_id(dict::ZstandardDictionary) -> UInt32
 
 The dictionary's ID, as recorded in the frames compressed with it (libzstd's

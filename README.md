@@ -15,7 +15,7 @@ A pure Julia implementation of the [Zstandard](https://facebook.github.io/zstd/)
 - Reference prefixes (`prefix=`, as `zstd --patch-from`), long-distance matching (`long=true`), multithreaded compression (`nthreads`), `rsyncable` output
 - libzstd's advanced parameters (`window_log`, `strategy`, ...), frame header options (`content_size`, `dict_id`, magicless frames) and a target compressed block size
 - The seekable format (`compress_seekable`, `seek_table`, `decompress_range`), compatible with libzstd's `contrib/seekable_format`
-- Sequence-level API: `generate_sequences` and `compress_sequences` (as `ZSTD_generateSequences` / `ZSTD_compressSequences`)
+- Sequence-level API (experimental, as in libzstd): `generate_sequences` and `compress_sequences` (as `ZSTD_generateSequences` / `ZSTD_compressSequences`)
 - Frame inspection (`frame_header`, `frame_content_size`, `frame_compressed_size`, `decompressed_size`, skippable frames), size bounds (`compress_bound`, `decompress_bound`) and memory estimates (`estimate_compression_memory`, `estimate_decompression_memory`)
 - Julia 1.10 (LTS) and later
 - [TranscodingStreams.jl](https://github.com/JuliaIO/TranscodingStreams.jl) codecs `ZstandardCompressor` / `ZstandardDecompressor` (package extension, loaded with `using TranscodingStreams`)
@@ -113,7 +113,8 @@ archive = Zstandard.compress_seekable(data; frame_size=1 << 20)
 Zstandard.decompress_range(archive, 5_000_001:5_100_000)
 open(io -> Zstandard.decompress_range(io, 1:1000), "archive.zst")     # reads only the frames needed
 
-# Sequences: inspect what the compressor finds, or encode matches found elsewhere
+# Sequences (experimental, mirrors libzstd's experimental API): inspect what the
+# compressor finds, or encode matches found elsewhere
 seqs = Zstandard.generate_sequences(data; level=9)
 frame = Zstandard.compress_sequences(data, seqs)
 

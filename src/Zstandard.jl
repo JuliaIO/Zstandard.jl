@@ -6,7 +6,7 @@ export compress, decompress, ZstandardError,
        ZstandardCompressorStream, ZstandardDecompressorStream,
        ZstandardCompressor, ZstandardDecompressor,
        ZstandardDictionary, ZstandardDictionarySet, parse_dictionary, train_dictionary,
-       is_zstd_frame
+       is_zstandard_frame
 
 # (`public` is Julia 1.11 syntax; on 1.10 these are simply unexported)
 @static if VERSION >= v"1.11.0-DEV.469"
@@ -16,6 +16,7 @@ export compress, decompress, ZstandardError,
         :decompressed_size, :is_skippable_frame, :skippable_frame, :read_skippable_frame,
         # dictionaries
         :dictionary_id, :dictionary_content, :finalize_dictionary, :PreparedDictionary, :prepare_dictionary,
+        :compression_level,
         # reusable contexts
         :ZstandardCompressionContext, :ZstandardDecompressionContext, :compress!, :decompress!,
         # seekable format
@@ -38,7 +39,8 @@ include("frameinfo.jl")
 
 include("encoder.jl")
 using .Encoder: CompressionContext, compress_frame!, mt_layout, compress_job!, frame_header_bytes,
-                train_dictionary, finalize_dictionary, PreparedDictionary, prepare_dictionary
+                train_dictionary, finalize_dictionary, PreparedDictionary, prepare_dictionary,
+                compression_level
 using .XXHash: content_checksum, AbstractXXH64, NativeXXH64, XXH64_IMPLEMENTATION, with_xxh64_implementation
 
 include("streaming.jl")

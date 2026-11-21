@@ -14,7 +14,7 @@ makedocs(;
         "Home" => "index.md",
         "API Reference" => "api.md",
     ],
-    warnonly = true,
+    warnonly = false,
 )
 
 DocumenterVitepress.deploydocs(;

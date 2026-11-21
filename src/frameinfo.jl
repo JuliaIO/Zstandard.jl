@@ -43,11 +43,11 @@ _add_size(a::Int64, b::Integer) = Base.Checked.add_with_overflow(a, Int64(b))[2]
     zerr("total decompressed size overflows Int64 (corrupted or forged headers)") : a + Int64(b)
 
 """
-    is_zstd_frame(data; offset=1) -> Bool
+    is_zstandard_frame(data; offset=1) -> Bool
 
 Whether a Zstandard or skippable frame starts at `offset` (checks the magic number).
 """
-function is_zstd_frame(data::AbstractVector{UInt8}; offset::Integer=1)
+function is_zstandard_frame(data::AbstractVector{UInt8}; offset::Integer=1)
     _remaining(data, offset) < 4 && return false
     m = _u32le(data, offset)
     return m == MAGIC_NUMBER || m & SKIPPABLE_MASK == SKIPPABLE_MAGIC_START
