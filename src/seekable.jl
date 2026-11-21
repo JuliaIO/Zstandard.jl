@@ -170,11 +170,14 @@ end
 
 Decode bytes `range` (1-based) of the content of a seekable archive (a vector,
 or a seekable `IO` such as a file, from which only the needed frames are
-read). Only frames overlapping `range` are decoded.
+read). Only frames overlapping `range` are decoded. `dict` may be a
+`ZstdDictionary` or several (see [`ZstdDictionarySet`](@ref)).
 """
 function decompress_range(src::Union{AbstractVector{UInt8},IO}, range::AbstractUnitRange{<:Integer};
-                          table::ZstdSeekTable=seek_table(src), dict::Union{Nothing,ZstdDictionary}=nothing)
+                          table::ZstdSeekTable=seek_table(src),
+                          dict::DictArg=nothing)
     t = table
+    dict = decode_dict(dict)
     isempty(range) && return UInt8[]
     (first(range) >= 1 && last(range) <= t.content_size) ||
         throw(BoundsError(1:t.content_size, range))

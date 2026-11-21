@@ -74,11 +74,13 @@ function _decompress_parallel(src::Vector{UInt8}, dict, chunks::Vector{UnitRange
 end
 
 """
-    decompress(data::AbstractVector{UInt8}, dict::Union{Nothing, ZstdDictionary}=nothing;
-               nthreads=Threads.nthreads())
+    decompress(data::AbstractVector{UInt8}, dict=nothing; nthreads=Threads.nthreads())
 
 Decompress Zstandard compressed data, which may contain several concatenated
-and/or skippable frames. Optionally, a `ZstdDictionary` can be provided.
+and/or skippable frames. Optionally, a `ZstdDictionary` can be provided, or
+several (a [`ZstdDictionarySet`](@ref) or a vector of `ZstdDictionary`) for
+data whose frames use different dictionaries, each chosen by the dictionary ID
+in the frame header.
 Throws a [`ZstdError`](@ref) if the data is malformed.
 
 When `data` holds several frames (at least $(PARALLEL_DECODE_MIN ÷ 1024) KiB in
@@ -90,11 +92,12 @@ With `magicless=true`, frames are read without magic numbers (as written by
 `prefix = bytes`, frames written with that reference prefix are decoded (see
 `compress`).
 """
-function decompress(data::AbstractVector{UInt8}, dict::Union{Nothing, ZstdDictionary}=nothing;
+function decompress(data::AbstractVector{UInt8},
+                    dict::DictArg=nothing;
                     nthreads::Integer=Threads.nthreads(), magicless::Bool=false,
                     prefix::Union{Nothing,AbstractVector{UInt8}}=nothing)
     nthreads < 1 && throw(ArgumentError("nthreads must be at least 1"))
-    dict = Encoder.prefix_dict(prefix, dict)
+    dict = Encoder.prefix_dict(prefix, decode_dict(dict))
     magicless && return _with_state(st -> decompress_frames(data, st, dict; magicless))
     if nthreads > 1 && length(data) >= PARALLEL_DECODE_MIN
         src = data isa Vector{UInt8} ? data : Vector{UInt8}(data)

@@ -2,7 +2,7 @@
 
 module Streaming
 
-import ..Decoder: DecoderState, ZstdDictionary, FrameInfo, read_frame_info, reset_frame!,
+import ..Decoder: DecoderState, ZstdDictionary, DecodeDict, DictArg, decode_dict, frame_dict, FrameInfo, read_frame_info, reset_frame!,
                   decode_compressed_block!, memset!, zerr, ensure_capacity!, ZstdError,
                   MAGIC_NUMBER, SKIPPABLE_MAGIC_START, SKIPPABLE_MASK, BLOCK_SIZE_MAX, WILDCOPY_SLACK
 import ..Encoder: StreamCompressor, stream_write!, stream_flush!, stream_finish!, PreparedDictionary, FrameOptions,
@@ -36,7 +36,8 @@ Incremental Zstandard decoder. Feed input with [`feed!`](@ref) (at most
 `d.out[d.rpos:d.wpos]`.
 """
 mutable struct StreamDecoder
-    dict::Union{Nothing,ZstdDictionary}
+    dict::DecodeDict                    # dictionary, or set to choose from per frame
+    frame_dict::Union{Nothing,ZstdDictionary}   # the current frame's dictionary
     st::DecoderState
     unit::Vector{UInt8}
     have::Int            # bytes of the current unit received
@@ -69,10 +70,10 @@ with libzstd).
 """
 const DEFAULT_MAX_WINDOW_SIZE = 1 << 27
 
-function StreamDecoder(dict::Union{Nothing,ZstdDictionary}=nothing;
+function StreamDecoder(dict::DecodeDict=nothing;
                        max_window_size::Integer=DEFAULT_MAX_WINDOW_SIZE, magicless::Bool=false)
     max_window_size >= 1 << 10 || throw(ArgumentError("max_window_size must be at least 1 KiB"))
-    StreamDecoder(dict, DecoderState(), Vector{UInt8}(undef, 64), 0, magicless ? 1 : 4,
+    StreamDecoder(dict, nothing, DecoderState(), Vector{UInt8}(undef, 64), 0, magicless ? 1 : 4,
         magicless ? U_FHDR1 : U_MAGIC, 0, 0, false,
         UInt8[], 1, 0, 0, false, 0, FrameInfo(0, 0, -1, 0, false, false), 0, nothing,
         Int(max_window_size), magicless, 0, 0)
@@ -139,13 +140,9 @@ function begin_frame!(d::StreamDecoder, hdr::AbstractVector{UInt8})
         zerr("frame requires a window of $(fi.window_size) bytes, more than the limit of " *
              "$(d.max_window) bytes (raise it with the `max_window_size` keyword)")
     end
-    dict = d.dict
-    if fi.dict_id != 0
-        dict === nothing && zerr("frame requires dictionary ID $(fi.dict_id)")
-        (dict.id != 0 && dict.id != fi.dict_id) &&
-            zerr("dictionary ID mismatch: frame requires $(fi.dict_id), got $(dict.id)")
-    end
+    dict = frame_dict(d.dict, fi.dict_id)
     reset_frame!(d.st, dict)
+    d.frame_dict = dict
     d.fi = fi
     compact!(d)   # previous frames are never referenced
     d.frame_start = d.wpos
@@ -190,7 +187,7 @@ function decode_body!(d::StreamDecoder)
         out = d.out
         inp = d.unit
         hist = max(d.frame_start, 0)
-        dict = d.frame_start >= 0 ? d.dict : nothing
+        dict = d.frame_start >= 0 ? d.frame_dict : nothing
         GC.@preserve out inp begin
             base = pointer(out)
             op = decode_compressed_block!(d.st, pointer(inp), bsize, base + d.wpos,
@@ -325,8 +322,7 @@ end
 # ---------------------------------------------------------------------------
 
 """
-    ZstdDecompressorStream(io::IO, dict::Union{Nothing, ZstdDictionary}=nothing;
-                           max_window_size=128 MiB)
+    ZstdDecompressorStream(io::IO, dict=nothing; max_window_size=128 MiB)
 
 A streaming Zstandard decompressor that implements the `IO` interface.
 Decoded data is produced one block at a time; memory use is bounded by the
@@ -337,6 +333,8 @@ it to read frames written with a larger window (e.g. `zstd --long=30`).
 With `magicless=true`, frames are read without their magic number, and
 `prefix` decodes frames written with that reference prefix (see
 [`compress`](@ref Zstandard.compress)).
+`dict` may be a `ZstdDictionary` or several (a `ZstdDictionarySet` or a
+vector of `ZstdDictionary`), chosen per frame by the frame's dictionary ID.
 
 After a decoding error (a `ZstdError`), the stream is unusable: later reads
 rethrow the same error (bytes decoded before it can still be read). Other
@@ -348,10 +346,11 @@ mutable struct ZstdDecompressorStream <: IO
     err::Union{Nothing,ZstdError}   # sticky decoding error
 end
 
-ZstdDecompressorStream(io::IO, dict::Union{Nothing,ZstdDictionary}=nothing;
+ZstdDecompressorStream(io::IO, dict::DictArg=nothing;
                        max_window_size::Integer=DEFAULT_MAX_WINDOW_SIZE, magicless::Bool=false,
                        prefix::Union{Nothing,AbstractVector{UInt8}}=nothing) =
-    ZstdDecompressorStream(io, StreamDecoder(prefix_dict(prefix, dict); max_window_size, magicless), nothing)
+    ZstdDecompressorStream(io, StreamDecoder(prefix_dict(prefix, decode_dict(dict)); max_window_size, magicless),
+                           nothing)
 
 # Decode until at least one unread byte is available. Returns false at end of input.
 function fill_buffer!(s::ZstdDecompressorStream)

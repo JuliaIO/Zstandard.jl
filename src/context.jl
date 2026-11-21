@@ -104,21 +104,23 @@ A decompression context reused across calls (as a libzstd `ZSTD_DCtx`): its
 decoding tables persist. Use it with `decompress(ctx, data)`, or
 `decompress!(ctx, out, data)` to decode into a vector you reuse. Data may hold
 several concatenated and skippable frames; `dict` is used for frames that
-need it. With `magicless=true`, frames have no magic numbers (see `compress`).
+need it. `dict` may also be a [`ZstdDictionarySet`](@ref) (or a vector of
+`ZstdDictionary`) to choose each frame's dictionary by its ID. With `magicless=true`, frames have no magic numbers (see `compress`).
 
 A context must not be used by several tasks at the same time.
 """
 mutable struct ZstdDecompressionContext
     st::DecoderState
-    dict::Union{Nothing,ZstdDictionary}
+    dict::DecodeDict
     magicless::Bool
 end
-ZstdDecompressionContext(; dict::Union{Nothing,ZstdDictionary}=nothing, magicless::Bool=false,
-                         prefix::Union{Nothing,AbstractVector{UInt8}}=nothing) =
-    ZstdDecompressionContext(DecoderState(), Encoder.prefix_dict(prefix, dict), magicless)
+ZstdDecompressionContext(; dict::DictArg=nothing,
+                         magicless::Bool=false, prefix::Union{Nothing,AbstractVector{UInt8}}=nothing) =
+    ZstdDecompressionContext(DecoderState(), Encoder.prefix_dict(prefix, decode_dict(dict)), magicless)
 
 Base.show(io::IO, ctx::ZstdDecompressionContext) =
-    print(io, "ZstdDecompressionContext(", ctx.dict === nothing ? "" : "dict", ")")
+    print(io, "ZstdDecompressionContext(", ctx.dict === nothing ? "" :
+          ctx.dict isa ZstdDictionarySet ? "dicts" : "dict", ")")
 
 """
     decompress(ctx::ZstdDecompressionContext, data) -> Vector{UInt8}

@@ -78,6 +78,7 @@ end
 
 include("compress.jl")
 include("api.jl")
+include("multidict.jl")
 include("extras.jl")
 include("xxhash.jl")
 include("regressions.jl")

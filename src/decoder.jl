@@ -16,7 +16,8 @@ module Decoder
 
 using ..XXHash: content_checksum
 
-export ZstdError, ZstdDictionary, parse_dictionary, DecoderState, decompress_frames,
+export ZstdError, ZstdDictionary, ZstdDictionarySet, parse_dictionary, DecoderState, decompress_frames,
+       DecodeDict, DictArg, decode_dict, frame_dict,
        FrameInfo, read_frame_info
 
 const MAGIC_NUMBER = 0xFD2FB528
@@ -520,90 +521,7 @@ function huf_decode_4streams!(op::Ptr{UInt8}, n::Int, src::Ptr{UInt8}, len::Int,
     return nothing
 end
 
-# ---------------------------------------------------------------------------
-# Dictionary
-# ---------------------------------------------------------------------------
-
-"""
-    ZstdDictionary
-
-A parsed Zstandard dictionary (raw content or formatted with entropy tables).
-Create with [`parse_dictionary`](@ref).
-"""
-struct ZstdDictionary
-    id::UInt32
-    huf::Vector{UInt16}       # decoding tables; empty if absent
-    huf_log::Int
-    ll::Vector{UInt64}
-    ml::Vector{UInt64}
-    of::Vector{UInt64}
-    rep_offsets::NTuple{3,Int}
-    content::Vector{UInt8}
-    # entropy statistics, used to build matching encoding tables
-    huf_weights::Vector{UInt8}
-    ll_norm::Vector{Int16}
-    ml_norm::Vector{Int16}
-    of_norm::Vector{Int16}
-end
-
-"""
-    ZstdDictionary(content::AbstractVector{UInt8})
-
-A raw-content dictionary (ID 0): `content` is used as history preceding the
-data, without entropy tables. Same as `parse_dictionary` for data that does
-not start with the dictionary magic number.
-"""
-ZstdDictionary(content::AbstractVector{UInt8}) =
-    ZstdDictionary(UInt32(0), UInt16[], 0, UInt64[], UInt64[], UInt64[], (1, 4, 8),
-                   Vector{UInt8}(content), UInt8[], Int16[], Int16[], Int16[])
-
-has_entropy(d::ZstdDictionary) = !isempty(d.huf)
-
-const DICT_MAGIC = 0xEC30A437
-
-"""
-    parse_dictionary(data::AbstractVector{UInt8}) -> ZstdDictionary
-
-Parse a Zstandard dictionary. Data starting with the dictionary magic number
-`0xEC30A437` is parsed as a formatted dictionary (ID, entropy tables, repeat
-offsets, content); anything else is treated as raw content with ID 0.
-"""
-function parse_dictionary(data::AbstractVector{UInt8})
-    d = Vector{UInt8}(data)
-    if length(d) >= 8 && ltoh(reinterpret(UInt32, view(d, 1:4))[1]) == DICT_MAGIC
-        id = ltoh(reinterpret(UInt32, view(d, 5:8))[1])
-        norm = zeros(Int16, 256); symnext = zeros(UInt16, 256); tabsym = zeros(UInt8, 4096)
-        ws = zeros(UInt8, 256); wtable = UInt64[]
-        huf = UInt16[]; ll = UInt64[]; ml = UInt64[]; of = UInt64[]
-        pos = 9
-        GC.@preserve d begin
-            p = pointer(d)
-            rem() = length(d) - pos + 1
-            tl, n, nw = read_huf_table!(huf, ws, p + pos - 1, rem(), norm, symnext, tabsym, wtable)
-            pos += n
-            weights = ws[1:nw]
-            nsym, al, n = read_fse_header!(norm, p + pos - 1, rem(), 32, OF_MAX_AL); pos += n
-            build_fse_table!(of, norm, nsym, al, OF_BASE, OF_BITS, symnext, tabsym)
-            of_norm = norm[1:nsym]
-            nsym, al, n = read_fse_header!(norm, p + pos - 1, rem(), 53, ML_MAX_AL); pos += n
-            build_fse_table!(ml, norm, nsym, al, ML_BASE, ML_BITS, symnext, tabsym)
-            ml_norm = norm[1:nsym]
-            nsym, al, n = read_fse_header!(norm, p + pos - 1, rem(), 36, LL_MAX_AL); pos += n
-            build_fse_table!(ll, norm, nsym, al, LL_BASE, LL_BITS, symnext, tabsym)
-            ll_norm = norm[1:nsym]
-            rem() < 12 && zerr("truncated dictionary")
-            r1 = Int(load32(p + pos - 1)); r2 = Int(load32(p + pos + 3)); r3 = Int(load32(p + pos + 7))
-            pos += 12
-        end
-        content = d[pos:end]
-        for r in (r1, r2, r3)
-            (r == 0 || r > length(content)) && zerr("invalid dictionary repeat offset")
-        end
-        return ZstdDictionary(id, huf, tl, ll, ml, of, (r1, r2, r3), content,
-                              weights, ll_norm, ml_norm, of_norm)
-    end
-    return ZstdDictionary(d)
-end
+include("dictionary.jl")
 
 # ---------------------------------------------------------------------------
 # Decoder state (reusable scratch)
@@ -1021,13 +939,13 @@ end
 end
 
 """
-    decompress_frames(data, st, dict; range=1:length(data)) -> Vector{UInt8}
+    decompress_frames(data, st, dicts; range=1:length(data)) -> Vector{UInt8}
 
 Decode all (concatenated) frames in `data[range]` in memory. `range` must
 start and end on frame boundaries.
 """
 function decompress_frames(data::AbstractVector{UInt8}, st::DecoderState=DecoderState(),
-                           dict::Union{Nothing,ZstdDictionary}=nothing;
+                           dicts::DecodeDict=nothing;
                            range::UnitRange{Int}=1:length(data),
                            out::Vector{UInt8}=Vector{UInt8}(undef, 0), magicless::Bool=false,
                            release::Bool=true)
@@ -1057,11 +975,7 @@ function decompress_frames(data::AbstractVector{UInt8}, st::DecoderState=Decoder
             magic != MAGIC_NUMBER && zerr("unknown frame magic number 0x$(string(magic, base=16))")
             fi = read_frame_info(p + pos - 1, n - pos + 1)
             pos += fi.header_size
-            if fi.dict_id != 0
-                dict === nothing && zerr("frame requires dictionary ID $(fi.dict_id)")
-                (dict.id != 0 && dict.id != fi.dict_id) &&
-                    zerr("dictionary ID mismatch: frame requires $(fi.dict_id), got $(dict.id)")
-            end
+            dict = frame_dict(dicts, fi.dict_id)
             reset_frame!(st, dict)
             frame_start = produced
             # Pre-size the output from the block headers, and from the
