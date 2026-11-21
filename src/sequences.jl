@@ -3,7 +3,7 @@
 # Included in module Zstandard.
 
 """
-    ZstdSequence(offset, literal_length, match_length)
+    ZstandardSequence(offset, literal_length, match_length)
 
 One Zstandard sequence: `literal_length` literal bytes, then `match_length`
 bytes copied from `offset` bytes back (as libzstd's `ZSTD_Sequence`, with
@@ -11,18 +11,18 @@ bytes copied from `offset` bytes back (as libzstd's `ZSTD_Sequence`, with
 `offset == 0` and `match_length == 0` is a block delimiter: its literals end
 the block.
 """
-struct ZstdSequence
+struct ZstandardSequence
     offset::Int
     literal_length::Int
     match_length::Int
 end
-Base.show(io::IO, s::ZstdSequence) =
-    print(io, "ZstdSequence(", s.offset, ", ", s.literal_length, ", ", s.match_length, ")")
+Base.show(io::IO, s::ZstandardSequence) =
+    print(io, "ZstandardSequence(", s.offset, ", ", s.literal_length, ", ", s.match_length, ")")
 
-is_delimiter(s::ZstdSequence) = s.offset == 0 && s.match_length == 0
+is_delimiter(s::ZstandardSequence) = s.offset == 0 && s.match_length == 0
 
 """
-    generate_sequences(data; level=3, window_log, ...) -> Vector{ZstdSequence}
+    generate_sequences(data; level=3, window_log, ...) -> Vector{ZstandardSequence}
 
 The sequences the compressor finds for `data` at `level` (as libzstd's
 `ZSTD_generateSequences`), block by block, each block ending with a
@@ -39,7 +39,7 @@ function generate_sequences(data::Union{AbstractVector{UInt8},AbstractString}; l
     p = Encoder.compression_parameters(Int(level), n, ov)
     cc = CompressionContext()
     Encoder.reset_context!(cc, p, Int(level))
-    seqs = ZstdSequence[]
+    seqs = ZstandardSequence[]
     bmax = Encoder.block_size(p)
     scratch = Vector{UInt8}(undef, 2 * bmax + 1024)
     GC.@preserve src begin
@@ -54,10 +54,10 @@ function generate_sequences(data::Union{AbstractVector{UInt8},AbstractString}; l
             used = 0
             @inbounds for i in 1:ss.nseq
                 ll = Int(ss.ll[i]); ml = Int(ss.ml[i])
-                push!(seqs, ZstdSequence(Int(ss.off[i]), ll, ml))
+                push!(seqs, ZstandardSequence(Int(ss.off[i]), ll, ml))
                 used += ll + ml
             end
-            push!(seqs, ZstdSequence(0, bn - used, 0))
+            push!(seqs, ZstandardSequence(0, bn - used, 0))
             off += bn
         end
     end
@@ -69,7 +69,7 @@ end
 # block. With explicit delimiters the blocks are those given; otherwise
 # sequences are split at block boundaries and bytes after the last sequence
 # are trailing literals (libzstd's ZSTD_sf_noBlockDelimiters).
-function _sequence_blocks(seqs::AbstractVector{ZstdSequence}, n::Int, bmax::Int, explicit::Bool)
+function _sequence_blocks(seqs::AbstractVector{ZstandardSequence}, n::Int, bmax::Int, explicit::Bool)
     blocks = Tuple{Vector{NTuple{3,Int}},Int}[]
     cur = NTuple{3,Int}[]
     fill = 0                     # content bytes in the current block
@@ -132,13 +132,13 @@ function _sequence_blocks(seqs::AbstractVector{ZstdSequence}, n::Int, bmax::Int,
 end
 
 """
-    compress_sequences(data, seqs::AbstractVector{ZstdSequence}; level=3, checksum=false,
+    compress_sequences(data, seqs::AbstractVector{ZstandardSequence}; level=3, checksum=false,
                        validate=true) -> Vector{UInt8}
 
 Encode `data`, described by the sequences `seqs` (as libzstd's
 `ZSTD_compressSequences`), into a Zstandard frame: the literals come from
 `data`, matches from the sequences. If `seqs` contains block delimiters
-(see [`ZstdSequence`](@ref)), they set the blocks (each at most 128 KiB) and
+(see [`ZstandardSequence`](@ref)), they set the blocks (each at most 128 KiB) and
 must cover `data` exactly; otherwise blocks of 128 KiB are formed, splitting
 sequences as needed, and bytes after the last sequence are literals (as
 libzstd's `ZSTD_sf_explicitBlockDelimiters` and `ZSTD_sf_noBlockDelimiters`).
@@ -146,7 +146,7 @@ With `validate=true` every match is also
 checked against `data` (otherwise a wrong match silently changes what the
 frame decodes to). `level` selects the entropy coding effort.
 """
-function compress_sequences(data::Union{AbstractVector{UInt8},AbstractString}, seqs::AbstractVector{ZstdSequence};
+function compress_sequences(data::Union{AbstractVector{UInt8},AbstractString}, seqs::AbstractVector{ZstandardSequence};
                             level::Integer=3, checksum::Bool=false, validate::Bool=true)
     src = Vector{UInt8}(_bytes(data))
     n = length(src)

@@ -9,14 +9,14 @@ const SEEKABLE_MAX_FRAME_SIZE = 0x40000000       # ZSTD_SEEKABLE_MAX_FRAME_DECOM
 const SEEKABLE_MAX_FRAMES = 0x8000000            # ZSTD_SEEKABLE_MAXFRAMES
 
 """
-    ZstdSeekTable
+    ZstandardSeekTable
 
 The seek table of a seekable Zstandard archive (see [`compress_seekable`](@ref)):
 for each frame its compressed and decompressed sizes, offsets, and (if
 recorded) the low 32 bits of the XXH64 of its content. `length(table)` is the
 number of frames; `table.content_size` the total decompressed size.
 """
-struct ZstdSeekTable
+struct ZstandardSeekTable
     csize::Vector{Int}
     dsize::Vector{Int}
     coff::Vector{Int}            # 0-based offset of frame i in the archive
@@ -25,9 +25,9 @@ struct ZstdSeekTable
     content_size::Int
     table_size::Int              # bytes of the seek-table frame
 end
-Base.length(t::ZstdSeekTable) = length(t.csize)
-Base.show(io::IO, t::ZstdSeekTable) =
-    print(io, "ZstdSeekTable(", length(t), " frames, ", t.content_size, " bytes",
+Base.length(t::ZstandardSeekTable) = length(t.csize)
+Base.show(io::IO, t::ZstandardSeekTable) =
+    print(io, "ZstandardSeekTable(", length(t), " frames, ", t.content_size, " bytes",
           t.checksums === nothing ? "" : ", checksums", ")")
 
 function _seek_table(entries::Vector{NTuple{3,Int}}, checksum::Bool)
@@ -133,15 +133,15 @@ function _parse_seek_table(total::Int, read_at)
         c += csize[i]; d += dsize[i]
     end
     c + tsize > total && zerr("seek table: frames extend past the archive")
-    return ZstdSeekTable(csize, dsize, coff, doff, sums, d, tsize)
+    return ZstandardSeekTable(csize, dsize, coff, doff, sums, d, tsize)
 end
 
 """
-    seek_table(archive::AbstractVector{UInt8}) -> ZstdSeekTable
-    seek_table(io::IO) -> ZstdSeekTable
+    seek_table(archive::AbstractVector{UInt8}) -> ZstandardSeekTable
+    seek_table(io::IO) -> ZstandardSeekTable
 
 Read the seek table at the end of a seekable archive (a vector, or a seekable
-`IO` such as a file). Throws a `ZstdError` if there is none.
+`IO` such as a file). Throws a `ZstandardError` if there is none.
 """
 seek_table(data::AbstractVector{UInt8}) =
     _parse_seek_table(length(data), (off, n) -> Vector{UInt8}(view(data, firstindex(data) + off:firstindex(data) + off + n - 1)))
@@ -156,7 +156,7 @@ function seek_table(io::IO)
     end
 end
 
-function _seekable_frame(raw::Vector{UInt8}, t::ZstdSeekTable, i::Int, dict, st)
+function _seekable_frame(raw::Vector{UInt8}, t::ZstandardSeekTable, i::Int, dict, st)
     out = decompress_frames(raw, st, dict)
     length(out) == t.dsize[i] || zerr("seekable frame $i: decoded $(length(out)) bytes, seek table says $(t.dsize[i])")
     if t.checksums !== nothing && content_checksum(out) != t.checksums[i]
@@ -171,10 +171,10 @@ end
 Decode bytes `range` (1-based) of the content of a seekable archive (a vector,
 or a seekable `IO` such as a file, from which only the needed frames are
 read). Only frames overlapping `range` are decoded. `dict` may be a
-`ZstdDictionary` or several (see [`ZstdDictionarySet`](@ref)).
+`ZstandardDictionary` or several (see [`ZstandardDictionarySet`](@ref)).
 """
 function decompress_range(src::Union{AbstractVector{UInt8},IO}, range::AbstractUnitRange{<:Integer};
-                          table::ZstdSeekTable=seek_table(src),
+                          table::ZstandardSeekTable=seek_table(src),
                           dict::DictArg=nothing)
     t = table
     dict = decode_dict(dict)

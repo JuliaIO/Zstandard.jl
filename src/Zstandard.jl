@@ -2,38 +2,37 @@ module Zstandard
 
 # The core API is exported; the rest is public (`Zstandard.name`), so that
 # `using Zstandard` brings in few names and does not clash with other packages
-export compress, decompress, ZstdError,
+export compress, decompress, ZstandardError,
        ZstandardCompressorStream, ZstandardDecompressorStream,
        ZstandardCompressor, ZstandardDecompressor,
-       ZstdDictionary, ZstdDictionarySet, parse_dictionary, train_dictionary,
+       ZstandardDictionary, ZstandardDictionarySet, parse_dictionary, train_dictionary,
        is_zstd_frame
 
 # (`public` is Julia 1.11 syntax; on 1.10 these are simply unexported)
 @static if VERSION >= v"1.11.0-DEV.469"
     eval(Expr(:public,
         # frame inspection and skippable frames
-        :ZstdFrameHeader, :frame_header, :frame_content_size, :frame_compressed_size, :frame_dict_id,
+        :ZstandardFrameHeader, :frame_header, :frame_content_size, :frame_compressed_size, :frame_dict_id,
         :decompressed_size, :is_skippable_frame, :skippable_frame, :read_skippable_frame,
         # dictionaries
-        :finalize_dictionary, :PreparedDictionary, :prepare_dictionary,
+        :dictionary_id, :dictionary_content, :finalize_dictionary, :PreparedDictionary, :prepare_dictionary,
         # reusable contexts
-        :ZstdCompressionContext, :ZstdDecompressionContext, :compress!, :decompress!,
+        :ZstandardCompressionContext, :ZstandardDecompressionContext, :compress!, :decompress!,
         # seekable format
-        :compress_seekable, :ZstdSeekTable, :seek_table, :decompress_range,
+        :compress_seekable, :ZstandardSeekTable, :seek_table, :decompress_range,
         # sizes and progress
         :estimate_compression_memory, :estimate_decompression_memory, :compress_bound, :decompress_bound,
         :stream_progress,
         # sequence API (mirrors libzstd's experimental API)
-        :ZstdSequence, :generate_sequences, :compress_sequences,
-        # swappable XXH64 implementation for frame checksums (see `Zstandard.XXHash`)
-        :XXHash, :AbstractXXH64, :NativeXXH64, :XXH64_IMPLEMENTATION, :with_xxh64_implementation))
+        :ZstandardSequence, :generate_sequences, :compress_sequences))
 end
 
 include("xxhash.jl")
 
 include("decoder.jl")
-using .Decoder: ZstdError, ZstdDictionary, ZstdDictionarySet, parse_dictionary, DecoderState, decompress_frames,
-                DecodeDict, DictArg, decode_dict
+using .Decoder: ZstandardError, ZstandardDictionary, ZstandardDictionarySet, parse_dictionary,
+                dictionary_id, dictionary_content, DecoderState, decompress_frames,
+                DecodeDict, DictArg, decode_dict, positional_or_keyword_dict
 
 include("frameinfo.jl")
 

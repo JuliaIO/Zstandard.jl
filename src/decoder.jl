@@ -16,9 +16,6 @@ module Decoder
 
 using ..XXHash: content_checksum
 
-export ZstdError, ZstdDictionary, ZstdDictionarySet, parse_dictionary, DecoderState, decompress_frames,
-       DecodeDict, DictArg, decode_dict, frame_dict,
-       FrameInfo, read_frame_info
 
 const MAGIC_NUMBER = 0xFD2FB528
 const SKIPPABLE_MAGIC_START = 0x184D2A50
@@ -31,15 +28,15 @@ const ML_MAX_AL = 9
 const OF_MAX_AL = 8
 
 """
-    ZstdError(msg)
+    ZstandardError(msg)
 
 Exception thrown when Zstandard data is malformed or cannot be decoded.
 """
-struct ZstdError <: Exception
+struct ZstandardError <: Exception
     msg::String
 end
-Base.showerror(io::IO, e::ZstdError) = print(io, "ZstdError: ", e.msg)
-@noinline zerr(msg::String) = throw(ZstdError(msg))
+Base.showerror(io::IO, e::ZstandardError) = print(io, "ZstandardError: ", e.msg)
+@noinline zerr(msg::String) = throw(ZstandardError(msg))
 
 # ---------------------------------------------------------------------------
 # Unaligned little-endian memory helpers
@@ -568,7 +565,7 @@ function DecoderState()
         zeros(Int16, 256), zeros(UInt16, 256), zeros(UInt8, 4096), zeros(UInt8, 256), UInt64[])
 end
 
-function reset_frame!(st::DecoderState, dict::Union{Nothing,ZstdDictionary})
+function reset_frame!(st::DecoderState, dict::Union{Nothing,ZstandardDictionary})
     if dict === nothing
         st.rep1, st.rep2, st.rep3 = 1, 4, 8
         st.huf = EMPTY_U16; st.huf_log = 0
@@ -687,7 +684,7 @@ start); `olimit` bounds the output. Returns the new output pointer.
 """
 function decode_compressed_block!(st::DecoderState, src::Ptr{UInt8}, len::Int,
                                   op::Ptr{UInt8}, hist::Ptr{UInt8}, olimit::Ptr{UInt8},
-                                  dict::Union{Nothing,ZstdDictionary})
+                                  dict::Union{Nothing,ZstandardDictionary})
     lpos, nlit = decode_literals!(st, src, len)
     pos = lpos + 1
     pos > len && zerr("missing sequences section")
@@ -730,7 +727,7 @@ function decode_compressed_block!(st::DecoderState, src::Ptr{UInt8}, len::Int,
 end
 
 @noinline function dict_match!(op::Ptr{UInt8}, hist::Ptr{UInt8}, offset::Int, ml::Int,
-                              dict::Union{Nothing,ZstdDictionary})
+                              dict::Union{Nothing,ZstandardDictionary})
     back = offset - Int(op - hist)
     if dict === nothing || back > length(dict.content)
         zerr("match offset beyond available history (corrupted)")
@@ -754,7 +751,7 @@ function execute_sequences!(st::DecoderState, nseq::Int, src::Ptr{UInt8}, len::I
                             mlT::Ptr{UInt64}, mlAL::Int,
                             lit::Ptr{UInt8}, nlit::Int,
                             op::Ptr{UInt8}, hist::Ptr{UInt8}, olimit::Ptr{UInt8},
-                            dict::Union{Nothing,ZstdDictionary})
+                            dict::Union{Nothing,ZstandardDictionary})
     litend = lit + nlit
     b = bitd_init(src, len)
     llS, b = bitd_read(b, llAL)

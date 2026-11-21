@@ -1,7 +1,7 @@
 # Prepared (digested) dictionaries, after libzstd's ZSTD_CDict. Included in
 # module Encoder.
 #
-# Compressing with a plain ZstdDictionary hashes the whole dictionary content
+# Compressing with a plain ZstandardDictionary hashes the whole dictionary content
 # into the match-finder tables and rebuilds its entropy tables on every call,
 # which dominates the cost for small inputs. A PreparedDictionary does that
 # once for a given level; each compression then only copies the tables.
@@ -21,7 +21,7 @@ into a compression context. Create with [`prepare_dictionary`](@ref).
 Read-only after creation, so it can be shared between tasks.
 """
 struct PreparedDictionary
-    dict::ZstdDictionary
+    dict::ZstandardDictionary
     level::Int
     overrides::ParameterOverrides
     params::CParams
@@ -38,17 +38,17 @@ Base.show(io::IO, pd::PreparedDictionary) =
           " bytes of content, level ", pd.level, ")")
 
 """
-    prepare_dictionary(dict::ZstdDictionary; level=3, params...) -> PreparedDictionary
+    prepare_dictionary(dict::ZstandardDictionary; level=3, params...) -> PreparedDictionary
 
 Digest `dict` for compression at `level`. Pass the result as `dict` to
 `compress`, `ZstandardCompressorStream` or `ZstandardCompressor`; it compresses
 small inputs much faster than the plain dictionary (the output is still
-decoded with the plain `ZstdDictionary`). The level is fixed: compressing with
+decoded with the plain `ZstandardDictionary`). The level is fixed: compressing with
 a different `level` throws an `ArgumentError`. Explicit compression parameters
-(`window_log`, `hash_log`, ...; see [`parameter_overrides`](@ref)) are fixed
+(`window_log`, `hash_log`, ...; see [`compress`](@ref Zstandard.compress)) are fixed
 at preparation as well.
 """
-function prepare_dictionary(dict::ZstdDictionary; level::Integer=3, kwargs...)
+function prepare_dictionary(dict::ZstandardDictionary; level::Integer=3, kwargs...)
     level = normalize_level(level)
     ov = parameter_overrides(; kwargs...)
     dlen = length(dict.content)

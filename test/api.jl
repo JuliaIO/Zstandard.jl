@@ -1,9 +1,9 @@
 using Zstandard
 using Zstandard: frame_header, frame_content_size, frame_compressed_size, frame_dict_id,
-    skippable_frame, PreparedDictionary, prepare_dictionary, ZstdCompressionContext,
-    ZstdDecompressionContext, compress!, decompress!, compress_seekable, seek_table,
+    skippable_frame, PreparedDictionary, prepare_dictionary, ZstandardCompressionContext,
+    ZstandardDecompressionContext, compress!, decompress!, compress_seekable, seek_table,
     decompress_range, estimate_compression_memory, estimate_decompression_memory, compress_bound,
-    decompress_bound, stream_progress, ZstdSequence, generate_sequences, compress_sequences
+    decompress_bound, stream_progress, ZstandardSequence, generate_sequences, compress_sequences
 using Test
 using CodecZstd
 using TranscodingStreams
@@ -145,7 +145,7 @@ end
     run(pipeline(`$(Zstd_jll.zstd()) -q --train -r $dir -o $dpath --maxdict=8192`, stderr=devnull))
     fd = parse_dictionary(read(dpath))
     @test fd.id != 0
-    rd = ZstdDictionary(fd.content)
+    rd = ZstandardDictionary(fd.content)
 
     total = Dict(:none => 0, :raw => 0, :formatted => 0)
     for smp in samples[301:end], level in (1, 3, 7, 19)
@@ -176,7 +176,7 @@ end
     @test decompress(c, fd) == samples[360]
 
     # wrong or missing dictionary is rejected
-    @test_throws ZstdError decompress(compress(samples[301]; dict=fd))
+    @test_throws ZstandardError decompress(compress(samples[301]; dict=fd))
 
     # streaming compressor and codec with a dictionary
     buf = IOBuffer()
@@ -267,7 +267,7 @@ end
     @test length(small.cc.htab) < length(big.cc.htab)
 
     # with a dictionary
-    d = ZstdDictionary(make_text(20_000))
+    d = ZstandardDictionary(make_text(20_000))
     data = make_text(50_000)
     c, _ = stream_compress(data; dict=d, pledged_size=length(data))
     @test frame_content_size(c) == length(data)
@@ -351,18 +351,18 @@ end
         # from a pipe the CLI cannot shrink the window to the input size
         c = read(pipeline(`cat $f`, `$(Zstd_jll.zstd()) -q -3 --long=$wlog -c`))
         @test frame_header(c).window_size == 1 << wlog
-        @test_throws ZstdError read(ZDS(IOBuffer(c)))
+        @test_throws ZstandardError read(ZDS(IOBuffer(c)))
         @test read(ZDS(IOBuffer(c); max_window_size=1 << wlog)) == data
         @test_throws Exception transcode(ZstandardDecompressor(), c)
         @test transcode(ZstandardDecompressor(max_window_size=1 << wlog), c) == data
         @test decompress(c) == data            # in memory: no window buffer, no limit needed
     end
     err = try read(ZDS(IOBuffer(read(pipeline(`cat $f`, `$(Zstd_jll.zstd()) -q --long=30 -c`))))) catch e; e end
-    @test err isa ZstdError && occursin("max_window_size", sprint(showerror, err))
+    @test err isa ZstandardError && occursin("max_window_size", sprint(showerror, err))
     # a lower limit rejects ordinary frames too
     c = transcode(CodecZstd.ZstdCompressor(level=19), data)
     @test frame_header(c).window_size > 1 << 16
-    @test_throws ZstdError read(ZDS(IOBuffer(c); max_window_size=1 << 16))
+    @test_throws ZstandardError read(ZDS(IOBuffer(c); max_window_size=1 << 16))
     @test_throws ArgumentError ZDS(IOBuffer(c); max_window_size=100)
     # everything Zstandard.jl writes fits the default limit
     big = repeat(data, 20)
@@ -430,7 +430,7 @@ end
     @test decompress(c) == data
 
     # prepared dictionaries fix their parameters
-    dict = ZstdDictionary(text[1:20_000])
+    dict = ZstandardDictionary(text[1:20_000])
     pd = prepare_dictionary(dict; level=3, window_log=19)
     @test pd.params.window_log <= 19
     msg = text[30_001:31_500]
@@ -450,8 +450,8 @@ end
     bad = vcat(UInt8[0x28, 0xb5, 0x2f, 0xfd, 0x00, 0x00],          # magic, FHD, 1 KiB window
                reinterpret(UInt8, [htol(UInt32(1 | (0 << 1) | (2000 << 3)))])[1:3],  # last raw block, 2000 B
                fill(0x61, 2000))
-    @test_throws ZstdError decompress(bad)
-    @test_throws ZstdError read(ZDS(IOBuffer(bad)))
+    @test_throws ZstandardError decompress(bad)
+    @test_throws ZstandardError read(ZDS(IOBuffer(bad)))
     @test_throws Exception transcode(CodecZstd.ZstdDecompressor, bad)   # libzstd agrees
 
     # validation
@@ -530,13 +530,13 @@ end
     dict = parse_dictionary(train_dictionary([make_text(900 + 13i) for i in 1:200]; dict_size=8192))
     for kw in ((;), (; level=1), (; level=19, checksum=true), (; level=7, window_log=17, strategy=:lazy2),
                (; level=-3), (; level=5, dict), (; level=3, long=true))
-        ctx = ZstdCompressionContext(; kw...)
+        ctx = ZstandardCompressionContext(; kw...)
         ref = compress(data; kw...)
         @test compress(ctx, data) == ref
         out = UInt8[]
         @test compress!(ctx, out, data) === out
         @test out == ref
-        dctx = ZstdDecompressionContext(; dict=haskey(kw, :dict) ? dict : nothing)
+        dctx = ZstandardDecompressionContext(; dict=haskey(kw, :dict) ? dict : nothing)
         buf = UInt8[]
         @test decompress!(dctx, buf, out) === buf
         @test buf == data
@@ -552,16 +552,16 @@ end
     end
     # a prepared dictionary fixes the level
     pd = prepare_dictionary(dict; level=4)
-    ctx = ZstdCompressionContext(dict=pd)
+    ctx = ZstandardCompressionContext(dict=pd)
     @test ctx.level == 4
     s = make_text(3000)
     @test compress(ctx, s) == compress(s; dict=pd)
-    @test_throws ArgumentError ZstdCompressionContext(dict=pd, level=5)
-    @test_throws ArgumentError ZstdCompressionContext(window_log=40)
+    @test_throws ArgumentError ZstandardCompressionContext(dict=pd, level=5)
+    @test_throws ArgumentError ZstandardCompressionContext(window_log=40)
     out = UInt8[1, 2, 3]
     @test_throws ArgumentError compress!(ctx, out, out)
-    @test_throws ArgumentError decompress!(ZstdDecompressionContext(), out, out)
-    @test_throws ZstdError decompress!(ZstdDecompressionContext(), UInt8[], UInt8[1, 2, 3, 4, 5])
+    @test_throws ArgumentError decompress!(ZstandardDecompressionContext(), out, out)
+    @test_throws ZstandardError decompress!(ZstandardDecompressionContext(), UInt8[], UInt8[1, 2, 3, 4, 5])
     @test occursin("level=4", sprint(show, ctx))
 end
 
@@ -617,15 +617,15 @@ end
         @test frame_compressed_size(c; magicless=true) == length(c)
         haskey(kw, :dict) || @test lib_magicless_decompress(c, length(data)) == data
     end
-    @test_throws ZstdError decompress(compress(data; magicless=true))
+    @test_throws ZstandardError decompress(compress(data; magicless=true))
     lc = lib_magicless_compress(data, 5)
     @test decompress(lc; magicless=true) == data
     two = vcat(compress(data; magicless=true), lc)
     @test decompress(two; magicless=true) == vcat(data, data)
     @test read(Zstandard.ZstandardDecompressorStream(IOBuffer(two); magicless=true)) == vcat(data, data)
     @test transcode(ZstandardDecompressor(magicless=true), two) == vcat(data, data)
-    @test decompress(ZstdDecompressionContext(magicless=true), two) == vcat(data, data)
-    @test decompress(compress(ZstdCompressionContext(magicless=true), data); magicless=true) == data
+    @test decompress(ZstandardDecompressionContext(magicless=true), two) == vcat(data, data)
+    @test decompress(compress(ZstandardCompressionContext(magicless=true), data); magicless=true) == data
     @test decompress(compress(repeat(data, 30); nthreads=2, level=1, magicless=true); magicless=true) == repeat(data, 30)
     @test frame_header(compress(data; magicless=true); magicless=true).content_size == length(data)
     # size hint: parameters for the hinted size, no recorded size, any amount of input
@@ -663,11 +663,11 @@ end
         @test frame_dict_id(c) == 0
         @test frame_header(c).window_size >= length(old)          # reaches back into the prefix
         @test decompress(c; prefix=old) == new
-        @test decompress(ZstdDecompressionContext(prefix=old), c) == new
+        @test decompress(ZstandardDecompressionContext(prefix=old), c) == new
         @test read(Zstandard.ZstandardDecompressorStream(IOBuffer(c); prefix=old)) == new
         f = tempname(); write(f, c)
         @test read(`$(Zstd_jll.zstd()) -q -d --long=27 --patch-from=$fold -c $f`) == new   # libzstd agrees
-        @test compress(ZstdCompressionContext(; prefix=old, kw...), new) == c
+        @test compress(ZstandardCompressionContext(; prefix=old, kw...), new) == c
     end
     # libzstd's patches decode here
     fnew = tempname(); write(fnew, new)
@@ -683,7 +683,7 @@ end
     @test decompress(c; prefix=old) == new
     # an explicit window_log is kept; prefix and dict are exclusive
     @test frame_header(compress(new; prefix=old, window_log=17)).window_size == 1 << 17
-    @test_throws ArgumentError compress(new; prefix=old, dict=ZstdDictionary(old))
+    @test_throws ArgumentError compress(new; prefix=old, dict=ZstandardDictionary(old))
     @test decompress(compress(new; prefix=UInt8[]); prefix=UInt8[]) == new
     @test decompress(compress(new; prefix=old[1:3]); prefix=old[1:3]) == new
 end
@@ -769,9 +769,9 @@ end
     @test decompress_range(a, 990:1010) == data[990:1010]
     @test decompress_range(a, 1001:1001) == data[1001:1001]
     bad = copy(a); bad[end - 9 - 12 + 8] ⊻= 0x01                    # last entry's checksum
-    @test_throws ZstdError decompress_range(bad, 1500:1600)
+    @test_throws ZstandardError decompress_range(bad, 1500:1600)
     @test decompress_range(bad, 10:20) == data[10:20]               # other frames unaffected
-    @test_throws ZstdError seek_table(compress(data))               # not seekable
+    @test_throws ZstandardError seek_table(compress(data))               # not seekable
     @test_throws ArgumentError compress_seekable(data; frame_size=0)
     @test decompress(compress_seekable(UInt8[])) == UInt8[]
     @test length(seek_table(compress_seekable(UInt8[]))) == 0
@@ -824,12 +824,12 @@ end
 
 @testset "Sequence API" begin
     nodelim(s) = begin
-        out = ZstdSequence[]; carry = 0
+        out = ZstandardSequence[]; carry = 0
         for x in s
             if x.match_length == 0
                 carry += x.literal_length
             else
-                push!(out, ZstdSequence(x.offset, x.literal_length + carry, x.match_length)); carry = 0
+                push!(out, ZstandardSequence(x.offset, x.literal_length + carry, x.match_length)); carry = 0
             end
         end
         out
@@ -851,19 +851,19 @@ end
     end
     # matches and literal runs longer than a block, implied trailing literals
     d = repeat(UInt8[1, 2, 3, 4, 5], 100_000)
-    @test decompress(compress_sequences(d, [ZstdSequence(5, 5, length(d) - 5)])) == d
-    @test decompress(compress_sequences(text, ZstdSequence[])) == text
-    @test decompress(compress_sequences(text, [ZstdSequence(0, length(text) - 100, 0)][1:0])) == text
+    @test decompress(compress_sequences(d, [ZstandardSequence(5, 5, length(d) - 5)])) == d
+    @test decompress(compress_sequences(text, ZstandardSequence[])) == text
+    @test decompress(compress_sequences(text, [ZstandardSequence(0, length(text) - 100, 0)][1:0])) == text
     # validation
-    @test_throws ArgumentError compress_sequences(text, [ZstdSequence(3, 10, 2)])           # match too short
-    @test_throws ArgumentError compress_sequences(text, [ZstdSequence(50, 10, 20)])          # reaches before the data
-    @test_throws ArgumentError compress_sequences(text, [ZstdSequence(1, 10, 20)])           # does not match
-    @test_throws ArgumentError compress_sequences(text, [ZstdSequence(0, length(text) + 1, 0)])
-    @test_throws ArgumentError compress_sequences(text, [ZstdSequence(0, 200_000, 0)])        # block too large
-    @test_throws ArgumentError compress_sequences(text, [ZstdSequence(0, 1000, 0), ZstdSequence(3, 1, 5)])
-    c = compress_sequences(text, [ZstdSequence(1, 10, 20)]; validate=false)                   # unchecked: decodes to other bytes
+    @test_throws ArgumentError compress_sequences(text, [ZstandardSequence(3, 10, 2)])           # match too short
+    @test_throws ArgumentError compress_sequences(text, [ZstandardSequence(50, 10, 20)])          # reaches before the data
+    @test_throws ArgumentError compress_sequences(text, [ZstandardSequence(1, 10, 20)])           # does not match
+    @test_throws ArgumentError compress_sequences(text, [ZstandardSequence(0, length(text) + 1, 0)])
+    @test_throws ArgumentError compress_sequences(text, [ZstandardSequence(0, 200_000, 0)])        # block too large
+    @test_throws ArgumentError compress_sequences(text, [ZstandardSequence(0, 1000, 0), ZstandardSequence(3, 1, 5)])
+    c = compress_sequences(text, [ZstandardSequence(1, 10, 20)]; validate=false)                   # unchecked: decodes to other bytes
     @test length(decompress(c)) == length(text) && decompress(c) != text
-    @test sprint(show, ZstdSequence(1, 2, 3)) == "ZstdSequence(1, 2, 3)"
+    @test sprint(show, ZstandardSequence(1, 2, 3)) == "ZstandardSequence(1, 2, 3)"
 end
 
 @testset "Window limit per position and rsyncable" begin
@@ -909,7 +909,7 @@ end
         write(s, data); close(s)
         @test decompress(take!(buf)) == data
     end
-    @test compress(ZstdCompressionContext(level=3, target_block_size=4000), data) == compress(data; level=3, target_block_size=4000)
+    @test compress(ZstandardCompressionContext(level=3, target_block_size=4000), data) == compress(data; level=3, target_block_size=4000)
     @test transcode(ZstandardDecompressor(), transcode(ZstandardCompressor(target_block_size=4000), data)) == data
     @test_throws ArgumentError compress(data; target_block_size=100)
     @test_throws ArgumentError compress(data; target_block_size=1 << 20)
@@ -925,7 +925,7 @@ end
             @test length(compress(d; kw...)) <= compress_bound(n)
         end
         out = Vector{UInt8}(undef, compress_bound(n))
-        @test length(compress!(ZstdCompressionContext(), out, d)) <= compress_bound(n)
+        @test length(compress!(ZstandardCompressionContext(), out, d)) <= compress_bound(n)
     end
     @test compress_bound(0) == 64
     @test compress_bound(1 << 20) == (1 << 20) + (1 << 12)
@@ -942,7 +942,7 @@ end
     @test decompress_bound(vcat(u, skippable_frame(UInt8[1, 2]), c)) == decompress_bound(u) + length(t)
     @test decompress_bound(compress(t; magicless=true); magicless=true) == length(t)
     @test decompress_bound(UInt8[]) == 0
-    @test_throws ZstdError decompress_bound(c[1:end-10])
+    @test_throws ZstandardError decompress_bound(c[1:end-10])
 end
 
 @testset "Streaming long-distance matching and threads" begin
@@ -996,7 +996,7 @@ end
     @test transcode(ZstandardDecompressor(), transcode(ZstandardCompressor(long=true), data)) == data
     @test transcode(ZstandardDecompressor(), transcode(ZstandardCompressor(nthreads=2), big)) == big
     @test_throws ArgumentError Zstandard.ZstandardCompressorStream(IOBuffer(); nthreads=2, long=true)
-    @test_throws ArgumentError Zstandard.ZstandardCompressorStream(IOBuffer(); nthreads=2, dict=ZstdDictionary(a[1:1000]))
+    @test_throws ArgumentError Zstandard.ZstandardCompressorStream(IOBuffer(); nthreads=2, dict=ZstandardDictionary(a[1:1000]))
     @test_throws ArgumentError Zstandard.ZstandardCompressorStream(IOBuffer(); nthreads=0)
 end
 

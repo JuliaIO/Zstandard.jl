@@ -182,7 +182,7 @@ text 4MB jl    |   3.03  |      727.3        440.5      585.0 |    0.61x
 - Packed UInt64 FSE entries; 4-stream Huffman decoded in lockstep; fused sequence decode/execute
   with wildcopy.
 - Corruption detection: offset 0/out of range, overruns, unconsumed bitstreams, content size and
-  checksum mismatches all raise `ZstdError` (previously-broken golden error tests now pass).
+  checksum mismatches all raise `ZstandardError` (previously-broken golden error tests now pass).
 
 ---
 

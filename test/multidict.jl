@@ -1,5 +1,5 @@
 using Zstandard
-using Zstandard: frame_dict_id, skippable_frame, finalize_dictionary, ZstdDecompressionContext,
+using Zstandard: frame_dict_id, skippable_frame, finalize_dictionary, ZstandardDecompressionContext,
     decompress!, compress_seekable, decompress_range
 using Test
 using TranscodingStreams
@@ -32,33 +32,33 @@ const WORDS_B = ["<div class=\"", "\">", "</div>", "<span>", "</span>", "href=",
     samples_b = [corpus_text(WORDS_B, 800 + 7i, 1000 + i) for i in 1:300]
     da = parse_dictionary(train_dictionary(samples_a; dict_size=8192))
     db = parse_dictionary(train_dictionary(samples_b; dict_size=8192))
-    raw = ZstdDictionary(corpus_text(WORDS_A, 4096, 77))
+    raw = ZstandardDictionary(corpus_text(WORDS_A, 4096, 77))
     @test da.id != 0 && db.id != 0 && da.id != db.id
 
     @testset "construction" begin
-        s = ZstdDictionarySet(da, db)
+        s = ZstandardDictionarySet(da, db)
         @test length(s) == 2
         @test haskey(s, da.id) && haskey(s, db.id) && !haskey(s, 0)
-        @test ZstdDictionarySet([da, db]).dicts == s.dicts
-        sr = ZstdDictionarySet(da, raw, db)
+        @test ZstandardDictionarySet([da, db]).dicts == s.dicts
+        sr = ZstandardDictionarySet(da, raw, db)
         @test sr.default === raw && length(sr) == 3 && haskey(sr, 0)
         # a formatted default is also selected by its ID
-        sd = ZstdDictionarySet(db; default=da)
+        sd = ZstandardDictionarySet(db; default=da)
         @test sd.default === da && haskey(sd, da.id) && haskey(sd, db.id)
         @test occursin(string(da.id), sprint(show, s))
         clash = parse_dictionary(finalize_dictionary(da.content, samples_a; dict_id=db.id))
         @test clash.id == db.id
-        @test_throws ArgumentError ZstdDictionarySet(da, db, clash)
-        @test length(ZstdDictionarySet(da, db, da)) == 2          # the same dictionary twice is fine
-        @test ZstdDictionarySet(da; default=da).default === da
-        @test_throws ArgumentError ZstdDictionarySet(raw, ZstdDictionary(UInt8[1, 2, 3]))
-        @test_throws ArgumentError ZstdDictionarySet(raw; default=ZstdDictionary(UInt8[1, 2, 3]))
-        @test_throws ArgumentError ZstdDictionarySet(Any[da, "not a dictionary"])
-        @test length(ZstdDictionarySet()) == 0
+        @test_throws ArgumentError ZstandardDictionarySet(da, db, clash)
+        @test length(ZstandardDictionarySet(da, db, da)) == 2          # the same dictionary twice is fine
+        @test ZstandardDictionarySet(da; default=da).default === da
+        @test_throws ArgumentError ZstandardDictionarySet(raw, ZstandardDictionary(UInt8[1, 2, 3]))
+        @test_throws ArgumentError ZstandardDictionarySet(raw; default=ZstandardDictionary(UInt8[1, 2, 3]))
+        @test_throws ArgumentError ZstandardDictionarySet(Any[da, "not a dictionary"])
+        @test length(ZstandardDictionarySet()) == 0
         # an equal copy (the same file parsed twice) is not a clash
         da2 = parse_dictionary(train_dictionary(samples_a; dict_size=8192))
-        @test da2 !== da && length(ZstdDictionarySet(da, db, da2)) == 2
-        @test length(ZstdDictionarySet(raw, ZstdDictionary(copy(raw.content)))) == 1
+        @test da2 !== da && length(ZstandardDictionarySet(da, db, da2)) == 2
+        @test length(ZstandardDictionarySet(raw, ZstandardDictionary(copy(raw.content)))) == 1
         # haskey and getindex take any integer
         @test !haskey(s, -1) && !haskey(s, Int64(typemax(UInt32)) + 1) && !haskey(s, 12345)
         @test s[da.id] === da && s[Int(db.id)] === db && sr[0] === raw
@@ -66,9 +66,9 @@ const WORDS_B = ["<div class=\"", "\">", "</div>", "<span>", "</span>", "href=",
         @test_throws KeyError s[-1]
         @test_throws KeyError s[Int64(typemax(UInt32)) + 1]
         # iteration
-        @test collect(sr) == [da, raw, db] && eltype(sr) == ZstdDictionary
+        @test collect(sr) == [da, raw, db] && eltype(sr) == ZstandardDictionary
         @test Set(d.id for d in sd) == Set([da.id, db.id]) && length(sd) == 2
-        @test [d for d in ZstdDictionarySet()] == ZstdDictionary[]
+        @test [d for d in ZstandardDictionarySet()] == ZstandardDictionary[]
     end
 
     # Frames using dictionary A, dictionary B, no dictionary and the raw
@@ -89,10 +89,10 @@ const WORDS_B = ["<div class=\"", "\">", "</div>", "<span>", "</span>", "href=",
     data = reduce(vcat, frames)
     expected = reduce(vcat, texts)
     @test length(data) >= Zstandard.PARALLEL_DECODE_MIN    # exercises the parallel path
-    set = ZstdDictionarySet(da, db, raw)
+    set = ZstandardDictionarySet(da, db, raw)
 
     @testset "one-shot" begin
-        @test_throws ZstdError decompress(data, da)          # the old single-dictionary limit
+        @test_throws ZstandardError decompress(data, da)          # the old single-dictionary limit
         for nt in (1, 4)
             @test decompress(data, set; nthreads=nt) == expected
             @test decompress(data, [da, db, raw]; nthreads=nt) == expected
@@ -107,18 +107,18 @@ const WORDS_B = ["<div class=\"", "\">", "</div>", "<span>", "</span>", "href=",
         sk = vcat(frames[1], skippable_frame(UInt8[1, 2, 3]), frames[2])
         @test decompress(sk, set) == vcat(texts[1], texts[2])
         # without the raw default, raw-dictionary frames cannot reference it
-        @test decompress(vcat(frames[1], frames[2], frames[4]), ZstdDictionarySet(da, db)) ==
+        @test decompress(vcat(frames[1], frames[2], frames[4]), ZstandardDictionarySet(da, db)) ==
               vcat(texts[1], texts[2], texts[4])
     end
 
     @testset "context" begin
-        ctx = ZstdDecompressionContext(; dict=set)
+        ctx = ZstandardDecompressionContext(; dict=set)
         @test decompress(ctx, data) == expected
         @test decompress(ctx, data) == expected               # reuse
         out = UInt8[]
         @test decompress!(ctx, out, data) === out && out == expected
-        @test ZstdDecompressionContext(; dict=[da, db, raw]).dict isa ZstdDictionarySet
-        @test decompress(ZstdDecompressionContext(; dict=Any[da, db, raw]), data) == expected
+        @test ZstandardDecompressionContext(; dict=[da, db, raw]).dict isa ZstandardDictionarySet
+        @test decompress(ZstandardDecompressionContext(; dict=Any[da, db, raw]), data) == expected
         @test occursin("dicts", sprint(show, ctx))
     end
 
@@ -133,9 +133,9 @@ const WORDS_B = ["<div class=\"", "\">", "</div>", "<span>", "</span>", "href=",
         end
         @test got == expected
         # a frame needing a dictionary outside the set: the earlier frames are readable
-        s = Zstandard.ZstandardDecompressorStream(IOBuffer(vcat(frames[1], frames[2])), ZstdDictionarySet(da))
+        s = Zstandard.ZstandardDecompressorStream(IOBuffer(vcat(frames[1], frames[2])), ZstandardDictionarySet(da))
         @test read(s, length(texts[1])) == texts[1]
-        @test_throws ZstdError read(s)
+        @test_throws ZstandardError read(s)
     end
 
     @testset "codec" begin
@@ -152,30 +152,49 @@ const WORDS_B = ["<div class=\"", "\">", "</div>", "<span>", "</span>", "href=",
         @test decompress_range(a, 12_345:56_789; dict=set) == expected[12_345:56_789]
         @test decompress_range(a, 1:length(expected); dict=[da, db]) == expected
         @test decompress_range(a, 1:length(expected); dict=Any[da, db]) == expected
-        @test_throws ZstdError decompress_range(a, 1:10; dict=ZstdDictionarySet(da))
+        @test_throws ZstandardError decompress_range(a, 1:10; dict=ZstandardDictionarySet(da))
+    end
+
+    @testset "accessors" begin
+        @test Zstandard.dictionary_id(da) == da.id != 0
+        @test Zstandard.dictionary_id(raw) == 0
+        @test Zstandard.dictionary_content(raw) == raw.content
+        @test Zstandard.dictionary_content(da) == da.content
+        @test Zstandard.dictionary_id(da) == frame_dict_id(frames[1])
+        @test Base.ispublic(Zstandard, :dictionary_id) || VERSION < v"1.11"
+    end
+
+    @testset "dict keyword" begin
+        @test decompress(data; dict=set) == expected
+        @test decompress(frames[1]; dict=da) == texts[1]
+        @test decompress(data; dict=[da, db, raw], nthreads=4) == expected
+        @test read(Zstandard.ZstandardDecompressorStream(IOBuffer(data); dict=set)) == expected
+        @test read(Zstandard.ZstandardDecompressorStream(IOBuffer(frames[2]); dict=db)) == texts[2]
+        @test_throws ArgumentError decompress(frames[1], da; dict=da)
+        @test_throws ArgumentError Zstandard.ZstandardDecompressorStream(IOBuffer(frames[1]), da; dict=da)
     end
 
     @testset "frame ID 0 with a formatted default" begin
         # dict_id=false leaves the ID out of the header: the default decodes it
         f = vcat(compress(texts[1]; dict=da, dict_id=false), frames[2])
         @test frame_dict_id(f) == 0
-        @test decompress(f, ZstdDictionarySet(db; default=da)) == vcat(texts[1], texts[2])
-        @test read(Zstandard.ZstandardDecompressorStream(IOBuffer(f), ZstdDictionarySet(db; default=da))) ==
+        @test decompress(f, ZstandardDictionarySet(db; default=da)) == vcat(texts[1], texts[2])
+        @test read(Zstandard.ZstandardDecompressorStream(IOBuffer(f), ZstandardDictionarySet(db; default=da))) ==
               vcat(texts[1], texts[2])
     end
 
     @testset "errors" begin
         e = try
-            decompress(data, ZstdDictionarySet(da, raw)); nothing
+            decompress(data, ZstandardDictionarySet(da, raw)); nothing
         catch err
             err
         end
-        @test e isa ZstdError && occursin(string(db.id), sprint(showerror, e))
-        @test_throws ZstdError decompress(data, ZstdDictionarySet(); nthreads=4)
-        @test_throws ZstdError read(Zstandard.ZstandardDecompressorStream(IOBuffer(data), ZstdDictionarySet(db)))
-        @test_throws ZstdError transcode(ZstandardDecompressor(; dict=ZstdDictionarySet(da)), data)
+        @test e isa ZstandardError && occursin(string(db.id), sprint(showerror, e))
+        @test_throws ZstandardError decompress(data, ZstandardDictionarySet(); nthreads=4)
+        @test_throws ZstandardError read(Zstandard.ZstandardDecompressorStream(IOBuffer(data), ZstandardDictionarySet(db)))
+        @test_throws ZstandardError transcode(ZstandardDecompressor(; dict=ZstandardDictionarySet(da)), data)
         @test_throws ArgumentError decompress(data, set; prefix=UInt8[1, 2, 3])
-        @test_throws ArgumentError ZstdDecompressionContext(; dict=set, prefix=UInt8[1, 2, 3])
+        @test_throws ArgumentError ZstandardDecompressionContext(; dict=set, prefix=UInt8[1, 2, 3])
     end
 
     @testset "frames written by libzstd" begin

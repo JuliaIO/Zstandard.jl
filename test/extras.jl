@@ -38,8 +38,8 @@ using CodecZstd
 
 
 
-    @test_throws ZstdError frame_header(s)
-    @test_throws ZstdError frame_compressed_size(a[1:end-2])
+    @test_throws ZstandardError frame_header(s)
+    @test_throws ZstandardError frame_compressed_size(a[1:end-2])
     @test_throws ArgumentError skippable_frame(UInt8[]; variant=16)
 end
 
@@ -200,18 +200,18 @@ end
     @test decompress(view(mf, 1:length(mf)); nthreads=4) == text
 
     # with a dictionary
-    d = ZstdDictionary(text[1:50_000])
+    d = ZstandardDictionary(text[1:50_000])
     mfd = reduce(vcat, [compress(p; dict=d) for p in pieces])
     @test decompress(mfd, d; nthreads=4) == text
 
-    # errors surface as ZstdError, not TaskFailedException
+    # errors surface as ZstandardError, not TaskFailedException
     bad = copy(mf)
     mid = sum(length, frames[1:7]) + 200
     bad[mid] ⊻= 0xff
     bad[mid + 1] ⊻= 0x5a
-    @test_throws ZstdError decompress(bad; nthreads=4)
+    @test_throws ZstandardError decompress(bad; nthreads=4)
     # cut inside the second-to-last frame
-    @test_throws ZstdError decompress(mf[1:end-length(frames[end])-5]; nthreads=4)
+    @test_throws ZstandardError decompress(mf[1:end-length(frames[end])-5]; nthreads=4)
     # dropping whole trailing frames leaves valid input
     @test decompress(mf[1:end-length(frames[end])]; nthreads=4) == text[1:end-length(pieces[end])]
     @test_throws ArgumentError decompress(mf; nthreads=0)

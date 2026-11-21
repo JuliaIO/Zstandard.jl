@@ -307,7 +307,7 @@ function train_dictionary(samples::AbstractVector{<:AbstractVector{UInt8}}; dict
         content = select_segments(buf, ids, copy(freqs), cap, kk, dd)
         length(content) < 8 && return (typemax(Int), content)
         single && return (0, content)
-        rd = ZstdDictionary(content)
+        rd = ZstandardDictionary(content)
         cc = CompressionContext()
         sz = 0
         for smp in test

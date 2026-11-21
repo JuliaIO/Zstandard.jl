@@ -196,14 +196,14 @@ xxh64_digest(::ZeroXXH64, st) = UInt64(0)
 
     # the selected implementation really is the one in use
     Zstandard.with_xxh64_implementation(ZeroXXH64()) do
-        @test_throws ZstdError decompress(ref_frame)
-        @test_throws ZstdError decompress(multi; nthreads=4)
-        @test_throws ZstdError read(Zstandard.ZstandardDecompressorStream(IOBuffer(ref_frame)))
+        @test_throws ZstandardError decompress(ref_frame)
+        @test_throws ZstandardError decompress(multi; nthreads=4)
+        @test_throws ZstandardError read(Zstandard.ZstandardDecompressorStream(IOBuffer(ref_frame)))
         bad = compress(data; checksum=true)
         @test bad[end-3:end] == zeros(UInt8, 4)
         @test decompress(compress(data)) == data          # no checksum: unaffected
     end
-    @test_throws ZstdError decompress(Zstandard.with_xxh64_implementation(() -> compress(data; checksum=true), ZeroXXH64()))
+    @test_throws ZstandardError decompress(Zstandard.with_xxh64_implementation(() -> compress(data; checksum=true), ZeroXXH64()))
 end
 
 # XXH64's four lanes are serial multiply chains: packing them into one vector

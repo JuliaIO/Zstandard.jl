@@ -10,7 +10,7 @@ const SKIPPABLE_MAGIC_START = 0x184D2A50
 const SKIPPABLE_MAGIC_END   = 0x184D2A5F
 
 """
-    ZstdFrameHeader
+    ZstandardFrameHeader
 
 Information from a Zstandard frame header, as returned by [`frame_header`](@ref).
 
@@ -21,7 +21,7 @@ Information from a Zstandard frame header, as returned by [`frame_header`](@ref)
 - `single_segment`: whether the frame is a single segment (window = content size)
 - `header_size`: size of the frame header in bytes, including the magic number
 """
-struct ZstdFrameHeader
+struct ZstandardFrameHeader
     content_size::Union{Nothing,Int64}
     window_size::Int
     dict_id::UInt32
@@ -64,10 +64,10 @@ function is_skippable_frame(data::AbstractVector{UInt8}; offset::Integer=1)
 end
 
 """
-    frame_header(data; offset=1, magicless=false) -> ZstdFrameHeader
+    frame_header(data; offset=1, magicless=false) -> ZstandardFrameHeader
 
 Parse the header of the Zstandard frame starting at `offset`. Throws a
-`ZstdError` for skippable frames, unknown magic numbers or truncated headers.
+`ZstandardError` for skippable frames, unknown magic numbers or truncated headers.
 With `magicless=true`, the frame has no magic number (see `compress`).
 """
 function frame_header(data::AbstractVector{UInt8}; offset::Integer=1, magicless::Bool=false)
@@ -86,7 +86,7 @@ function frame_header(data::AbstractVector{UInt8}; offset::Integer=1, magicless:
         GC.@preserve hdr read_frame_info(pointer(hdr), length(hdr))
     end
     cs = fi.content_size >= 0 ? fi.content_size : nothing
-    return ZstdFrameHeader(cs, fi.window_size, fi.dict_id, fi.checksum, fi.single_segment, m4 + fi.header_size)
+    return ZstandardFrameHeader(cs, fi.window_size, fi.dict_id, fi.checksum, fi.single_segment, m4 + fi.header_size)
 end
 
 """
@@ -144,7 +144,7 @@ end
 
 Sum of the content sizes of all frames in `data` (skippable frames count as 0),
 or `nothing` if any frame does not record its content size. Throws a
-`ZstdError` if the sizes (taken from untrusted headers) overflow `Int64`.
+`ZstandardError` if the sizes (taken from untrusted headers) overflow `Int64`.
 """
 function decompressed_size(data::AbstractVector{UInt8})
     total = Int64(0)
@@ -164,7 +164,7 @@ end
 Upper bound on the decompressed size of all frames in `data` (as libzstd's
 `ZSTD_decompressBound`): a frame's recorded content size, or for frames that
 do not record it, its number of blocks times the largest block size its
-window allows. Skippable frames count as 0. Throws a `ZstdError` for
+window allows. Skippable frames count as 0. Throws a `ZstandardError` for
 malformed or truncated data, and if the total overflows `Int64`.
 """
 function decompress_bound(data::AbstractVector{UInt8}; magicless::Bool=false)

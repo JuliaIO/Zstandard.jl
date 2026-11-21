@@ -87,7 +87,7 @@ Compress `data` (a byte vector or string) into a Zstandard frame.
 
 `level` ranges from $(Encoder.MIN_LEVEL) (fastest) to $(Encoder.MAX_LEVEL) (strongest);
 `0` selects the default level 3, as in libzstd. With `checksum=true` an XXH64
-content checksum is appended. With a `ZstdDictionary`, its content serves as
+content checksum is appended. With a `ZstandardDictionary`, its content serves as
 history and, for formatted dictionaries, its entropy tables and repeat offsets
 are used; the frame records the dictionary ID. When compressing many small
 inputs with one dictionary, pass a [`PreparedDictionary`](@ref) from
@@ -95,10 +95,28 @@ inputs with one dictionary, pass a [`PreparedDictionary`](@ref) from
 used (a conflicting `level` throws an `ArgumentError`). Inputs larger than
 1 GiB are written as several concatenated frames.
 
-The remaining keywords override individual parameters of the level, with the
-meaning of libzstd's advanced parameters (`ZSTD_c_windowLog` etc.); see
-[`Zstandard.Encoder.parameter_overrides`](@ref). For example,
-`compress(data; level=19, window_log=24)` searches matches up to 16 MiB back.
+The remaining keywords override individual parameters of the level (each
+`nothing`, the default, keeps the level's value), with the meaning of
+libzstd's advanced parameters (`ZSTD_c_windowLog` etc.):
+
+- `window_log` (10-30): log2 of the maximum match distance (window size)
+- `hash_log` (6-27): log2 of the main hash table size
+- `chain_log` (6-28): log2 of the chain / secondary table size (unused by the
+  greedy and lazy strategies, whose row-based match finder sizes rows from
+  `search_log`, as in libzstd)
+- `search_log` (1-26): log2 of the number of match candidates searched
+- `min_match` (3-7): minimum match length searched for (the match finders
+  use 4-7 for fast/dfast, 4-6 for greedy/lazy, 3-4 for btopt/btultra)
+- `target_length` (0-131072): for fast, a step size (acceleration); for
+  btopt/btultra, a length taken without optimizing (unused by greedy/lazy,
+  as in libzstd)
+- `strategy`: `:fast`, `:dfast`, `:greedy`, `:lazy`, `:lazy2`, `:btlazy2`,
+  `:btopt`, `:btultra` or `:btultra2` (libzstd's strategies)
+
+Values out of range throw an `ArgumentError`. Parameters are adapted to the
+input size afterwards, as in libzstd (the window shrinks for small inputs).
+For example, `compress(data; level=19, window_log=24)` searches matches up to
+16 MiB back.
 A `window_log` above 27 makes frames that streaming decoders reject by default
 (here and in libzstd): decode them with `max_window_size` set, as libzstd's
 `--long=N`, or one-shot with `decompress`.
@@ -139,7 +157,7 @@ given the right dictionary), and `magicless=true` omits the 4-byte magic
 number; such frames are decoded with `decompress(data; magicless=true)`.
 """
 function compress(data::AbstractVector{UInt8}; level::Union{Nothing,Integer}=nothing,
-                  checksum::Bool=false, dict::Union{Nothing,ZstdDictionary,PreparedDictionary}=nothing,
+                  checksum::Bool=false, dict::Union{Nothing,ZstandardDictionary,PreparedDictionary}=nothing,
                   nthreads::Integer=1, long::Bool=false,
                   content_size::Bool=true, dict_id::Bool=true, magicless::Bool=false,
                   prefix::Union{Nothing,AbstractVector{UInt8}}=nothing, rsyncable::Bool=false,

@@ -1,7 +1,7 @@
 module ZstandardTranscodingStreamsExt
 
 using Zstandard
-using Zstandard: ZstdDictionary, ZstdError
+using Zstandard: ZstandardDictionary, ZstandardError
 using Zstandard.Encoder: StreamCompressor, stream_write!, stream_finish!, stream_pledge!
 using Zstandard.Streaming: StreamDecoder, feed!, needed, at_boundary, available
 import TranscodingStreams
@@ -14,7 +14,7 @@ using TranscodingStreams: Codec, Memory, Error
 mutable struct ZstandardCompressorCodec <: Codec
     level::Union{Nothing,Int}
     checksum::Bool
-    dict::Union{Nothing,ZstdDictionary,Zstandard.PreparedDictionary}
+    dict::Union{Nothing,ZstandardDictionary,Zstandard.PreparedDictionary}
     params::Zstandard.Encoder.ParameterOverrides
     frame::Zstandard.Encoder.FrameOptions
     size_hint::Union{Nothing,Int}
@@ -25,7 +25,7 @@ mutable struct ZstandardCompressorCodec <: Codec
 end
 
 function Zstandard.ZstandardCompressor(; level::Union{Nothing,Integer}=nothing, checksum::Bool=false,
-                                       dict::Union{Nothing,ZstdDictionary,Zstandard.PreparedDictionary}=nothing,
+                                       dict::Union{Nothing,ZstandardDictionary,Zstandard.PreparedDictionary}=nothing,
                                        content_size::Bool=true, dict_id::Bool=true, magicless::Bool=false,
                                        size_hint::Union{Nothing,Integer}=nothing,
                                        target_block_size::Union{Nothing,Integer}=nothing,
@@ -156,7 +156,7 @@ function TranscodingStreams.process(c::ZstandardDecompressorCodec, input::Memory
         # 3. consume input
         if input.size == 0
             at_boundary(d) && return 0, 0, :end
-            throw(ZstdError("truncated input"))
+            throw(ZstandardError("truncated input"))
         end
         consumed = 0
         while consumed < input.size && available(d) == 0 &&

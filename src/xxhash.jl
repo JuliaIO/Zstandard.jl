@@ -15,8 +15,6 @@ module XXHash
 # ScopedValues.jl: Base.ScopedValues on Julia 1.11+, a backport on 1.10
 using ScopedValues: ScopedValue, with
 
-export xxh64, XXH64State, update!, digest!,
-       AbstractXXH64, NativeXXH64, XXH64_IMPLEMENTATION, with_xxh64_implementation
 
 const P1 = 0x9E3779B185EBCA87
 const P2 = 0xC2B2AE3D27D4EB4F

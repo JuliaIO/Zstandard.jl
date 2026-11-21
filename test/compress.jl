@@ -144,17 +144,17 @@ end
     # decompression-errors set) must be rejected by the decoder.
     @testset "Invalid offset 0" begin
         compressed = read(joinpath(fixtures_dir, "off0.bin.zst"))
-        @test_throws ZstdError decompress(compressed)
+        @test_throws ZstandardError decompress(compressed)
     end
 
     @testset "Truncated Huffman state" begin
         compressed = read(joinpath(fixtures_dir, "truncated_huff_state.zst"))
-        @test_throws ZstdError decompress(compressed)
+        @test_throws ZstandardError decompress(compressed)
     end
 
     @testset "Extraneous zero sequences" begin
         compressed = read(joinpath(fixtures_dir, "zeroSeq_extraneous.zst"))
-        @test_throws ZstdError decompress(compressed)
+        @test_throws ZstandardError decompress(compressed)
     end
 end
 
@@ -435,7 +435,7 @@ end
 end
 
 @testset "Corrupted input fuzz" begin
-    # Corrupted frames must either decode or throw ZstdError, never crash or
+    # Corrupted frames must either decode or throw ZstandardError, never crash or
     # throw anything else.
     text = Vector{UInt8}(repeat("The quick brown fox jumps over the lazy dog. 0123456789\n", 2000))
     for i in 1:length(text) ÷ 7
@@ -459,7 +459,7 @@ end
             try
                 f(c)
             catch e
-                e isa ZstdError || (bad += 1)
+                e isa ZstandardError || (bad += 1)
             end
         end
     end

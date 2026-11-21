@@ -2,7 +2,7 @@
 # ZSTD_DCtx). Included in module Zstandard.
 
 """
-    ZstdCompressionContext(; level=3, checksum=false, dict=nothing, long=false,
+    ZstandardCompressionContext(; level=3, checksum=false, dict=nothing, long=false,
                            content_size=true, dict_id=true, magicless=false, prefix=nothing,
                            window_log, hash_log, chain_log, search_log, min_match,
                            target_length, strategy)
@@ -17,7 +17,7 @@ many small inputs). The keywords mean the same as for [`compress`](@ref).
 A context must not be used by several tasks at the same time.
 
 ```julia
-ctx = ZstdCompressionContext(level=5, checksum=true)
+ctx = ZstandardCompressionContext(level=5, checksum=true)
 out = UInt8[]
 for msg in messages
     compress!(ctx, out, msg)
@@ -25,19 +25,19 @@ for msg in messages
 end
 ```
 """
-mutable struct ZstdCompressionContext
+mutable struct ZstandardCompressionContext
     cc::CompressionContext
     level::Int
     checksum::Bool
-    dict::Union{Nothing,ZstdDictionary,PreparedDictionary}
+    dict::Union{Nothing,ZstandardDictionary,PreparedDictionary}
     long::Bool
     params::Encoder.ParameterOverrides
     frame::Encoder.FrameOptions
     prefix::Union{Nothing,Vector{UInt8}}
 end
 
-function ZstdCompressionContext(; level::Union{Nothing,Integer}=nothing, checksum::Bool=false,
-                                dict::Union{Nothing,ZstdDictionary,PreparedDictionary}=nothing,
+function ZstandardCompressionContext(; level::Union{Nothing,Integer}=nothing, checksum::Bool=false,
+                                dict::Union{Nothing,ZstandardDictionary,PreparedDictionary}=nothing,
                                 long::Bool=false, content_size::Bool=true, dict_id::Bool=true,
                                 magicless::Bool=false, prefix::Union{Nothing,AbstractVector{UInt8}}=nothing,
                                 target_block_size::Union{Nothing,Integer}=nothing,
@@ -52,13 +52,13 @@ function ZstdCompressionContext(; level::Union{Nothing,Integer}=nothing, checksu
     end
     level = level === nothing ? 3 : Int(level)
     dict = Encoder.prefix_dict(prefix, dict)
-    return ZstdCompressionContext(CompressionContext(), level, checksum, dict, long, params,
+    return ZstandardCompressionContext(CompressionContext(), level, checksum, dict, long, params,
                                   Encoder.FrameOptions(; content_size, dict_id, magicless, target_block_size),
                                   prefix === nothing ? nothing : Vector{UInt8}(prefix))
 end
 
-function Base.show(io::IO, ctx::ZstdCompressionContext)
-    print(io, "ZstdCompressionContext(level=", ctx.level, ctx.checksum ? ", checksum=true" : "",
+function Base.show(io::IO, ctx::ZstandardCompressionContext)
+    print(io, "ZstandardCompressionContext(level=", ctx.level, ctx.checksum ? ", checksum=true" : "",
           ctx.dict === nothing ? "" : ", dict", ctx.long ? ", long=true" : "", ")")
 end
 
@@ -66,20 +66,20 @@ _bytes(data::AbstractVector{UInt8}) = data
 _bytes(data::AbstractString) = codeunits(data)
 
 """
-    compress(ctx::ZstdCompressionContext, data) -> Vector{UInt8}
+    compress(ctx::ZstandardCompressionContext, data) -> Vector{UInt8}
 
 Compress `data` (a byte vector or string) with the context's parameters.
 """
-compress(ctx::ZstdCompressionContext, data::Union{AbstractVector{UInt8},AbstractString}) =
+compress(ctx::ZstandardCompressionContext, data::Union{AbstractVector{UInt8},AbstractString}) =
     compress!(ctx, UInt8[], data)
 
 """
-    compress!(ctx::ZstdCompressionContext, out::Vector{UInt8}, data) -> out
+    compress!(ctx::ZstandardCompressionContext, out::Vector{UInt8}, data) -> out
 
 Compress `data` into `out`, which is resized to the compressed frame. Reusing
 `out` across calls avoids allocating (its capacity is kept by Julia).
 """
-function compress!(ctx::ZstdCompressionContext, out::Vector{UInt8},
+function compress!(ctx::ZstandardCompressionContext, out::Vector{UInt8},
                    data::Union{AbstractVector{UInt8},AbstractString})
     src = _bytes(data)
     out === src && throw(ArgumentError("out must not be the input"))
@@ -98,46 +98,46 @@ function compress!(ctx::ZstdCompressionContext, out::Vector{UInt8},
 end
 
 """
-    ZstdDecompressionContext(; dict=nothing, magicless=false, prefix=nothing)
+    ZstandardDecompressionContext(; dict=nothing, magicless=false, prefix=nothing)
 
 A decompression context reused across calls (as a libzstd `ZSTD_DCtx`): its
 decoding tables persist. Use it with `decompress(ctx, data)`, or
 `decompress!(ctx, out, data)` to decode into a vector you reuse. Data may hold
 several concatenated and skippable frames; `dict` is used for frames that
-need it. `dict` may also be a [`ZstdDictionarySet`](@ref) (or a vector of
-`ZstdDictionary`) to choose each frame's dictionary by its ID. With `magicless=true`, frames have no magic numbers (see `compress`).
+need it. `dict` may also be a [`ZstandardDictionarySet`](@ref) (or a vector of
+`ZstandardDictionary`) to choose each frame's dictionary by its ID. With `magicless=true`, frames have no magic numbers (see `compress`).
 
 A context must not be used by several tasks at the same time.
 """
-mutable struct ZstdDecompressionContext
+mutable struct ZstandardDecompressionContext
     st::DecoderState
     dict::DecodeDict
     magicless::Bool
 end
-ZstdDecompressionContext(; dict::DictArg=nothing,
+ZstandardDecompressionContext(; dict::DictArg=nothing,
                          magicless::Bool=false, prefix::Union{Nothing,AbstractVector{UInt8}}=nothing) =
-    ZstdDecompressionContext(DecoderState(), Encoder.prefix_dict(prefix, decode_dict(dict)), magicless)
+    ZstandardDecompressionContext(DecoderState(), Encoder.prefix_dict(prefix, decode_dict(dict)), magicless)
 
-Base.show(io::IO, ctx::ZstdDecompressionContext) =
-    print(io, "ZstdDecompressionContext(", ctx.dict === nothing ? "" :
-          ctx.dict isa ZstdDictionarySet ? "dicts" : "dict", ")")
+Base.show(io::IO, ctx::ZstandardDecompressionContext) =
+    print(io, "ZstandardDecompressionContext(", ctx.dict === nothing ? "" :
+          ctx.dict isa ZstandardDictionarySet ? "dicts" : "dict", ")")
 
 """
-    decompress(ctx::ZstdDecompressionContext, data) -> Vector{UInt8}
+    decompress(ctx::ZstandardDecompressionContext, data) -> Vector{UInt8}
 
 Decompress `data` with the context (and its dictionary, if any).
 """
-decompress(ctx::ZstdDecompressionContext, data::AbstractVector{UInt8}) =
+decompress(ctx::ZstandardDecompressionContext, data::AbstractVector{UInt8}) =
     decompress_frames(data, ctx.st, ctx.dict; magicless=ctx.magicless)
 
 """
-    decompress!(ctx::ZstdDecompressionContext, out::Vector{UInt8}, data) -> out
+    decompress!(ctx::ZstandardDecompressionContext, out::Vector{UInt8}, data) -> out
 
 Decompress `data` into `out`, which is resized to the decoded content. Reusing
 `out` across calls avoids allocating (its capacity is kept by Julia). If
 decoding throws, `out` is left empty.
 """
-function decompress!(ctx::ZstdDecompressionContext, out::Vector{UInt8}, data::AbstractVector{UInt8})
+function decompress!(ctx::ZstandardDecompressionContext, out::Vector{UInt8}, data::AbstractVector{UInt8})
     out === data && throw(ArgumentError("out must not be the input"))
     resize!(out, 0)
     try

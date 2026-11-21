@@ -14,11 +14,8 @@ module Encoder
 
 using ..XXHash: xxh64, content_checksum, ChecksumState, checksum_update!, checksum_digest
 import ..Decoder: LL_BASE, LL_BITS, ML_BASE, ML_BITS, LL_DEFAULT_NORM, ML_DEFAULT_NORM,
-                  OF_DEFAULT_NORM, MAGIC_NUMBER, BLOCK_SIZE_MAX, ZstdDictionary, has_entropy
+                  OF_DEFAULT_NORM, MAGIC_NUMBER, BLOCK_SIZE_MAX, ZstandardDictionary, has_entropy
 
-export CompressionContext, compress_frame!, compression_parameters, MIN_LEVEL, MAX_LEVEL,
-       StreamCompressor, stream_write!, stream_flush!, stream_finish!, stream_pledge!,
-       PreparedDictionary, prepare_dictionary, ParameterOverrides, parameter_overrides, NO_OVERRIDES
 
 const MIN_LEVEL = -7
 const MAX_LEVEL = 22
@@ -185,7 +182,7 @@ const NO_OVERRIDES = ParameterOverrides(-1, -1, -1, -1, -1, -1, -1)
 function prefix_dict(prefix, dict)
     prefix === nothing && return dict
     dict === nothing || throw(ArgumentError("prefix and dict cannot be combined"))
-    return ZstdDictionary(prefix)
+    return ZstandardDictionary(prefix)
 end
 
 function prefix_params(params::ParameterOverrides, prefix, level, n::Integer)
@@ -1439,7 +1436,7 @@ end
 norm_log(norm::Vector{Int16}) = highbit(sum(x -> x == -1 ? 1 : Int(x), norm))
 
 """Start a frame that uses `dict`: repeat offsets and entropy tables come from it."""
-function apply_dict_entropy!(cc::CompressionContext, dict::ZstdDictionary)
+function apply_dict_entropy!(cc::CompressionContext, dict::ZstandardDictionary)
     cc.rep = dict.rep_offsets
     cc.prep1, cc.prep2 = dict.rep_offsets[1], dict.rep_offsets[2]
     has_entropy(dict) || return cc
@@ -2125,7 +2122,7 @@ Compress `data` as a single Zstandard frame.
 """
 function compress_frame!(cc::CompressionContext, data::AbstractVector{UInt8}, level::Integer;
                          checksum::Bool=false,
-                         dict::Union{Nothing,ZstdDictionary,PreparedDictionary}=nothing,
+                         dict::Union{Nothing,ZstandardDictionary,PreparedDictionary}=nothing,
                          long::Bool=false, params::ParameterOverrides=NO_OVERRIDES,
                          dest::Union{Nothing,Vector{UInt8}}=nothing, frame::FrameOptions=DEFAULT_FRAME)
     prepared = nothing
@@ -2305,7 +2302,7 @@ mutable struct StreamCompressor
     cc::CompressionContext
     level::Int
     checksum::Bool
-    dict::Union{Nothing,ZstdDictionary,PreparedDictionary}
+    dict::Union{Nothing,ZstandardDictionary,PreparedDictionary}
     buf::Vector{UInt8}   # [history | pending input]
     len::Int             # valid bytes in buf
     pend::Int            # first byte not yet compressed (1-based)
@@ -2337,7 +2334,7 @@ mutable struct StreamCompressor
 end
 
 function StreamCompressor(; level::Union{Nothing,Integer}=nothing, checksum::Bool=false,
-                          dict::Union{Nothing,ZstdDictionary,PreparedDictionary}=nothing,
+                          dict::Union{Nothing,ZstandardDictionary,PreparedDictionary}=nothing,
                           pledged_size::Union{Nothing,Integer}=nothing,
                           params::ParameterOverrides=NO_OVERRIDES, frame::FrameOptions=DEFAULT_FRAME,
                           size_hint::Union{Nothing,Integer}=nothing, long::Bool=false,

@@ -23,7 +23,7 @@ function _frame_chunks(src::Vector{UInt8}, nchunks::Int)
             length(bounds) >= 64 && pos - 1 < length(bounds) * PARALLEL_DECODE_MIN_FRAME && return nothing
         end
     catch e
-        e isa ZstdError || rethrow()
+        e isa ZstandardError || rethrow()
         return nothing
     end
     length(bounds) < 2 && return nothing
@@ -74,14 +74,16 @@ function _decompress_parallel(src::Vector{UInt8}, dict, chunks::Vector{UnitRange
 end
 
 """
-    decompress(data::AbstractVector{UInt8}, dict=nothing; nthreads=Threads.nthreads())
+    decompress(data::AbstractVector{UInt8}; dict=nothing, nthreads=Threads.nthreads())
+    decompress(data::AbstractVector{UInt8}, dict; kwargs...)
 
 Decompress Zstandard compressed data, which may contain several concatenated
-and/or skippable frames. Optionally, a `ZstdDictionary` can be provided, or
-several (a [`ZstdDictionarySet`](@ref) or a vector of `ZstdDictionary`) for
+and/or skippable frames. Optionally, a `ZstandardDictionary` can be provided, or
+several (a [`ZstandardDictionarySet`](@ref) or a vector of `ZstandardDictionary`) for
 data whose frames use different dictionaries, each chosen by the dictionary ID
-in the frame header.
-Throws a [`ZstdError`](@ref) if the data is malformed.
+in the frame header. The dictionary may be passed as the `dict` keyword (as
+for `compress`) or as the second argument, not both.
+Throws a [`ZstandardError`](@ref) if the data is malformed.
 
 When `data` holds several frames (at least $(PARALLEL_DECODE_MIN ÷ 1024) KiB in
 total), they are decoded in parallel on up to `nthreads` tasks; a single frame
@@ -92,11 +94,11 @@ With `magicless=true`, frames are read without magic numbers (as written by
 `prefix = bytes`, frames written with that reference prefix are decoded (see
 `compress`).
 """
-function decompress(data::AbstractVector{UInt8},
-                    dict::DictArg=nothing;
-                    nthreads::Integer=Threads.nthreads(), magicless::Bool=false,
+function decompress(data::AbstractVector{UInt8}, positional_dict::DictArg=nothing;
+                    dict::DictArg=nothing, nthreads::Integer=Threads.nthreads(), magicless::Bool=false,
                     prefix::Union{Nothing,AbstractVector{UInt8}}=nothing)
     nthreads < 1 && throw(ArgumentError("nthreads must be at least 1"))
+    dict = positional_or_keyword_dict(positional_dict, dict)
     dict = Encoder.prefix_dict(prefix, decode_dict(dict))
     magicless && return _with_state(st -> decompress_frames(data, st, dict; magicless))
     if nthreads > 1 && length(data) >= PARALLEL_DECODE_MIN

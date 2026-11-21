@@ -1,8 +1,8 @@
 using Zstandard
 using Zstandard: frame_header, frame_content_size, frame_compressed_size, decompressed_size,
     is_skippable_frame, skippable_frame, finalize_dictionary, prepare_dictionary,
-    ZstdDecompressionContext, decompress!, compress_seekable, seek_table, decompress_range,
-    estimate_compression_memory, compress_bound, decompress_bound, ZstdSequence, compress_sequences
+    ZstandardDecompressionContext, decompress!, compress_seekable, seek_table, decompress_range,
+    estimate_compression_memory, compress_bound, decompress_bound, ZstandardSequence, compress_sequences
 using Test
 
 # Regression tests for bugs found in review.
@@ -73,7 +73,7 @@ Base.read(f::FlakyIO, ::Type{UInt8}) = read(f.io, UInt8)
     s = Zstandard.ZstandardDecompressorStream(IOBuffer(bad))
     e1 = try read(s) catch e; e end
     e2 = try read(s) catch e; e end
-    @test e1 isa ZstdError
+    @test e1 isa ZstandardError
     @test e2 === e1                    # the original error, not an unrelated one
     # other exceptions (here from the wrapped io) are not sticky
     s = Zstandard.ZstandardDecompressorStream(FlakyIO(IOBuffer(compress(data)), true))
@@ -120,8 +120,8 @@ forged_fcs(fcs::UInt64) = vcat(reinterpret(UInt8, [0xFD2FB528]), UInt8[0xC0, 0x0
 @testset "decompressed_size does not wrap" begin
     big1 = forged_fcs(UInt64(2)^62)
     @test decompressed_size(big1) == 2^62
-    @test_throws ZstdError decompressed_size(vcat(big1, big1))
-    @test_throws ZstdError decompressed_size(vcat(big1, big1, big1, big1))
+    @test_throws ZstandardError decompressed_size(vcat(big1, big1))
+    @test_throws ZstandardError decompressed_size(vcat(big1, big1, big1, big1))
 end
 
 @testset "Frame inspection offsets" begin
@@ -213,7 +213,7 @@ end
 end
 
 @testset "Prepared dictionary levels" begin
-    dict = ZstdDictionary(Vector{UInt8}(repeat("dictionary content for prepared levels ", 200)))
+    dict = ZstandardDictionary(Vector{UInt8}(repeat("dictionary content for prepared levels ", 200)))
     x = Vector{UInt8}("some dictionary content for prepared levels to compress")
     @test prepare_dictionary(dict; level=99).level == Zstandard.Encoder.MAX_LEVEL
     pd = prepare_dictionary(dict; level=0)
@@ -223,7 +223,7 @@ end
 end
 
 @testset "Prepared dictionaries in streams without a pledged size" begin
-    dict = ZstdDictionary(repeat(lcg_bytes(1000, 10, UInt8.(0x41:0x50)), 100))
+    dict = ZstandardDictionary(repeat(lcg_bytes(1000, 10, UInt8.(0x41:0x50)), 100))
     pd = prepare_dictionary(dict; level=3)
     function streamed(d; kw...)
         io = IOBuffer()
@@ -273,7 +273,7 @@ end
 end
 
 @testset "compress_sequences rejects oversized lengths" begin
-    S = ZstdSequence
+    S = ZstandardSequence
     @test_throws ArgumentError compress_sequences(UInt8[1, 2, 3, 4, 5, 5, 5, 5, 5],
         [S(0, 5, 0), S(1, 0, 3), S(0, typemax(Int), 0), S(1, 0, 3), S(0, typemax(Int), 0)])
     d = lcg_bytes(1000, 6, 0x00:0xff)
@@ -286,7 +286,7 @@ end
 @testset "Seekable archives" begin
     # forged frame sizes in the seek table
     tab = Zstandard._seek_table([(0, 4294967295, 0) for _ in 1:4], false)
-    @test_throws ZstdError seek_table(tab)
+    @test_throws ZstandardError seek_table(tab)
     text = Vector{UInt8}(repeat("seekable archive keyword test ", 500))
     @test_throws ArgumentError compress_seekable(text; frame_size=1000, prefix=text[1:100])
     @test_throws ArgumentError compress_seekable(text; frame_size=1000, magicless=true)
@@ -304,10 +304,10 @@ end
 @testset "Small fixes" begin
     @test decompress(compress(UInt8[]; rsyncable=true)) == UInt8[]
     @test estimate_compression_memory(src_size=0, nthreads=4) == estimate_compression_memory(src_size=0)
-    ctx = ZstdDecompressionContext()
+    ctx = ZstandardDecompressionContext()
     c = compress(lcg_bytes(300_000, 7, UInt8.(0:15)); checksum=true); c[end] ⊻= 0xff
     out = UInt8[]
-    @test_throws ZstdError decompress!(ctx, out, c)
+    @test_throws ZstandardError decompress!(ctx, out, c)
     @test isempty(out)
 end
 
@@ -338,7 +338,7 @@ end
 
 @testset "Size bounds do not wrap" begin
     big1 = forged_fcs(UInt64(2)^62)
-    @test_throws ZstdError decompress_bound(vcat(big1, big1))
+    @test_throws ZstandardError decompress_bound(vcat(big1, big1))
     @test_throws ArgumentError compress_bound(typemax(Int))
     @test_throws ArgumentError compress_bound(-1)
     m = Zstandard.COMPRESS_BOUND_MAX_INPUT
@@ -351,6 +351,6 @@ end
         bh = (131072 << 3) | 2
         append!(f, UInt8[bh & 0xff, (bh >> 8) & 0xff, (bh >> 16) & 0xff, 0x41])
     end
-    @test_throws ZstdError decompress(f)
+    @test_throws ZstandardError decompress(f)
     @test (@allocated try decompress(f) catch end) < 1 << 27
 end

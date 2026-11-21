@@ -29,12 +29,12 @@ function _precompile_workload()
         read(ZstandardDecompressorStream(IOBuffer(take!(buf))))
     end
 
-    dict = ZstdDictionary(text[1:8192])
+    dict = ZstandardDictionary(text[1:8192])
     decompress(compress(text; dict), dict)
     decompress(compress(text[1:2000]; dict=prepare_dictionary(dict)), dict)
 
-    ctx = ZstdCompressionContext(level=3)
-    dctx = ZstdDecompressionContext()
+    ctx = ZstandardCompressionContext(level=3)
+    dctx = ZstandardDecompressionContext()
     out = UInt8[]; buf = UInt8[]
     decompress!(dctx, buf, compress!(ctx, out, data))
     decompress(dctx, compress(ctx, text))

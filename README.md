@@ -8,9 +8,9 @@ A pure Julia implementation of the [Zstandard](https://facebook.github.io/zstd/)
 
 - **Compression** at levels -7 to 22 with libzstd 1.5.7's strategies and parameter tables (fast, dfast, greedy/lazy/lazy2 with the row-based match finder, btlazy2, btopt, btultra, btultra2), block pre- and post-splitting, and repeat-offset aware parsing; ratios match or beat libzstd's at nearly every level (3-byte match finder for levels 18-22 included)
 - Huffman literals (direct or FSE-compressed weights, 1 or 4 streams, table reuse across blocks) and FSE sequence coding with predefined/RLE/compressed/repeat table selection
-- **Decompression** of all standard frames, including concatenated and skippable frames (decoded in parallel with `nthreads`), raw and formatted dictionaries (several at once with `ZstdDictionarySet`, chosen per frame by dictionary ID)
+- **Decompression** of all standard frames, including concatenated and skippable frames (decoded in parallel with `nthreads`), raw and formatted dictionaries (several at once with `ZstandardDictionarySet`, chosen per frame by dictionary ID)
 - Streaming compression and decompression (`ZstandardCompressorStream`, `ZstandardDecompressorStream`, implementing `IO`): pledged sizes, size hints, long-distance matching and multithreading on streams, mid-frame `flush`, a window limit for untrusted input, and progress counters (`stream_progress`)
-- Reusable contexts (`ZstdCompressionContext`, `ZstdDecompressionContext`) with `compress!` / `decompress!` into your own buffers
+- Reusable contexts (`ZstandardCompressionContext`, `ZstandardDecompressionContext`) with `compress!` / `decompress!` into your own buffers
 - Dictionaries: compression with raw or formatted dictionaries, prepared dictionaries for many small inputs, training (`train_dictionary`: fastCover or exact COVER, with parameter search on several threads)
 - Reference prefixes (`prefix=`, as `zstd --patch-from`), long-distance matching (`long=true`), multithreaded compression (`nthreads`), `rsyncable` output
 - libzstd's advanced parameters (`window_log`, `strategy`, ...), frame header options (`content_size`, `dict_id`, magicless frames) and a target compressed block size
@@ -19,7 +19,7 @@ A pure Julia implementation of the [Zstandard](https://facebook.github.io/zstd/)
 - Frame inspection (`frame_header`, `frame_content_size`, `frame_compressed_size`, `decompressed_size`, skippable frames), size bounds (`compress_bound`, `decompress_bound`) and memory estimates (`estimate_compression_memory`, `estimate_decompression_memory`)
 - Julia 1.10 (LTS) and later
 - [TranscodingStreams.jl](https://github.com/JuliaIO/TranscodingStreams.jl) codecs `ZstandardCompressor` / `ZstandardDecompressor` (package extension, loaded with `using TranscodingStreams`)
-- Malformed input is rejected with a `ZstdError`
+- Malformed input is rejected with a `ZstandardError`
 
 ## See Also
 
@@ -76,7 +76,7 @@ pdict = Zstandard.prepare_dictionary(dict; level=3)
 compressed = compress(message; dict=pdict)      # decompress with `dict` as usual
 
 # Frames using different dictionaries: each frame's dictionary ID picks one
-decompress(vcat(compress(a; dict=dict_a), compress(b; dict=dict_b)), ZstdDictionarySet(dict_a, dict_b))
+decompress(vcat(compress(a; dict=dict_a), compress(b; dict=dict_b)), ZstandardDictionarySet(dict_a, dict_b))
 
 # Train a dictionary from many small samples
 dict_bytes = train_dictionary(samples; dict_size=16384)
@@ -99,7 +99,7 @@ Zstandard.frame_compressed_size(compressed)     # size of the first frame
 meta = Zstandard.skippable_frame("user metadata")
 
 # Reusable contexts: many small inputs without per-call allocation
-ctx = Zstandard.ZstdCompressionContext(level=3); out = UInt8[]
+ctx = Zstandard.ZstandardCompressionContext(level=3); out = UInt8[]
 for msg in messages
     Zstandard.compress!(ctx, out, msg)          # `out` holds the frame
 end
@@ -125,17 +125,20 @@ stream = TranscodingStream(ZstandardDecompressor(), open("file.zst"))
 
 ## Checksum implementation
 
-Frame content checksums use this package's XXH64 by default. Another implementation can be plugged
-in by subtyping `Zstandard.AbstractXXH64` and defining four methods (see `Zstandard.XXHash`):
+Frame content checksums use this package's XXH64. The hook below for plugging in another
+implementation is **internal** and may change in any release: it is not part of the public API.
+It exists to compare implementations, and the findings are meant to flow into
+[XXHashNative.jl](https://github.com/Moelf/XXHashNative.jl). To use it, subtype
+`Zstandard.XXHash.AbstractXXH64` and define four methods:
 
 ```julia
-struct MyXXH64 <: Zstandard.AbstractXXH64 end
+struct MyXXH64 <: Zstandard.XXHash.AbstractXXH64 end
 Zstandard.XXHash.xxh64(::MyXXH64, p::Ptr{UInt8}, n::Int, seed::UInt64) = ...   # one-shot
 Zstandard.XXHash.xxh64_init(::MyXXH64, seed::UInt64) = ...                    # streaming state
 Zstandard.XXHash.xxh64_update!(::MyXXH64, state, p::Ptr{UInt8}, n::Int) = ...
 Zstandard.XXHash.xxh64_digest(::MyXXH64, state) = ...
 
-Zstandard.with_xxh64_implementation(MyXXH64()) do
+Zstandard.XXHash.with_xxh64_implementation(MyXXH64()) do
     compress(data; checksum=true)
 end
 ```

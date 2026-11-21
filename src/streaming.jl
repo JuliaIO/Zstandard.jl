@@ -2,15 +2,14 @@
 
 module Streaming
 
-import ..Decoder: DecoderState, ZstdDictionary, DecodeDict, DictArg, decode_dict, frame_dict, FrameInfo, read_frame_info, reset_frame!,
-                  decode_compressed_block!, memset!, zerr, ensure_capacity!, ZstdError,
+import ..Decoder: DecoderState, ZstandardDictionary, DecodeDict, DictArg, decode_dict, positional_or_keyword_dict, frame_dict, FrameInfo, read_frame_info, reset_frame!,
+                  decode_compressed_block!, memset!, zerr, ensure_capacity!, ZstandardError,
                   MAGIC_NUMBER, SKIPPABLE_MAGIC_START, SKIPPABLE_MASK, BLOCK_SIZE_MAX, WILDCOPY_SLACK
 import ..Encoder: StreamCompressor, stream_write!, stream_flush!, stream_finish!, PreparedDictionary, FrameOptions,
                   prefix_dict, prefix_params,
                   parameter_overrides
 using ..XXHash: ChecksumState, checksum_update!, checksum_digest
 
-export ZstandardDecompressorStream, ZstandardCompressorStream
 
 # ---------------------------------------------------------------------------
 # Push-based decoder core
@@ -38,7 +37,7 @@ Internal: use `ZstandardDecompressorStream` instead.
 """
 mutable struct StreamDecoder
     dict::DecodeDict                    # dictionary, or set to choose from per frame
-    frame_dict::Union{Nothing,ZstdDictionary}   # the current frame's dictionary
+    frame_dict::Union{Nothing,ZstandardDictionary}   # the current frame's dictionary
     st::DecoderState
     unit::Vector{UInt8}
     have::Int            # bytes of the current unit received
@@ -323,35 +322,39 @@ end
 # ---------------------------------------------------------------------------
 
 """
-    ZstandardDecompressorStream(io::IO, dict=nothing; max_window_size=128 MiB)
+    ZstandardDecompressorStream(io::IO; dict=nothing, max_window_size=128 MiB)
+    ZstandardDecompressorStream(io::IO, dict; kwargs...)
 
 A streaming Zstandard decompressor that implements the `IO` interface.
 Decoded data is produced one block at a time; memory use is bounded by the
 frame's window size plus one block. Frames declaring a window larger than
 `max_window_size` (default 128 MiB, as libzstd) are rejected with a
-`ZstdError`, so untrusted input cannot make the decoder allocate more; raise
+`ZstandardError`, so untrusted input cannot make the decoder allocate more; raise
 it to read frames written with a larger window (e.g. `zstd --long=30`).
 With `magicless=true`, frames are read without their magic number, and
 `prefix` decodes frames written with that reference prefix (see
 [`compress`](@ref Zstandard.compress)).
-`dict` may be a `ZstdDictionary` or several (a `ZstdDictionarySet` or a
-vector of `ZstdDictionary`), chosen per frame by the frame's dictionary ID.
+`dict` may be a `ZstandardDictionary` or several (a `ZstandardDictionarySet` or a
+vector of `ZstandardDictionary`), chosen per frame by the frame's dictionary ID.
+It may be passed as the `dict` keyword or as the second argument, not both.
 
-After a decoding error (a `ZstdError`), the stream is unusable: later reads
+After a decoding error (a `ZstandardError`), the stream is unusable: later reads
 rethrow the same error (bytes decoded before it can still be read). Other
 exceptions, such as an interrupt or an error from `io`, are not sticky.
 """
 mutable struct ZstandardDecompressorStream <: IO
     io::IO
     d::StreamDecoder
-    err::Union{Nothing,ZstdError}   # sticky decoding error
+    err::Union{Nothing,ZstandardError}   # sticky decoding error
 end
 
-ZstandardDecompressorStream(io::IO, dict::DictArg=nothing;
-                       max_window_size::Integer=DEFAULT_MAX_WINDOW_SIZE, magicless::Bool=false,
-                       prefix::Union{Nothing,AbstractVector{UInt8}}=nothing) =
-    ZstandardDecompressorStream(io, StreamDecoder(prefix_dict(prefix, decode_dict(dict)); max_window_size, magicless),
-                           nothing)
+function ZstandardDecompressorStream(io::IO, positional_dict::DictArg=nothing; dict::DictArg=nothing,
+                                     max_window_size::Integer=DEFAULT_MAX_WINDOW_SIZE, magicless::Bool=false,
+                                     prefix::Union{Nothing,AbstractVector{UInt8}}=nothing)
+    dict = positional_or_keyword_dict(positional_dict, dict)
+    d = StreamDecoder(prefix_dict(prefix, decode_dict(dict)); max_window_size, magicless)
+    return ZstandardDecompressorStream(io, d, nothing)
+end
 
 # Decode until at least one unread byte is available. Returns false at end of input.
 function fill_buffer!(s::ZstandardDecompressorStream)
@@ -360,7 +363,7 @@ function fill_buffer!(s::ZstandardDecompressorStream)
         return fill_buffer_unchecked!(s)
     catch e
         # after a decoding error the position in the input is lost: stay failed
-        e isa ZstdError && (s.err = e)
+        e isa ZstandardError && (s.err = e)
         rethrow()
     end
 end
@@ -501,7 +504,7 @@ mutable struct ZstandardCompressorStream <: IO
 end
 
 function ZstandardCompressorStream(io::IO; level::Union{Nothing,Integer}=nothing, checksum::Bool=false,
-                              dict::Union{Nothing,ZstdDictionary,PreparedDictionary}=nothing,
+                              dict::Union{Nothing,ZstandardDictionary,PreparedDictionary}=nothing,
                               pledged_size::Union{Nothing,Integer}=nothing, close_io::Bool=true,
                               size_hint::Union{Nothing,Integer}=nothing,
                               content_size::Bool=true, dict_id::Bool=true, magicless::Bool=false,
