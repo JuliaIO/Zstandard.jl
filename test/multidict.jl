@@ -1,4 +1,6 @@
 using Zstandard
+using Zstandard: frame_dict_id, skippable_frame, finalize_dictionary, ZstdDecompressionContext,
+    decompress!, compress_seekable, decompress_range
 using Test
 using TranscodingStreams
 using Zstd_jll
@@ -121,17 +123,17 @@ const WORDS_B = ["<div class=\"", "\">", "</div>", "<span>", "</span>", "href=",
     end
 
     @testset "stream" begin
-        @test read(Zstandard.ZstdDecompressorStream(IOBuffer(data), set)) == expected
-        @test read(Zstandard.ZstdDecompressorStream(IOBuffer(data), [da, db, raw])) == expected
-        @test read(Zstandard.ZstdDecompressorStream(IOBuffer(data), Any[da, db, raw])) == expected
-        s = Zstandard.ZstdDecompressorStream(IOBuffer(data), set)
+        @test read(Zstandard.ZstandardDecompressorStream(IOBuffer(data), set)) == expected
+        @test read(Zstandard.ZstandardDecompressorStream(IOBuffer(data), [da, db, raw])) == expected
+        @test read(Zstandard.ZstandardDecompressorStream(IOBuffer(data), Any[da, db, raw])) == expected
+        s = Zstandard.ZstandardDecompressorStream(IOBuffer(data), set)
         got = UInt8[]
         while !eof(s)
             append!(got, read(s, 3001))
         end
         @test got == expected
         # a frame needing a dictionary outside the set: the earlier frames are readable
-        s = Zstandard.ZstdDecompressorStream(IOBuffer(vcat(frames[1], frames[2])), ZstdDictionarySet(da))
+        s = Zstandard.ZstandardDecompressorStream(IOBuffer(vcat(frames[1], frames[2])), ZstdDictionarySet(da))
         @test read(s, length(texts[1])) == texts[1]
         @test_throws ZstdError read(s)
     end
@@ -158,7 +160,7 @@ const WORDS_B = ["<div class=\"", "\">", "</div>", "<span>", "</span>", "href=",
         f = vcat(compress(texts[1]; dict=da, dict_id=false), frames[2])
         @test frame_dict_id(f) == 0
         @test decompress(f, ZstdDictionarySet(db; default=da)) == vcat(texts[1], texts[2])
-        @test read(Zstandard.ZstdDecompressorStream(IOBuffer(f), ZstdDictionarySet(db; default=da))) ==
+        @test read(Zstandard.ZstandardDecompressorStream(IOBuffer(f), ZstdDictionarySet(db; default=da))) ==
               vcat(texts[1], texts[2])
     end
 
@@ -170,7 +172,7 @@ const WORDS_B = ["<div class=\"", "\">", "</div>", "<span>", "</span>", "href=",
         end
         @test e isa ZstdError && occursin(string(db.id), sprint(showerror, e))
         @test_throws ZstdError decompress(data, ZstdDictionarySet(); nthreads=4)
-        @test_throws ZstdError read(Zstandard.ZstdDecompressorStream(IOBuffer(data), ZstdDictionarySet(db)))
+        @test_throws ZstdError read(Zstandard.ZstandardDecompressorStream(IOBuffer(data), ZstdDictionarySet(db)))
         @test_throws ZstdError transcode(ZstandardDecompressor(; dict=ZstdDictionarySet(da)), data)
         @test_throws ArgumentError decompress(data, set; prefix=UInt8[1, 2, 3])
         @test_throws ArgumentError ZstdDecompressionContext(; dict=set, prefix=UInt8[1, 2, 3])
@@ -191,6 +193,6 @@ const WORDS_B = ["<div class=\"", "\">", "</div>", "<span>", "</span>", "href=",
         lib = reduce(vcat, parts)
         want = reduce(vcat, texts[1:2:8])
         @test decompress(lib, set) == want
-        @test read(Zstandard.ZstdDecompressorStream(IOBuffer(lib), set)) == want
+        @test read(Zstandard.ZstandardDecompressorStream(IOBuffer(lib), set)) == want
     end
 end

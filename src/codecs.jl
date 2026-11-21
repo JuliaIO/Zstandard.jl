@@ -9,12 +9,12 @@ compressing to the Zstandard format, for use with `transcode`,
 `TranscodingStream`, etc. Available once `TranscodingStreams` is loaded.
 Accepts the parameter and frame keywords of [`compress`](@ref) (`window_log`,
 ..., `content_size`, `dict_id`, `magicless`), and `size_hint` (see
-`ZstdCompressorStream`) for streams whose size is not pledged, and `long` and
-`nthreads` as for `ZstdCompressorStream`.
+`ZstandardCompressorStream`) for streams whose size is not pledged, and `long` and
+`nthreads` as for `ZstandardCompressorStream`.
 
 TranscodingStreams does not pass `flush` on to codecs, so flushing a
 `TranscodingStream` does not make the data written so far decodable; write
-`TranscodingStreams.TOKEN_END` to end the frame, or use `ZstdCompressorStream`,
+`TranscodingStreams.TOKEN_END` to end the frame, or use `ZstandardCompressorStream`,
 whose `flush` emits a block that decoders can read before the frame ends.
 
 ```julia
@@ -31,7 +31,7 @@ function ZstandardCompressor end
 A [TranscodingStreams.jl](https://github.com/JuliaIO/TranscodingStreams.jl) codec
 decoding Zstandard data (concatenated and skippable frames included). Frames
 with a window larger than `max_window_size` are rejected (see
-`ZstdDecompressorStream`). With `magicless=true`, frames have no magic
+`ZstandardDecompressorStream`). With `magicless=true`, frames have no magic
 numbers (see `compress`). `dict` may be a `ZstdDictionary` or several (a
 `ZstdDictionarySet` or a vector), chosen per frame by dictionary ID.
 Available once `TranscodingStreams` is loaded.

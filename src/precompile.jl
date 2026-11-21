@@ -23,10 +23,10 @@ function _precompile_workload()
 
     for pledged in (nothing, length(data))
         buf = IOBuffer()
-        s = ZstdCompressorStream(buf; checksum=true, pledged_size=pledged, close_io=false)
+        s = ZstandardCompressorStream(buf; checksum=true, pledged_size=pledged, close_io=false)
         write(s, data)
         close(s)
-        read(ZstdDecompressorStream(IOBuffer(take!(buf))))
+        read(ZstandardDecompressorStream(IOBuffer(take!(buf))))
     end
 
     dict = ZstdDictionary(text[1:8192])

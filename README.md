@@ -7,7 +7,7 @@ A pure Julia implementation of the [Zstandard](https://facebook.github.io/zstd/)
 - **Compression** at levels -7 to 22 with libzstd 1.5.7's strategies and parameter tables (fast, dfast, greedy/lazy/lazy2 with the row-based match finder, btlazy2, btopt, btultra, btultra2), block pre- and post-splitting, and repeat-offset aware parsing; ratios match or beat libzstd's at nearly every level (3-byte match finder for levels 18-22 included)
 - Huffman literals (direct or FSE-compressed weights, 1 or 4 streams, table reuse across blocks) and FSE sequence coding with predefined/RLE/compressed/repeat table selection
 - **Decompression** of all standard frames, including concatenated and skippable frames (decoded in parallel with `nthreads`), raw and formatted dictionaries (several at once with `ZstdDictionarySet`, chosen per frame by dictionary ID)
-- Streaming compression and decompression (`ZstdCompressorStream`, `ZstdDecompressorStream`, implementing `IO`): pledged sizes, size hints, long-distance matching and multithreading on streams, mid-frame `flush`, a window limit for untrusted input, and progress counters (`stream_progress`)
+- Streaming compression and decompression (`ZstandardCompressorStream`, `ZstandardDecompressorStream`, implementing `IO`): pledged sizes, size hints, long-distance matching and multithreading on streams, mid-frame `flush`, a window limit for untrusted input, and progress counters (`stream_progress`)
 - Reusable contexts (`ZstdCompressionContext`, `ZstdDecompressionContext`) with `compress!` / `decompress!` into your own buffers
 - Dictionaries: compression with raw or formatted dictionaries, prepared dictionaries for many small inputs, training (`train_dictionary`: fastCover or exact COVER, with parameter search on several threads)
 - Reference prefixes (`prefix=`, as `zstd --patch-from`), long-distance matching (`long=true`), multithreaded compression (`nthreads`), `rsyncable` output
@@ -42,7 +42,7 @@ Pkg.add(url="https://github.com/JuliaIO/Zstandard.jl")
 ## Usage
 
 ```julia
-using Zstandard
+using Zstandard     # exports the core API; the rest is public, as `Zstandard.name`
 
 # Compress / decompress in memory
 compressed = compress("Hello, world!")
@@ -51,18 +51,18 @@ data = decompress(compressed)
 
 # Streaming decompression
 open("file.zst") do io
-    stream = ZstdDecompressorStream(io)
+    stream = ZstandardDecompressorStream(io)
     decompressed = read(stream)
 end
 
 # Streaming compression (close finishes the frame and closes the file)
-stream = ZstdCompressorStream(open("out.zst", "w"); level=5)
+stream = ZstandardCompressorStream(open("out.zst", "w"); level=5)
 write(stream, data)
 close(stream)
 
 # If the total size is known in advance, pledge it: the frame header then records
 # the content size and the compression parameters are sized to it
-stream = ZstdCompressorStream(open("out.zst", "w"); pledged_size=length(data))
+stream = ZstandardCompressorStream(open("out.zst", "w"); pledged_size=length(data))
 
 # Dictionaries
 dict = parse_dictionary(read("my.dict"))      # formatted (zstd --train) or raw content
@@ -70,7 +70,7 @@ compressed = compress(data; dict)
 decompress(compressed, dict)
 
 # Many small messages with one dictionary: prepare it once (much faster per message)
-pdict = prepare_dictionary(dict; level=3)
+pdict = Zstandard.prepare_dictionary(dict; level=3)
 compressed = compress(message; dict=pdict)      # decompress with `dict` as usual
 
 # Frames using different dictionaries: each frame's dictionary ID picks one
@@ -86,20 +86,20 @@ compressed = compress(data; level=19, window_log=24, strategy=:btultra)
 # Long-distance matching and multithreading (start Julia with `-t N`), also on streams
 compressed = compress(big_data; level=9, long=true)
 compressed = compress(big_data; level=3, nthreads=Threads.nthreads())
-stream = ZstdCompressorStream(open("big.zst", "w"); level=3, nthreads=Threads.nthreads())
+stream = ZstandardCompressorStream(open("big.zst", "w"); level=3, nthreads=Threads.nthreads())
 
-# Preallocate output for `compress!` with the worst-case size
-out = Vector{UInt8}(undef, compress_bound(length(data)))
+# Preallocate output for `Zstandard.compress!` with the worst-case size
+out = Vector{UInt8}(undef, Zstandard.compress_bound(length(data)))
 
 # Frame inspection
-frame_content_size(compressed)        # decompressed size from the header (or nothing)
-frame_compressed_size(compressed)     # size of the first frame
-meta = skippable_frame("user metadata")
+Zstandard.frame_content_size(compressed)        # decompressed size from the header (or nothing)
+Zstandard.frame_compressed_size(compressed)     # size of the first frame
+meta = Zstandard.skippable_frame("user metadata")
 
 # Reusable contexts: many small inputs without per-call allocation
-ctx = ZstdCompressionContext(level=3); out = UInt8[]
+ctx = Zstandard.ZstdCompressionContext(level=3); out = UInt8[]
 for msg in messages
-    compress!(ctx, out, msg)          # `out` holds the frame
+    Zstandard.compress!(ctx, out, msg)          # `out` holds the frame
 end
 
 # Patches against an earlier version (as zstd --patch-from)
@@ -107,13 +107,13 @@ patch = compress(new_version; prefix=old_version, level=19)
 decompress(patch; prefix=old_version)
 
 # Seekable archives: decode any range without decoding everything before it
-archive = compress_seekable(data; frame_size=1 << 20)
-decompress_range(archive, 5_000_001:5_100_000)
-open(io -> decompress_range(io, 1:1000), "archive.zst")     # reads only the frames needed
+archive = Zstandard.compress_seekable(data; frame_size=1 << 20)
+Zstandard.decompress_range(archive, 5_000_001:5_100_000)
+open(io -> Zstandard.decompress_range(io, 1:1000), "archive.zst")     # reads only the frames needed
 
 # Sequences: inspect what the compressor finds, or encode matches found elsewhere
-seqs = generate_sequences(data; level=9)
-frame = compress_sequences(data, seqs)
+seqs = Zstandard.generate_sequences(data; level=9)
+frame = Zstandard.compress_sequences(data, seqs)
 
 # TranscodingStreams codecs
 using TranscodingStreams

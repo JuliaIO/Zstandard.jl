@@ -69,7 +69,7 @@ using Aqua
         expected = read(joinpath(fixtures_dir, "mixed.txt"))
         
         open(compressed_path, "r") do io
-            stream = ZstdDecompressorStream(io)
+            stream = ZstandardDecompressorStream(io)
             decompressed = read(stream)
             @test decompressed == expected
         end

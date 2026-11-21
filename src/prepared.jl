@@ -41,7 +41,7 @@ Base.show(io::IO, pd::PreparedDictionary) =
     prepare_dictionary(dict::ZstdDictionary; level=3, params...) -> PreparedDictionary
 
 Digest `dict` for compression at `level`. Pass the result as `dict` to
-`compress`, `ZstdCompressorStream` or `ZstandardCompressor`; it compresses
+`compress`, `ZstandardCompressorStream` or `ZstandardCompressor`; it compresses
 small inputs much faster than the plain dictionary (the output is still
 decoded with the plain `ZstdDictionary`). The level is fixed: compressing with
 a different `level` throws an `ArgumentError`. Explicit compression parameters

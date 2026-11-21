@@ -1,4 +1,8 @@
 using Zstandard
+using Zstandard: frame_header, frame_content_size, frame_compressed_size, decompressed_size,
+    is_skippable_frame, skippable_frame, finalize_dictionary, prepare_dictionary,
+    ZstdDecompressionContext, decompress!, compress_seekable, seek_table, decompress_range,
+    estimate_compression_memory, compress_bound, decompress_bound, ZstdSequence, compress_sequences
 using Test
 
 # Regression tests for bugs found in review.
@@ -12,15 +16,15 @@ lcg_bytes(n, seed, alphabet) = (x = UInt64(seed);
     x = lcg_bytes(3_000_000, 1, UInt8.(collect("abcdefgh \n")))
     for checksum in (false, true)
         c = compress(x; level=1, checksum)
-        @test read(Zstandard.ZstdDecompressorStream(IOBuffer(c))) == x
+        @test read(Zstandard.ZstandardDecompressorStream(IOBuffer(c))) == x
     end
 end
 
 @testset "read(stream, nb) does not allocate nb bytes" begin
     small = compress(lcg_bytes(100, 2, 0x00:0xff))
-    @test length(read(Zstandard.ZstdDecompressorStream(IOBuffer(small)), typemax(Int))) == 100
-    @test read(Zstandard.ZstdDecompressorStream(IOBuffer(small)), 10) == decompress(small)[1:10]
-    @test_throws ArgumentError read(Zstandard.ZstdDecompressorStream(IOBuffer(small)), -1)
+    @test length(read(Zstandard.ZstandardDecompressorStream(IOBuffer(small)), typemax(Int))) == 100
+    @test read(Zstandard.ZstandardDecompressorStream(IOBuffer(small)), 10) == decompress(small)[1:10]
+    @test_throws ArgumentError read(Zstandard.ZstandardDecompressorStream(IOBuffer(small)), -1)
 end
 
 @testset "Forged sizes do not drive large allocations" begin
@@ -66,13 +70,13 @@ Base.read(f::FlakyIO, ::Type{UInt8}) = read(f.io, UInt8)
 @testset "Streaming decoder errors are sticky" begin
     data = lcg_bytes(1000, 8, 0x00:0x0f)
     bad = compress(data; checksum=true); bad[end] ⊻= 0x01
-    s = Zstandard.ZstdDecompressorStream(IOBuffer(bad))
+    s = Zstandard.ZstandardDecompressorStream(IOBuffer(bad))
     e1 = try read(s) catch e; e end
     e2 = try read(s) catch e; e end
     @test e1 isa ZstdError
     @test e2 === e1                    # the original error, not an unrelated one
     # other exceptions (here from the wrapped io) are not sticky
-    s = Zstandard.ZstdDecompressorStream(FlakyIO(IOBuffer(compress(data)), true))
+    s = Zstandard.ZstandardDecompressorStream(FlakyIO(IOBuffer(compress(data)), true))
     @test_throws InterruptException read(s)
     @test read(s) == data
 end
@@ -186,7 +190,7 @@ end
 
 @testset "close after a pledge mismatch" begin
     io = IOBuffer()
-    s = Zstandard.ZstdCompressorStream(io; pledged_size=2000)
+    s = Zstandard.ZstandardCompressorStream(io; pledged_size=2000)
     write(s, lcg_bytes(1000, 4, 0x00:0xff))
     @test_throws ArgumentError close(s)
     @test !isopen(s)
@@ -223,7 +227,7 @@ end
     pd = prepare_dictionary(dict; level=3)
     function streamed(d; kw...)
         io = IOBuffer()
-        s = Zstandard.ZstdCompressorStream(io; close_io=false, dict=pd, kw...)
+        s = Zstandard.ZstandardCompressorStream(io; close_io=false, dict=pd, kw...)
         for p in Iterators.partition(d, 50_000); write(s, p); end
         close(s); take!(io)
     end
@@ -237,7 +241,7 @@ end
     @test decompress(streamed(small), dict) == small
     @test length(streamed(small)) <= length(streamed(small; pledged_size=300)) + 2
     # flushing before the end still works
-    io = IOBuffer(); s = Zstandard.ZstdCompressorStream(io; close_io=false, dict=pd)
+    io = IOBuffer(); s = Zstandard.ZstandardCompressorStream(io; close_io=false, dict=pd)
     write(s, small); flush(s); write(s, small); close(s)
     @test decompress(take!(io), dict) == vcat(small, small)
 end
@@ -259,7 +263,7 @@ end
     for (seed, n) in ((2, 400_000), (1, 131_072)), level in (5, 16, 19)
         data = skew(seed, n)
         io = IOBuffer()
-        s = Zstandard.ZstdCompressorStream(io; level, target_block_size=1340, close_io=false, checksum=true)
+        s = Zstandard.ZstandardCompressorStream(io; level, target_block_size=1340, close_io=false, checksum=true)
         write(s, data); close(s)
         c = take!(io)
         @test decompress(c) == data
@@ -312,7 +316,7 @@ end
     n = 11_889_238
     data = repeat(lcg_bytes(100_000, 5, 0x00:0xff), cld(n, 100_000))[1:n]
     io = IOBuffer()
-    s = Zstandard.ZstdCompressorStream(io; close_io=false, level=1, window_log=17, nthreads=2, pledged_size=n)
+    s = Zstandard.ZstandardCompressorStream(io; close_io=false, level=1, window_log=17, nthreads=2, pledged_size=n)
     write(s, data); close(s)
     a = take!(io)
     @test a == compress(data; level=1, window_log=17, nthreads=2)
@@ -320,7 +324,7 @@ end
 
     # a failed job is not dropped: the stream stays failed
     io = IOBuffer()
-    s = Zstandard.ZstdCompressorStream(io; close_io=false, nthreads=2)
+    s = Zstandard.ZstandardCompressorStream(io; close_io=false, nthreads=2)
     write(s, lcg_bytes(3_000_000, 6, 0x00:0xff))
     t = Threads.@spawn error("boom")                         # stand-in for a failing worker
     try wait(t) catch end                                    # done, so the next write collects it

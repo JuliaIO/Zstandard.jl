@@ -203,7 +203,7 @@ end
     @testset "Byte-by-byte read" begin
         data = Vector{UInt8}("streaming byte by byte test")
         comp = compress(data)
-        stream = Zstandard.ZstdDecompressorStream(IOBuffer(comp))
+        stream = Zstandard.ZstandardDecompressorStream(IOBuffer(comp))
         result = UInt8[]
         while !eof(stream)
             push!(result, read(stream, UInt8))
@@ -214,7 +214,7 @@ end
     @testset "Chunked readbytes!" begin
         data = repeat(b"chunked reads ", 500)
         comp = compress(data)
-        stream = Zstandard.ZstdDecompressorStream(IOBuffer(comp))
+        stream = Zstandard.ZstandardDecompressorStream(IOBuffer(comp))
         result = UInt8[]
         buf = Vector{UInt8}(undef, 100)
         while !eof(stream)
@@ -227,7 +227,7 @@ end
     @testset "read(stream, n)" begin
         data = rand(UInt8, 1000)
         comp = compress(data)
-        stream = Zstandard.ZstdDecompressorStream(IOBuffer(comp))
+        stream = Zstandard.ZstandardDecompressorStream(IOBuffer(comp))
         part1 = read(stream, 500)
         part2 = read(stream, 500)
         @test vcat(part1, part2) == data
@@ -236,7 +236,7 @@ end
     @testset "Multi-block streaming" begin
         data = repeat(b"streaming multi-block ", 10000)  # > 128KB
         comp = compress(data)
-        stream = Zstandard.ZstdDecompressorStream(IOBuffer(comp))
+        stream = Zstandard.ZstandardDecompressorStream(IOBuffer(comp))
         result = read(stream)
         @test result == data
     end
@@ -245,7 +245,7 @@ end
         data1 = b"frame one"
         data2 = b"frame two"
         comp = vcat(compress(data1), compress(data2))
-        stream = Zstandard.ZstdDecompressorStream(IOBuffer(comp))
+        stream = Zstandard.ZstandardDecompressorStream(IOBuffer(comp))
         result = read(stream)
         @test result == vcat(data1, data2)
     end
@@ -423,7 +423,7 @@ end
         append!(data, codeunits(string("record ", x >> 20, " value ", (x >> 8) & 0xff, "\n")))
     end
     comp = transcode(ZstdCompressor(level=1), data)
-    stream = Zstandard.ZstdDecompressorStream(IOBuffer(comp))
+    stream = Zstandard.ZstandardDecompressorStream(IOBuffer(comp))
     out = UInt8[]
     buf = Vector{UInt8}(undef, 997)
     while !eof(stream)
@@ -455,7 +455,7 @@ end
                 c[nexti(length(c))] ⊻= UInt8(1) << (nexti(8) - 1)
             end
         end
-        for f in (decompress, c -> read(Zstandard.ZstdDecompressorStream(IOBuffer(c))))
+        for f in (decompress, c -> read(Zstandard.ZstandardDecompressorStream(IOBuffer(c))))
             try
                 f(c)
             catch e

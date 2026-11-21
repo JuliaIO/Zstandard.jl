@@ -181,14 +181,14 @@ xxh64_digest(::ZeroXXH64, st) = UInt64(0)
             @test compress(data; checksum=true) == ref_frame
             @test compress(big; checksum=true, nthreads=2, level=1) == ref_mt
             buf = IOBuffer()
-            s = Zstandard.ZstdCompressorStream(buf; checksum=true, close_io=false)
+            s = Zstandard.ZstandardCompressorStream(buf; checksum=true, close_io=false)
             write(s, data); close(s)
             sc = take!(buf)
             @test transcode(CodecZstd.ZstdDecompressor, sc) == data
             # decompression verifies with the selected implementation
             @test decompress(ref_frame) == data
             @test decompress(multi; nthreads=4) == vcat(data, data[1:200_000], data)
-            @test read(Zstandard.ZstdDecompressorStream(IOBuffer(sc))) == data
+            @test read(Zstandard.ZstandardDecompressorStream(IOBuffer(sc))) == data
             @test transcode(ZstandardDecompressor(), ref_frame) == data
         end
     end
@@ -198,7 +198,7 @@ xxh64_digest(::ZeroXXH64, st) = UInt64(0)
     Zstandard.with_xxh64_implementation(ZeroXXH64()) do
         @test_throws ZstdError decompress(ref_frame)
         @test_throws ZstdError decompress(multi; nthreads=4)
-        @test_throws ZstdError read(Zstandard.ZstdDecompressorStream(IOBuffer(ref_frame)))
+        @test_throws ZstdError read(Zstandard.ZstandardDecompressorStream(IOBuffer(ref_frame)))
         bad = compress(data; checksum=true)
         @test bad[end-3:end] == zeros(UInt8, 4)
         @test decompress(compress(data)) == data          # no checksum: unaffected

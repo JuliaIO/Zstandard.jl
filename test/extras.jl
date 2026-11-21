@@ -1,4 +1,6 @@
 using Zstandard
+using Zstandard: frame_header, frame_content_size, frame_compressed_size, decompressed_size,
+    is_skippable_frame, skippable_frame, read_skippable_frame, finalize_dictionary
 using Test
 using CodecZstd
 
@@ -161,7 +163,7 @@ end
         c1 = compress(data; level, long=true)
         @test decompress(c1) == data
         @test transcode(CodecZstd.ZstdDecompressor, c1) == data
-        @test read(Zstandard.ZstdDecompressorStream(IOBuffer(c1))) == data
+        @test read(Zstandard.ZstandardDecompressorStream(IOBuffer(c1))) == data
         window = 1 << Zstandard.Encoder.compression_parameters(level, length(data)).window_log
         if window < length(a) + length(filler)
             # the second copy of `a` lies beyond the regular window: only LDM finds it

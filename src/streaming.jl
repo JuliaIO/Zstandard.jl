@@ -10,7 +10,7 @@ import ..Encoder: StreamCompressor, stream_write!, stream_flush!, stream_finish!
                   parameter_overrides
 using ..XXHash: ChecksumState, checksum_update!, checksum_digest
 
-export ZstdDecompressorStream, ZstdCompressorStream, StreamDecoder
+export ZstandardDecompressorStream, ZstandardCompressorStream, StreamDecoder
 
 # ---------------------------------------------------------------------------
 # Push-based decoder core
@@ -318,11 +318,11 @@ function feed_from!(d::StreamDecoder, io::IO)
 end
 
 # ---------------------------------------------------------------------------
-# ZstdDecompressorStream
+# ZstandardDecompressorStream
 # ---------------------------------------------------------------------------
 
 """
-    ZstdDecompressorStream(io::IO, dict=nothing; max_window_size=128 MiB)
+    ZstandardDecompressorStream(io::IO, dict=nothing; max_window_size=128 MiB)
 
 A streaming Zstandard decompressor that implements the `IO` interface.
 Decoded data is produced one block at a time; memory use is bounded by the
@@ -340,20 +340,20 @@ After a decoding error (a `ZstdError`), the stream is unusable: later reads
 rethrow the same error (bytes decoded before it can still be read). Other
 exceptions, such as an interrupt or an error from `io`, are not sticky.
 """
-mutable struct ZstdDecompressorStream <: IO
+mutable struct ZstandardDecompressorStream <: IO
     io::IO
     d::StreamDecoder
     err::Union{Nothing,ZstdError}   # sticky decoding error
 end
 
-ZstdDecompressorStream(io::IO, dict::DictArg=nothing;
+ZstandardDecompressorStream(io::IO, dict::DictArg=nothing;
                        max_window_size::Integer=DEFAULT_MAX_WINDOW_SIZE, magicless::Bool=false,
                        prefix::Union{Nothing,AbstractVector{UInt8}}=nothing) =
-    ZstdDecompressorStream(io, StreamDecoder(prefix_dict(prefix, decode_dict(dict)); max_window_size, magicless),
+    ZstandardDecompressorStream(io, StreamDecoder(prefix_dict(prefix, decode_dict(dict)); max_window_size, magicless),
                            nothing)
 
 # Decode until at least one unread byte is available. Returns false at end of input.
-function fill_buffer!(s::ZstdDecompressorStream)
+function fill_buffer!(s::ZstandardDecompressorStream)
     s.err === nothing || throw(s.err)
     try
         return fill_buffer_unchecked!(s)
@@ -364,7 +364,7 @@ function fill_buffer!(s::ZstdDecompressorStream)
     end
 end
 
-function fill_buffer_unchecked!(s::ZstdDecompressorStream)
+function fill_buffer_unchecked!(s::ZstandardDecompressorStream)
     d = s.d
     while available(d) <= 0
         if eof(s.io)
@@ -379,8 +379,8 @@ function fill_buffer_unchecked!(s::ZstdDecompressorStream)
 end
 
 """
-    stream_progress(s::ZstdDecompressorStream) -> (; consumed, produced, frames)
-    stream_progress(s::ZstdCompressorStream) -> (; ingested, consumed, produced, flushed)
+    stream_progress(s::ZstandardDecompressorStream) -> (; consumed, produced, frames)
+    stream_progress(s::ZstandardCompressorStream) -> (; ingested, consumed, produced, flushed)
 
 Progress of a streaming (de)compressor, as libzstd's `ZSTD_getFrameProgression`.
 For a decompressor: compressed bytes read from the source, bytes decoded so far
@@ -388,15 +388,15 @@ For a decompressor: compressed bytes read from the source, bytes decoded so far
 to the stream, bytes of those compressed so far, compressed bytes produced and
 compressed bytes written to the underlying IO.
 """
-stream_progress(s::ZstdDecompressorStream) =
+stream_progress(s::ZstandardDecompressorStream) =
     (; consumed=s.d.consumed, produced=s.d.produced, frames=s.d.frames_done)
 
-Base.bytesavailable(s::ZstdDecompressorStream) = available(s.d)
-Base.eof(s::ZstdDecompressorStream) = available(s.d) <= 0 && !fill_buffer!(s)
-Base.isopen(s::ZstdDecompressorStream) = isopen(s.io)
-Base.close(s::ZstdDecompressorStream) = close(s.io)
+Base.bytesavailable(s::ZstandardDecompressorStream) = available(s.d)
+Base.eof(s::ZstandardDecompressorStream) = available(s.d) <= 0 && !fill_buffer!(s)
+Base.isopen(s::ZstandardDecompressorStream) = isopen(s.io)
+Base.close(s::ZstandardDecompressorStream) = close(s.io)
 
-function Base.read(s::ZstdDecompressorStream, ::Type{UInt8})
+function Base.read(s::ZstandardDecompressorStream, ::Type{UInt8})
     eof(s) && throw(EOFError())
     d = s.d
     v = @inbounds d.out[d.rpos]
@@ -404,7 +404,7 @@ function Base.read(s::ZstdDecompressorStream, ::Type{UInt8})
     return v
 end
 
-function Base.unsafe_read(s::ZstdDecompressorStream, p::Ptr{UInt8}, n::UInt)
+function Base.unsafe_read(s::ZstandardDecompressorStream, p::Ptr{UInt8}, n::UInt)
     n = Int(n)
     d = s.d
     while n > 0
@@ -418,7 +418,7 @@ function Base.unsafe_read(s::ZstdDecompressorStream, p::Ptr{UInt8}, n::UInt)
     return nothing
 end
 
-function Base.readbytes!(s::ZstdDecompressorStream, b::AbstractVector{UInt8}, nb=length(b))
+function Base.readbytes!(s::ZstandardDecompressorStream, b::AbstractVector{UInt8}, nb=length(b))
     got = 0
     d = s.d
     while got < nb && !eof(s)
@@ -431,7 +431,7 @@ function Base.readbytes!(s::ZstdDecompressorStream, b::AbstractVector{UInt8}, nb
     return got
 end
 
-function Base.read(s::ZstdDecompressorStream)
+function Base.read(s::ZstandardDecompressorStream)
     out = UInt8[]
     d = s.d
     while !eof(s)
@@ -443,18 +443,18 @@ end
 
 # At most `nb` bytes: start small and let readbytes! grow the vector as data
 # arrives, rather than allocating `nb` bytes up front.
-function Base.read(s::ZstdDecompressorStream, nb::Integer)
+function Base.read(s::ZstandardDecompressorStream, nb::Integer)
     nb < 0 && throw(ArgumentError("nb must be non-negative, got $nb"))
     b = Vector{UInt8}(undef, min(Int(nb), 1 << 16))
     return resize!(b, readbytes!(s, b, nb))
 end
 
 # ---------------------------------------------------------------------------
-# ZstdCompressorStream
+# ZstandardCompressorStream
 # ---------------------------------------------------------------------------
 
 """
-    ZstdCompressorStream(io::IO; level=3, checksum=false, dict=nothing, pledged_size=nothing,
+    ZstandardCompressorStream(io::IO; level=3, checksum=false, dict=nothing, pledged_size=nothing,
                          close_io=true, size_hint=nothing, content_size=true, dict_id=true,
                          magicless=false, long=false, nthreads=1, window_log, ...)
 
@@ -491,7 +491,7 @@ or `long`.
 `close` finishes the frame and, if `close_io` is true, closes `io` (pass
 `close_io=false` to keep writing to `io`, e.g. an `IOBuffer` read afterwards).
 """
-mutable struct ZstdCompressorStream <: IO
+mutable struct ZstandardCompressorStream <: IO
     io::IO
     sc::StreamCompressor
     closed::Bool
@@ -499,7 +499,7 @@ mutable struct ZstdCompressorStream <: IO
     flushed::Int         # compressed bytes written to io
 end
 
-function ZstdCompressorStream(io::IO; level::Union{Nothing,Integer}=nothing, checksum::Bool=false,
+function ZstandardCompressorStream(io::IO; level::Union{Nothing,Integer}=nothing, checksum::Bool=false,
                               dict::Union{Nothing,ZstdDictionary,PreparedDictionary}=nothing,
                               pledged_size::Union{Nothing,Integer}=nothing, close_io::Bool=true,
                               size_hint::Union{Nothing,Integer}=nothing,
@@ -514,11 +514,11 @@ function ZstdCompressorStream(io::IO; level::Union{Nothing,Integer}=nothing, che
     expect = pledged_size !== nothing ? Int(pledged_size) : size_hint !== nothing ? Int(size_hint) :
              prefix === nothing ? 0 : length(prefix)
     params = prefix_params(params, prefix, level, expect)
-    ZstdCompressorStream(io, StreamCompressor(; level, checksum, dict, pledged_size, params, frame, size_hint,
+    ZstandardCompressorStream(io, StreamCompressor(; level, checksum, dict, pledged_size, params, frame, size_hint,
                                               long, nthreads), false, close_io, 0)
 end
 
-function drain!(s::ZstdCompressorStream)
+function drain!(s::ZstandardCompressorStream)
     sc = s.sc
     if sc.olen > 0
         GC.@preserve sc unsafe_write(s.io, pointer(sc.out), sc.olen)
@@ -527,32 +527,32 @@ function drain!(s::ZstdCompressorStream)
     end
 end
 
-function stream_progress(s::ZstdCompressorStream)
+function stream_progress(s::ZstandardCompressorStream)
     sc = s.sc
     return (; ingested=sc.total, consumed=sc.consumed, produced=s.flushed + sc.olen, flushed=s.flushed)
 end
 
-function Base.unsafe_write(s::ZstdCompressorStream, p::Ptr{UInt8}, n::UInt)
+function Base.unsafe_write(s::ZstandardCompressorStream, p::Ptr{UInt8}, n::UInt)
     s.closed && throw(ArgumentError("stream is closed"))
     stream_write!(s.sc, unsafe_wrap(Array, p, Int(n)))
     drain!(s)
     return Int(n)
 end
 
-Base.write(s::ZstdCompressorStream, x::UInt8) = (r = Ref(x); GC.@preserve r unsafe_write(s, Base.unsafe_convert(Ptr{UInt8}, r), UInt(1)))
+Base.write(s::ZstandardCompressorStream, x::UInt8) = (r = Ref(x); GC.@preserve r unsafe_write(s, Base.unsafe_convert(Ptr{UInt8}, r), UInt(1)))
 
-function Base.flush(s::ZstdCompressorStream)
+function Base.flush(s::ZstandardCompressorStream)
     s.closed && return
     stream_flush!(s.sc)
     drain!(s)
     flush(s.io)
 end
 
-Base.isopen(s::ZstdCompressorStream) = !s.closed
-Base.isreadable(::ZstdCompressorStream) = false
-Base.iswritable(s::ZstdCompressorStream) = !s.closed
+Base.isopen(s::ZstandardCompressorStream) = !s.closed
+Base.isreadable(::ZstandardCompressorStream) = false
+Base.iswritable(s::ZstandardCompressorStream) = !s.closed
 
-function Base.close(s::ZstdCompressorStream)
+function Base.close(s::ZstandardCompressorStream)
     s.closed && return
     # Close (or flush) the wrapped io even if finishing the frame throws (a
     # pledge mismatch, a failed job): the frame cannot be completed anyway.

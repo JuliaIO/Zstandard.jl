@@ -79,7 +79,7 @@ frame = compress(data; checksum=true)
 for (name, impl) in impls
     Zstandard.with_xxh64_implementation(impl) do
         td = best(run(@benchmarkable decompress($frame) seconds=seconds))
-        ts = best(run(@benchmarkable read(Zstandard.ZstdDecompressorStream(IOBuffer($frame))) seconds=seconds))
+        ts = best(run(@benchmarkable read(Zstandard.ZstandardDecompressorStream(IOBuffer($frame))) seconds=seconds))
         tc = best(run(@benchmarkable compress($data; level=1, checksum=true) seconds=seconds))
         @printf("%-*s %12.0f %12.0f %12.0f\n", w, name, mbs(length(data), td), mbs(length(data), ts),
                 mbs(length(data), tc))

@@ -1,4 +1,9 @@
 using Zstandard
+using Zstandard: frame_header, frame_content_size, frame_compressed_size, frame_dict_id,
+    skippable_frame, PreparedDictionary, prepare_dictionary, ZstdCompressionContext,
+    ZstdDecompressionContext, compress!, decompress!, compress_seekable, seek_table,
+    decompress_range, estimate_compression_memory, estimate_decompression_memory, compress_bound,
+    decompress_bound, stream_progress, ZstdSequence, generate_sequences, compress_sequences
 using Test
 using CodecZstd
 using TranscodingStreams
@@ -19,11 +24,11 @@ function make_text(n)
     return out[1:n]
 end
 
-const ZCS = Zstandard.ZstdCompressorStream
+const ZCS = Zstandard.ZstandardCompressorStream
 frame_header_checksum(c) = (c[5] >> 2) & 1 == 1
-const ZDS = Zstandard.ZstdDecompressorStream
+const ZDS = Zstandard.ZstandardDecompressorStream
 
-@testset "ZstdCompressorStream" begin
+@testset "ZstandardCompressorStream" begin
     for n in (0, 1, 1000, 131072, 131073, 700_000), level in (1, 3, 9, 17, 19), checksum in (false, true)
         data = make_text(n)
         buf = IOBuffer()
@@ -487,7 +492,7 @@ end
         # streaming, with a small window so the stream buffer is rebased many times
         for (w, chunk) in ((nothing, 100_003), (17, 30_001))
             buf = IOBuffer()
-            s = Zstandard.ZstdCompressorStream(buf; level, close_io=false, window_log=w)
+            s = Zstandard.ZstandardCompressorStream(buf; level, close_io=false, window_log=w)
             for part in Iterators.partition(data, chunk); write(s, part); end
             close(s)
             sc = take!(buf)
@@ -508,7 +513,7 @@ end
             x = lib[off+1:min(end, off + (1 << 20))]
             @test decompress(compress(x; level=17)) == x
             buf = IOBuffer()
-            s = Zstandard.ZstdCompressorStream(buf; level=13, close_io=false, window_log=17)
+            s = Zstandard.ZstandardCompressorStream(buf; level=13, close_io=false, window_log=17)
             for part in Iterators.partition(x, 50_001); write(s, part); end
             close(s)
             @test decompress(take!(buf)) == x
@@ -593,7 +598,7 @@ end
     @test transcode(CodecZstd.ZstdDecompressor, c) == data
     @test frame_content_size(transcode(ZstandardCompressor(content_size=false), data)) === nothing
     buf = IOBuffer()
-    s = Zstandard.ZstdCompressorStream(buf; pledged_size=length(data), content_size=false, close_io=false)
+    s = Zstandard.ZstandardCompressorStream(buf; pledged_size=length(data), content_size=false, close_io=false)
     write(s, data); close(s)
     c = take!(buf)
     @test frame_content_size(c) === nothing && decompress(c) == data
@@ -617,7 +622,7 @@ end
     @test decompress(lc; magicless=true) == data
     two = vcat(compress(data; magicless=true), lc)
     @test decompress(two; magicless=true) == vcat(data, data)
-    @test read(Zstandard.ZstdDecompressorStream(IOBuffer(two); magicless=true)) == vcat(data, data)
+    @test read(Zstandard.ZstandardDecompressorStream(IOBuffer(two); magicless=true)) == vcat(data, data)
     @test transcode(ZstandardDecompressor(magicless=true), two) == vcat(data, data)
     @test decompress(ZstdDecompressionContext(magicless=true), two) == vcat(data, data)
     @test decompress(compress(ZstdCompressionContext(magicless=true), data); magicless=true) == data
@@ -625,7 +630,7 @@ end
     @test frame_header(compress(data; magicless=true); magicless=true).content_size == length(data)
     # size hint: parameters for the hinted size, no recorded size, any amount of input
     buf = IOBuffer()
-    s = Zstandard.ZstdCompressorStream(buf; size_hint=2000, close_io=false)
+    s = Zstandard.ZstandardCompressorStream(buf; size_hint=2000, close_io=false)
     write(s, data); close(s)
     c = take!(buf)
     @test frame_header(c).window_size == 2048
@@ -639,7 +644,7 @@ end
     c = take!(buf)
     @test frame_header(c).window_size == 1 << 14
     @test decompress(c) == data
-    @test_throws ArgumentError Zstandard.ZstdCompressorStream(IOBuffer(); size_hint=-1)
+    @test_throws ArgumentError Zstandard.ZstandardCompressorStream(IOBuffer(); size_hint=-1)
 end
 
 @testset "Reference prefix" begin
@@ -659,7 +664,7 @@ end
         @test frame_header(c).window_size >= length(old)          # reaches back into the prefix
         @test decompress(c; prefix=old) == new
         @test decompress(ZstdDecompressionContext(prefix=old), c) == new
-        @test read(Zstandard.ZstdDecompressorStream(IOBuffer(c); prefix=old)) == new
+        @test read(Zstandard.ZstandardDecompressorStream(IOBuffer(c); prefix=old)) == new
         f = tempname(); write(f, c)
         @test read(`$(Zstd_jll.zstd()) -q -d --long=27 --patch-from=$fold -c $f`) == new   # libzstd agrees
         @test compress(ZstdCompressionContext(; prefix=old, kw...), new) == c
@@ -670,7 +675,7 @@ end
     @test decompress(z; prefix=old) == new
     # streaming compression with a prefix
     buf = IOBuffer()
-    s = Zstandard.ZstdCompressorStream(buf; prefix=old, pledged_size=length(new), close_io=false)
+    s = Zstandard.ZstandardCompressorStream(buf; prefix=old, pledged_size=length(new), close_io=false)
     for part in Iterators.partition(new, 70_001); write(s, part); end
     close(s)
     c = take!(buf)
@@ -703,14 +708,14 @@ end
     parts = [make_text(n) for n in (5_000, 200_000, 17, 0, 90_000)]
     for level in (1, 3, 9, 19), checksum in (false, true)
         io = IOBuffer()
-        s = Zstandard.ZstdCompressorStream(io; level, checksum, close_io=false)
+        s = Zstandard.ZstandardCompressorStream(io; level, checksum, close_io=false)
         written = UInt8[]
         for p in parts
             write(s, p); append!(written, p)
             flush(s); flush(s)                   # a second flush adds nothing
             sofar = Vector{UInt8}(view(io.data, 1:io.size))
             # everything written so far decodes from the unfinished frame
-            r = Zstandard.ZstdDecompressorStream(IOBuffer(sofar))
+            r = Zstandard.ZstandardDecompressorStream(IOBuffer(sofar))
             @test read(r, length(written)) == written
             @test lib_stream_decode(sofar, length(written) + 1) == written
         end
@@ -788,7 +793,7 @@ end
     @test estimate_compression_memory(level=3, long=true) > estimate_compression_memory(level=3)
     for level in (1, 3, 9)
         buf = IOBuffer()
-        s = Zstandard.ZstdCompressorStream(buf; level, close_io=false)
+        s = Zstandard.ZstandardCompressorStream(buf; level, close_io=false)
         for p in Iterators.partition(data, 100_000); write(s, p); end
         @test Base.summarysize(s.sc) < 1.1 * estimate_compression_memory(; level, streaming=true)
         pr = stream_progress(s)
@@ -802,7 +807,7 @@ end
         @test pr.flushed == pr.produced == length(c)
         # decoder side
         c2 = vcat(c, skippable_frame(UInt8[1, 2, 3]), compress(data[1:1000]))
-        r = Zstandard.ZstdDecompressorStream(IOBuffer(c2))
+        r = Zstandard.ZstandardDecompressorStream(IOBuffer(c2))
         @test stream_progress(r) == (; consumed=0, produced=0, frames=0)
         read(r, 10)
         @test stream_progress(r).produced >= 10
@@ -868,7 +873,7 @@ end
         s = generate_sequences(data; level, window_log=w)
         @test maximum(x -> x.offset, s) <= 1 << w
         c = compress(data; level, window_log=w)
-        @test read(Zstandard.ZstdDecompressorStream(IOBuffer(c); max_window_size=max(1 << w, 1024))) == data
+        @test read(Zstandard.ZstandardDecompressorStream(IOBuffer(c); max_window_size=max(1 << w, 1024))) == data
         @test transcode(CodecZstd.ZstdDecompressor, c) == data
     end
     # with a 128 KiB window, matches into the previous block are found
@@ -900,7 +905,7 @@ end
         @test median_(b) < 1.3 * target
         @test length(c) < 1.08 * length(compress(data; level))
         buf = IOBuffer()
-        s = Zstandard.ZstdCompressorStream(buf; level, target_block_size=target, close_io=false)
+        s = Zstandard.ZstandardCompressorStream(buf; level, target_block_size=target, close_io=false)
         write(s, data); close(s)
         @test decompress(take!(buf)) == data
     end
@@ -929,7 +934,7 @@ end
     c = compress(t)
     @test decompress_bound(c) == length(t)
     buf = IOBuffer()
-    s = Zstandard.ZstdCompressorStream(buf; close_io=false)
+    s = Zstandard.ZstandardCompressorStream(buf; close_io=false)
     write(s, t); close(s)
     u = take!(buf)                                           # no content size recorded
     @test decompress_bound(u) >= length(t)
@@ -947,7 +952,7 @@ end
     data = vcat(a, noise, a)                      # the second copy is beyond the default window
     function streamed(d; chunk=100_003, kw...)
         buf = IOBuffer()
-        s = Zstandard.ZstdCompressorStream(buf; close_io=false, kw...)
+        s = Zstandard.ZstandardCompressorStream(buf; close_io=false, kw...)
         for p in Iterators.partition(d, chunk); write(s, p); end
         close(s)
         return take!(buf)
@@ -977,10 +982,10 @@ end
     end
     # flush mid-stream with threads: everything so far decodes
     buf = IOBuffer()
-    s = Zstandard.ZstdCompressorStream(buf; level=3, nthreads=2, close_io=false)
+    s = Zstandard.ZstandardCompressorStream(buf; level=3, nthreads=2, close_io=false)
     write(s, big[1:5_000_000]); flush(s)
     sofar = Vector{UInt8}(view(buf.data, 1:buf.size))
-    @test read(Zstandard.ZstdDecompressorStream(IOBuffer(sofar)), 5_000_000) == big[1:5_000_000]
+    @test read(Zstandard.ZstandardDecompressorStream(IOBuffer(sofar)), 5_000_000) == big[1:5_000_000]
     write(s, big[5_000_001:end]); close(s)
     @test decompress(take!(buf)) == big
     # empty and tiny streams
@@ -990,9 +995,9 @@ end
     # the TranscodingStreams codec takes the same keywords
     @test transcode(ZstandardDecompressor(), transcode(ZstandardCompressor(long=true), data)) == data
     @test transcode(ZstandardDecompressor(), transcode(ZstandardCompressor(nthreads=2), big)) == big
-    @test_throws ArgumentError Zstandard.ZstdCompressorStream(IOBuffer(); nthreads=2, long=true)
-    @test_throws ArgumentError Zstandard.ZstdCompressorStream(IOBuffer(); nthreads=2, dict=ZstdDictionary(a[1:1000]))
-    @test_throws ArgumentError Zstandard.ZstdCompressorStream(IOBuffer(); nthreads=0)
+    @test_throws ArgumentError Zstandard.ZstandardCompressorStream(IOBuffer(); nthreads=2, long=true)
+    @test_throws ArgumentError Zstandard.ZstandardCompressorStream(IOBuffer(); nthreads=2, dict=ZstdDictionary(a[1:1000]))
+    @test_throws ArgumentError Zstandard.ZstandardCompressorStream(IOBuffer(); nthreads=0)
 end
 
 @testset "Decoder output sizing without a recorded content size" begin
@@ -1000,7 +1005,7 @@ end
     raw = UInt8[(x = x * 6364136223846793005 + 1442695040888963407; (x >> 56) % UInt8) for _ in 1:3_000_000]
     for d in (raw, make_text(3_000_000))
         buf = IOBuffer()
-        s = Zstandard.ZstdCompressorStream(buf; close_io=false)
+        s = Zstandard.ZstandardCompressorStream(buf; close_io=false)
         write(s, d); close(s)
         c = take!(buf)
         @test frame_content_size(c) === nothing

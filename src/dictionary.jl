@@ -117,7 +117,7 @@ copy, such as the same file parsed twice) is allowed. A `default` with a
 nonzero ID is also selected by its ID.
 
 Anywhere a decoder accepts a `ZstdDictionary` (`decompress`,
-`ZstdDecompressionContext`, `ZstdDecompressorStream`, `ZstandardDecompressor`,
+`ZstdDecompressionContext`, `ZstandardDecompressorStream`, `ZstandardDecompressor`,
 `decompress_range`), it also accepts a `ZstdDictionarySet` or a vector of
 dictionaries.
 
