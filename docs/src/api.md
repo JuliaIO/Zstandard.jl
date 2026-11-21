@@ -9,6 +9,14 @@
 Modules = [Zstandard]
 ```
 
+### Streams
+
+```@docs
+ZstandardCompressorStream
+ZstandardDecompressorStream
+Zstandard.stream_progress
+```
+
 ### Dictionaries and errors
 
 ```@docs
@@ -18,18 +26,14 @@ parse_dictionary
 ZstdError
 ```
 
-## Streaming
-
-```@autodocs
-Modules = [Zstandard.Streaming]
-```
-
 ## Internals
 
 These are implementation details and may change without notice.
 
 ```@autodocs
-Modules = [Zstandard.Decoder, Zstandard.Encoder, Zstandard.XXHash]
+Modules = [Zstandard.Decoder, Zstandard.Encoder, Zstandard.Streaming, Zstandard.XXHash]
 Filter = t -> !(t in (Zstandard.ZstdDictionary, Zstandard.ZstdDictionarySet,
-                      Zstandard.parse_dictionary, Zstandard.ZstdError))
+                      Zstandard.parse_dictionary, Zstandard.ZstdError,
+                      Zstandard.ZstandardCompressorStream, Zstandard.ZstandardDecompressorStream,
+                      Zstandard.stream_progress))
 ```

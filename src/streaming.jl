@@ -10,7 +10,7 @@ import ..Encoder: StreamCompressor, stream_write!, stream_flush!, stream_finish!
                   parameter_overrides
 using ..XXHash: ChecksumState, checksum_update!, checksum_digest
 
-export ZstandardDecompressorStream, ZstandardCompressorStream, StreamDecoder
+export ZstandardDecompressorStream, ZstandardCompressorStream
 
 # ---------------------------------------------------------------------------
 # Push-based decoder core
@@ -31,9 +31,10 @@ const U_CKSUM = 7
 """
     StreamDecoder(dict=nothing)
 
-Incremental Zstandard decoder. Feed input with [`feed!`](@ref) (at most
-[`needed`](@ref) bytes are consumed per call); decoded bytes are available in
-`d.out[d.rpos:d.wpos]`.
+Incremental Zstandard decoder behind `ZstandardDecompressorStream` and the
+`ZstandardDecompressor` codec. Input is fed with [`feed!`](@ref) (at most
+[`needed`](@ref) bytes per call); decoded bytes collect in an internal buffer.
+Internal: use `ZstandardDecompressorStream` instead.
 """
 mutable struct StreamDecoder
     dict::DecodeDict                    # dictionary, or set to choose from per frame
