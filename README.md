@@ -1,5 +1,7 @@
 # Zstandard.jl
 
+[![Docs (dev)](https://img.shields.io/badge/docs-dev-blue.svg)](https://juliaio.github.io/Zstandard.jl/dev/)
+
 A pure Julia implementation of the [Zstandard](https://facebook.github.io/zstd/) (RFC 8878) compression algorithm, with no dependencies (TranscodingStreams.jl support is an optional extension).
 
 ## Features
