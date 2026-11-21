@@ -1,3 +1,0 @@
-[submodule "dependencies/XXHashNative.jl"]
-	path = dependencies/XXHashNative.jl
-	url = https://github.com/Moelf/XXHashNative.jl
