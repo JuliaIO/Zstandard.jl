@@ -161,7 +161,7 @@ const WORDS_B = ["<div class=\"", "\">", "</div>", "<span>", "</span>", "href=",
         @test Zstandard.dictionary_content(raw) == raw.content
         @test Zstandard.dictionary_content(da) == da.content
         @test Zstandard.dictionary_id(da) == frame_dict_id(frames[1])
-        @test Base.ispublic(Zstandard, :dictionary_id) || VERSION < v"1.11"
+        @test VERSION < v"1.11" || Base.ispublic(Zstandard, :dictionary_id)
         # Base.parse is parse_dictionary
         bytes = finalize_dictionary(da.content, samples_a; dict_id=da.id)
         @test Zstandard.dictionary_id(parse(ZstandardDictionary, bytes)) == da.id
