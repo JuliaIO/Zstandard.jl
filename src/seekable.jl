@@ -175,7 +175,7 @@ read). Only frames overlapping `range` are decoded. `dict` may be a
 """
 function decompress_range(src::Union{AbstractVector{UInt8},IO}, range::AbstractUnitRange{<:Integer};
                           table::ZstdSeekTable=seek_table(src),
-                          dict::Union{DecodeDict,AbstractVector{ZstdDictionary}}=nothing)
+                          dict::DictArg=nothing)
     t = table
     dict = decode_dict(dict)
     isempty(range) && return UInt8[]

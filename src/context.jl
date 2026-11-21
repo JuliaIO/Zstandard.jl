@@ -114,7 +114,7 @@ mutable struct ZstdDecompressionContext
     dict::DecodeDict
     magicless::Bool
 end
-ZstdDecompressionContext(; dict::Union{DecodeDict,AbstractVector{ZstdDictionary}}=nothing,
+ZstdDecompressionContext(; dict::DictArg=nothing,
                          magicless::Bool=false, prefix::Union{Nothing,AbstractVector{UInt8}}=nothing) =
     ZstdDecompressionContext(DecoderState(), Encoder.prefix_dict(prefix, decode_dict(dict)), magicless)
 

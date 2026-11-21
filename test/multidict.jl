@@ -53,6 +53,20 @@ const WORDS_B = ["<div class=\"", "\">", "</div>", "<span>", "</span>", "href=",
         @test_throws ArgumentError ZstdDictionarySet(raw; default=ZstdDictionary(UInt8[1, 2, 3]))
         @test_throws ArgumentError ZstdDictionarySet(Any[da, "not a dictionary"])
         @test length(ZstdDictionarySet()) == 0
+        # an equal copy (the same file parsed twice) is not a clash
+        da2 = parse_dictionary(train_dictionary(samples_a; dict_size=8192))
+        @test da2 !== da && length(ZstdDictionarySet(da, db, da2)) == 2
+        @test length(ZstdDictionarySet(raw, ZstdDictionary(copy(raw.content)))) == 1
+        # haskey and getindex take any integer
+        @test !haskey(s, -1) && !haskey(s, Int64(typemax(UInt32)) + 1) && !haskey(s, 12345)
+        @test s[da.id] === da && s[Int(db.id)] === db && sr[0] === raw
+        @test_throws KeyError s[0]
+        @test_throws KeyError s[-1]
+        @test_throws KeyError s[Int64(typemax(UInt32)) + 1]
+        # iteration
+        @test collect(sr) == [da, raw, db] && eltype(sr) == ZstdDictionary
+        @test Set(d.id for d in sd) == Set([da.id, db.id]) && length(sd) == 2
+        @test [d for d in ZstdDictionarySet()] == ZstdDictionary[]
     end
 
     # Frames using dictionary A, dictionary B, no dictionary and the raw
@@ -80,7 +94,12 @@ const WORDS_B = ["<div class=\"", "\">", "</div>", "<span>", "</span>", "href=",
         for nt in (1, 4)
             @test decompress(data, set; nthreads=nt) == expected
             @test decompress(data, [da, db, raw]; nthreads=nt) == expected
+            @test decompress(data, Any[da, db, raw]; nthreads=nt) == expected
         end
+        @test decompress(data, (da, db, raw) |> collect) == expected
+        # raw bytes are not a dictionary
+        @test_throws ArgumentError decompress(data, raw.content)
+        @test_throws ArgumentError decompress(data, Any[da, raw.content])
         @test decompress(view(data, 1:length(data)), set) == expected
         # skippable frames between dictionary frames
         sk = vcat(frames[1], skippable_frame(UInt8[1, 2, 3]), frames[2])
@@ -97,12 +116,14 @@ const WORDS_B = ["<div class=\"", "\">", "</div>", "<span>", "</span>", "href=",
         out = UInt8[]
         @test decompress!(ctx, out, data) === out && out == expected
         @test ZstdDecompressionContext(; dict=[da, db, raw]).dict isa ZstdDictionarySet
+        @test decompress(ZstdDecompressionContext(; dict=Any[da, db, raw]), data) == expected
         @test occursin("dicts", sprint(show, ctx))
     end
 
     @testset "stream" begin
         @test read(Zstandard.ZstdDecompressorStream(IOBuffer(data), set)) == expected
         @test read(Zstandard.ZstdDecompressorStream(IOBuffer(data), [da, db, raw])) == expected
+        @test read(Zstandard.ZstdDecompressorStream(IOBuffer(data), Any[da, db, raw])) == expected
         s = Zstandard.ZstdDecompressorStream(IOBuffer(data), set)
         got = UInt8[]
         while !eof(s)
@@ -120,6 +141,7 @@ const WORDS_B = ["<div class=\"", "\">", "</div>", "<span>", "</span>", "href=",
         codec = ZstandardDecompressor(; dict=[da, db, raw])
         @test transcode(codec, data) == expected
         @test transcode(codec, frames[2]) == texts[2]         # codec reuse
+        @test transcode(ZstandardDecompressor(; dict=Any[da, db, raw]), data) == expected
         @test read(TranscodingStream(ZstandardDecompressor(; dict=set), IOBuffer(data))) == expected
     end
 
@@ -127,6 +149,7 @@ const WORDS_B = ["<div class=\"", "\">", "</div>", "<span>", "</span>", "href=",
         a = compress_seekable(expected; frame_size=10_000, dict=db)
         @test decompress_range(a, 12_345:56_789; dict=set) == expected[12_345:56_789]
         @test decompress_range(a, 1:length(expected); dict=[da, db]) == expected
+        @test decompress_range(a, 1:length(expected); dict=Any[da, db]) == expected
         @test_throws ZstdError decompress_range(a, 1:10; dict=ZstdDictionarySet(da))
     end
 

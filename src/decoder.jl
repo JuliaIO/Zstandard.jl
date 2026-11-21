@@ -17,7 +17,7 @@ module Decoder
 using ..XXHash: content_checksum
 
 export ZstdError, ZstdDictionary, ZstdDictionarySet, parse_dictionary, DecoderState, decompress_frames,
-       DecodeDict, decode_dict, frame_dict,
+       DecodeDict, DictArg, decode_dict, frame_dict,
        FrameInfo, read_frame_info
 
 const MAGIC_NUMBER = 0xFD2FB528
@@ -616,19 +616,34 @@ by the dictionary ID in its header:
 
 - A frame with a nonzero ID uses the dictionary with that ID; if the set has
   none, decoding throws a [`ZstdError`](@ref).
-- A frame with ID 0 (written without a dictionary, with a raw-content
-  dictionary, or with `dict_id=false`) uses `default`, or no dictionary when
-  `default` is `nothing`.
+- A frame with ID 0 uses `default`, or no dictionary when `default` is
+  `nothing`.
+
+A frame header does not say whether an ID-0 frame was written without a
+dictionary, with a raw-content dictionary, or with a formatted dictionary and
+`dict_id=false`, so every ID-0 frame gets the same `default`. A raw-content
+default is harmless for frames written without a dictionary. A formatted
+default is not in general: frames are decoded starting from its repeat
+offsets, so if those differ from the standard 1, 4, 8 (trained dictionaries
+keep the standard ones), a frame written without a dictionary can decode to
+wrong bytes. Use a formatted `default` only when the ID-0 frames in the data
+were written with it.
 
 A dictionary with ID 0 (raw content) among `dicts` becomes the default; at
-most one default can be given. Two different dictionaries with the same ID
-throw an `ArgumentError`. A `default` with a nonzero ID is also selected by
-its ID.
+most one default can be given. Two dictionaries with the same ID but different
+contents throw an `ArgumentError`; repeating the same dictionary (or an equal
+copy, such as the same file parsed twice) is allowed. A `default` with a
+nonzero ID is also selected by its ID.
 
 Anywhere a decoder accepts a `ZstdDictionary` (`decompress`,
 `ZstdDecompressionContext`, `ZstdDecompressorStream`, `ZstandardDecompressor`,
 `decompress_range`), it also accepts a `ZstdDictionarySet` or a vector of
-`ZstdDictionary`.
+dictionaries.
+
+The set iterates over its dictionaries (the default included); `s[id]`
+returns the dictionary a frame with dictionary ID `id` would use (`id = 0`:
+the default), throwing a `KeyError` if there is none, and `haskey(s, id)`
+tells whether there is one.
 
 ```julia
 d1 = parse_dictionary(train_dictionary(samples1))
@@ -640,42 +655,68 @@ decompress(data, ZstdDictionarySet(d1, d2)) == vcat(a, b)
 struct ZstdDictionarySet
     dicts::Dict{UInt32,ZstdDictionary}
     default::Union{Nothing,ZstdDictionary}
+    all::Vector{ZstdDictionary}      # each dictionary once, in the order given
     function ZstdDictionarySet(dicts::Union{AbstractVector,Tuple}; default::Union{Nothing,ZstdDictionary}=nothing)
         byid = Dict{UInt32,ZstdDictionary}()
+        all = ZstdDictionary[]
         function add!(d)
-            get(byid, d.id, d) === d ||
-                throw(ArgumentError("duplicate dictionary ID $(d.id) in dictionary set"))
-            byid[d.id] = d
+            old = get(byid, d.id, nothing)
+            if old === nothing
+                byid[d.id] = d
+                push!(all, d)
+            elseif !same_dictionary(old, d)
+                throw(ArgumentError("dictionary set has two different dictionaries with ID $(d.id)"))
+            end
         end
         def = default
-        def === nothing || def.id == 0 || add!(def)
+        if def !== nothing
+            def.id == 0 ? push!(all, def) : add!(def)
+        end
         for d in dicts
             d isa ZstdDictionary ||
                 throw(ArgumentError("dictionary set elements must be ZstdDictionary, got $(typeof(d))"))
-            if d.id == 0
-                def === nothing ||
-                    throw(ArgumentError("dictionary set has more than one default (ID 0) dictionary"))
-                def = d
-            else
+            if d.id != 0
                 add!(d)
+            elseif def === nothing
+                def = d
+                push!(all, d)
+            elseif !(def.id == 0 && same_dictionary(def, d))
+                throw(ArgumentError("dictionary set has more than one default (ID 0) dictionary"))
             end
         end
-        return new(byid, def)
+        return new(byid, def, all)
     end
 end
 ZstdDictionarySet(dicts::ZstdDictionary...; default::Union{Nothing,ZstdDictionary}=nothing) =
     ZstdDictionarySet(dicts; default)
 
-Base.length(s::ZstdDictionarySet) = length(s.dicts) + (s.default === nothing || s.default.id != 0 ? 0 : 1)
-Base.haskey(s::ZstdDictionarySet, id::Integer) = id == 0 ? s.default !== nothing : haskey(s.dicts, UInt32(id))
+# Equal contents decode identically, whether or not they are the same object
+same_dictionary(a::ZstdDictionary, b::ZstdDictionary) =
+    a === b || all(getfield(a, f) == getfield(b, f) for f in fieldnames(ZstdDictionary))
+
+Base.length(s::ZstdDictionarySet) = length(s.all)
+Base.eltype(::Type{ZstdDictionarySet}) = ZstdDictionary
+Base.iterate(s::ZstdDictionarySet, i::Int=1) = i > length(s.all) ? nothing : (s.all[i], i + 1)
+Base.haskey(s::ZstdDictionarySet, id::Integer) =
+    id == 0 ? s.default !== nothing : (0 < id <= typemax(UInt32) && haskey(s.dicts, UInt32(id)))
+function Base.getindex(s::ZstdDictionarySet, id::Integer)
+    haskey(s, id) || throw(KeyError(id))
+    return id == 0 ? s.default : s.dicts[UInt32(id)]
+end
 Base.show(io::IO, s::ZstdDictionarySet) =
     print(io, "ZstdDictionarySet(", join(sort!(collect(keys(s.dicts))), ", "),
           s.default === nothing ? "" : "; default=$(s.default.id)", ")")
 
-# What a decoder accepts as its dictionary argument
+# What a decoder accepts as its dictionary argument (public entry points also
+# take a vector of dictionaries, converted to a set by `decode_dict`)
 const DecodeDict = Union{Nothing,ZstdDictionary,ZstdDictionarySet}
+const DictArg = Union{DecodeDict,AbstractVector}
 decode_dict(d::DecodeDict) = d
-decode_dict(v::AbstractVector{ZstdDictionary}) = ZstdDictionarySet(v)
+function decode_dict(v::AbstractVector)
+    v isa AbstractVector{UInt8} &&
+        throw(ArgumentError("a dictionary must be a ZstdDictionary: use parse_dictionary(bytes)"))
+    return ZstdDictionarySet(v)
+end
 
 # The dictionary for a frame whose header has dictionary ID `id`
 function frame_dict(dict::Nothing, id::UInt32)

@@ -2,7 +2,7 @@
 
 module Streaming
 
-import ..Decoder: DecoderState, ZstdDictionary, DecodeDict, decode_dict, frame_dict, FrameInfo, read_frame_info, reset_frame!,
+import ..Decoder: DecoderState, ZstdDictionary, DecodeDict, DictArg, decode_dict, frame_dict, FrameInfo, read_frame_info, reset_frame!,
                   decode_compressed_block!, memset!, zerr, ensure_capacity!, ZstdError,
                   MAGIC_NUMBER, SKIPPABLE_MAGIC_START, SKIPPABLE_MASK, BLOCK_SIZE_MAX, WILDCOPY_SLACK
 import ..Encoder: StreamCompressor, stream_write!, stream_flush!, stream_finish!, PreparedDictionary, FrameOptions,
@@ -346,7 +346,7 @@ mutable struct ZstdDecompressorStream <: IO
     err::Union{Nothing,ZstdError}   # sticky decoding error
 end
 
-ZstdDecompressorStream(io::IO, dict::Union{DecodeDict,AbstractVector{ZstdDictionary}}=nothing;
+ZstdDecompressorStream(io::IO, dict::DictArg=nothing;
                        max_window_size::Integer=DEFAULT_MAX_WINDOW_SIZE, magicless::Bool=false,
                        prefix::Union{Nothing,AbstractVector{UInt8}}=nothing) =
     ZstdDecompressorStream(io, StreamDecoder(prefix_dict(prefix, decode_dict(dict)); max_window_size, magicless),

@@ -93,7 +93,7 @@ With `magicless=true`, frames are read without magic numbers (as written by
 `compress`).
 """
 function decompress(data::AbstractVector{UInt8},
-                    dict::Union{DecodeDict,AbstractVector{ZstdDictionary}}=nothing;
+                    dict::DictArg=nothing;
                     nthreads::Integer=Threads.nthreads(), magicless::Bool=false,
                     prefix::Union{Nothing,AbstractVector{UInt8}}=nothing)
     nthreads < 1 && throw(ArgumentError("nthreads must be at least 1"))

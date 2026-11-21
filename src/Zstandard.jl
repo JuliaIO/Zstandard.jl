@@ -20,7 +20,7 @@ include("xxhash.jl")
 
 include("decoder.jl")
 using .Decoder: ZstdError, ZstdDictionary, ZstdDictionarySet, parse_dictionary, DecoderState, decompress_frames,
-                DecodeDict, decode_dict
+                DecodeDict, DictArg, decode_dict
 
 include("frameinfo.jl")
 

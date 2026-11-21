@@ -104,7 +104,7 @@ mutable struct ZstandardDecompressorCodec <: Codec
     frames_reported::Int
 end
 
-Zstandard.ZstandardDecompressor(; dict::Union{Zstandard.Decoder.DecodeDict,AbstractVector{ZstdDictionary}}=nothing,
+Zstandard.ZstandardDecompressor(; dict::Zstandard.Decoder.DictArg=nothing,
                                 max_window_size::Integer=Zstandard.Streaming.DEFAULT_MAX_WINDOW_SIZE,
                                 magicless::Bool=false) =
     (d = Zstandard.Decoder.decode_dict(dict);
