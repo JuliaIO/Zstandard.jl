@@ -1,7 +1,7 @@
 name = "Zstandard"
 uuid = "1affa58d-55fd-4c2a-ac15-0c0ae7390835"
 authors = ["Mark Kittisopikul <markkitt@gmail.com>"]
-version = "0.1.1"
+version = "1.0.0"
 
 [deps]
 ScopedValues = "7e506255-f358-4e82-b7e4-beb19740aa63"
